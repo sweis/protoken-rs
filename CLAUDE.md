@@ -87,7 +87,46 @@ message SignedToken {
 7. Have the command line tool be able to take a verification key and validate a token against the current time.
 8. Set up test vectors and unit tests. Use mock clocks to test cases where tokens are expired. Also test corrupting every field of a signed token in isolation and verifying that they will be rejected as expected.
 
+## Decisions
+
+### Asymmetric Signature: Ed25519 (decided 2026-02-10)
+Chose Ed25519 over P-256 after researching performance, token size, FIPS compliance,
+security properties, Rust ecosystem, and adoption. Key factors: deterministic nonces
+(eliminates nonce-reuse key compromise), FIPS 186-5 approval (Feb 2023), equivalent
+performance and size, alignment with modern token designs (PASETO, Biscuit).
+See [research-p256-vs-ed25519.md](research-p256-vs-ed25519.md) for full analysis.
+
+### Deterministic Serialization (decided 2026-02-10)
+Using a custom fixed-layout binary format instead of protobuf encoding for the wire format.
+Protobuf encoding is not deterministic across implementations. Our format uses fixed
+positions, big-endian integers, and sizes determined by (algorithm, key_id_type).
+See [design-serialization.md](design-serialization.md) for the full specification.
+
+### Dependencies (decided 2026-02-10)
+- `ring` for all cryptography (HMAC-SHA256, Ed25519, SHA-256). Battle-tested BoringSSL backend.
+- `clap` (derive) for CLI parsing.
+- `serde` + `serde_json` for JSON output.
+- `humantime` for duration parsing.
+- `base64`, `hex` for encoding.
+- `thiserror` for error types.
+
+## Implementation Status
+
+All TODO items 1-8 are implemented:
+- `src/types.rs` - Core types (Version, Algorithm, KeyIdentifier, Payload, SignedToken)
+- `src/serialize.rs` - Deterministic binary serialization/deserialization
+- `src/sign.rs` - HMAC-SHA256 and Ed25519 signing
+- `src/verify.rs` - Verification with key hash matching and expiry checking
+- `src/main.rs` - CLI tool with `inspect`, `sign`, `verify`, `generate-key` commands
+- `src/error.rs` - Error types
+- 25 unit tests including byte-level corruption tests for both algorithms
+
 ## Research Prior Art
 
-Research prior art: JWT, x509, Macaroons, Biscuits, CWTs. Look at all their standard fields or claims. Create a table comparing what is common across them and what is unique. 
-
+Completed. See [research-prior-art.md](research-prior-art.md) for full comparison of
+JWT, x509, Macaroons, Biscuit, and CWT. Key takeaways:
+- `exp`, `nbf`, `iat` are universal temporal claims
+- `iss`, `sub`, `aud` are the core identity triple (future additions)
+- Binary encoding (CWT ~194B) significantly beats JSON (JWT ~300-400B)
+- Our 51-83 byte tokens are competitive with the most compact formats
+- Protoken's single-algorithm approach avoids JWT's algorithm confusion attacks
