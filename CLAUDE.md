@@ -2,6 +2,12 @@
 
 Protokens are designed to be a simple, fast replacemenmt for JWTs, ad hoc tokens, or in some cases x509 certificates. 
 
+## Notes for Claude
+* Use this file, CLAUDE.md, to record decisions or lessons along the way. Create new .md files if necessary to record research findings. Take good notes and include links to references, but do not be overly wordy.
+* Try to be concicse and clear in all documentation and comments.
+* Use care chosing dependencies and try to use the most widely used, common tools for the job. Do not reinvent new code if it is not necessary.
+* Since this is security-focused software, be especially cognizant and aware of security decisions. This software will consume untrusted input and needs to be designed to be able to handle any malformed or malicious input given to it.
+
 ## Design Guidelines
 1. The wire format of the tokens will be defined as [Protocol Buffers](https://protobuf.dev/) (protobufs) using proto3.
 2. These will be signed tokens that support a single symmetric MAC and a single asymmetric signature option.
