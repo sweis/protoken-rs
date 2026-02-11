@@ -264,6 +264,29 @@ mod tests {
     }
 
     #[test]
+    fn test_hmac_corrupt_every_byte_with_scopes() {
+        let key = b"scope-corruption-key";
+        let claims = Claims {
+            expires_at: u64::MAX,
+            scopes: vec!["admin".into(), "read".into(), "write".into()],
+            ..Default::default()
+        };
+
+        let token_bytes = sign_hmac(key, claims);
+
+        for i in 0..token_bytes.len() {
+            let mut corrupted = token_bytes.clone();
+            corrupted[i] ^= 0x01;
+
+            let result = verify_hmac(key, &corrupted, 2000);
+            assert!(
+                result.is_err(),
+                "corrupting byte {i} should cause verification failure"
+            );
+        }
+    }
+
+    #[test]
     fn test_hmac_corrupt_every_byte() {
         let key = b"corruption-test-key";
         let claims = Claims {

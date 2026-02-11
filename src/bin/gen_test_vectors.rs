@@ -101,6 +101,7 @@ fn main() {
             issued_at: 1699990000,
             subject: b"user:alice".to_vec(),
             audience: b"api.example.com".to_vec(),
+            ..Default::default()
         },
     };
     vectors.push(serde_json::json!({
@@ -143,6 +144,33 @@ fn main() {
         },
         "expected_hex": hex::encode(serialize_payload(&p5)),
         "expected_len": serialize_payload(&p5).len()
+    }));
+
+    // Vector 6: HMAC + key_hash, with scopes
+    let p6 = Payload {
+        metadata: Metadata {
+            version: Version::V0,
+            algorithm: Algorithm::HmacSha256,
+            key_identifier: KeyIdentifier::KeyHash([0x22; 8]),
+        },
+        claims: Claims {
+            expires_at: 1700000000,
+            scopes: vec!["admin".into(), "read".into(), "write".into()],
+            ..Default::default()
+        },
+    };
+    vectors.push(serde_json::json!({
+        "name": "payload_hmac_scopes",
+        "type": "payload",
+        "input": {
+            "algorithm": 1,
+            "key_id_type": 1,
+            "key_id_hex": "2222222222222222",
+            "expires_at": 1700000000u64,
+            "scopes": ["admin", "read", "write"]
+        },
+        "expected_hex": hex::encode(serialize_payload(&p6)),
+        "expected_len": serialize_payload(&p6).len()
     }));
 
     // === HMAC signed token vectors ===

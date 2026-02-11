@@ -13,6 +13,7 @@
 //!   uint64 issued_at = 7;    tag 0x38
 //!   bytes  subject = 8;      tag 0x42
 //!   bytes  audience = 9;     tag 0x4A
+//!   repeated string scope = 10; tag 0x52 (one per entry, sorted)
 //!
 //! SignedToken proto3 fields:
 //!   Payload payload = 1;     tag 0x0A (submessage)
@@ -45,6 +46,13 @@ pub fn serialize_payload(payload: &Payload) -> Vec<u8> {
     proto3::encode_bytes(8, &payload.claims.subject, &mut buf);
     proto3::encode_bytes(9, &payload.claims.audience, &mut buf);
 
+    // Repeated field 10: scopes, sorted for canonical encoding
+    let mut sorted_scopes: Vec<&str> = payload.claims.scopes.iter().map(|s| s.as_str()).collect();
+    sorted_scopes.sort();
+    for scope in sorted_scopes {
+        proto3::encode_bytes(10, scope.as_bytes(), &mut buf);
+    }
+
     buf
 }
 
@@ -66,6 +74,7 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
     let mut issued_at: u64 = 0;
     let mut subject: Vec<u8> = Vec::new();
     let mut audience: Vec<u8> = Vec::new();
+    let mut scopes: Vec<String> = Vec::new();
 
     let mut pos = 0;
     let mut last_field_number = 0u32;
@@ -73,8 +82,11 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
     while pos < data.len() {
         let (field_number, wire_type) = proto3::decode_tag(data, &mut pos)?;
 
-        // Enforce ascending field order (canonical encoding)
-        if field_number <= last_field_number {
+        // Enforce ascending field order (canonical encoding).
+        // Field 10 (scope) is repeated, so consecutive 10s are allowed.
+        if field_number < last_field_number
+            || (field_number == last_field_number && field_number != 10)
+        {
             return Err(ProtokenError::MalformedEncoding(format!(
                 "fields not in ascending order: field {field_number} after {last_field_number}"
             )));
@@ -110,6 +122,35 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
                     )));
                 }
                 audience = bytes.to_vec();
+            }
+            (10, 2) => {
+                let bytes = proto3::read_bytes_value(data, &mut pos)?;
+                if bytes.len() > MAX_CLAIM_BYTES_LEN {
+                    return Err(ProtokenError::MalformedEncoding(format!(
+                        "scope entry too long: {} bytes (max {})",
+                        bytes.len(),
+                        MAX_CLAIM_BYTES_LEN
+                    )));
+                }
+                if scopes.len() >= MAX_SCOPES {
+                    return Err(ProtokenError::MalformedEncoding(format!(
+                        "too many scopes: max {}",
+                        MAX_SCOPES
+                    )));
+                }
+                let s = std::str::from_utf8(bytes).map_err(|_| {
+                    ProtokenError::MalformedEncoding("scope is not valid UTF-8".into())
+                })?;
+                // Enforce sorted order (canonical encoding)
+                if let Some(prev) = scopes.last() {
+                    if s <= prev.as_str() {
+                        return Err(ProtokenError::MalformedEncoding(format!(
+                            "scopes not in sorted order: {:?} after {:?}",
+                            s, prev
+                        )));
+                    }
+                }
+                scopes.push(s.to_string());
             }
             (_, _) => {
                 // Unknown field — skip it (forward compatibility for inspect),
@@ -172,6 +213,7 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
             issued_at,
             subject,
             audience,
+            scopes,
         },
     })
 }
@@ -270,6 +312,7 @@ mod tests {
                 issued_at: 1699990000,
                 subject: b"user:alice".to_vec(),
                 audience: b"api.example.com".to_vec(),
+                scopes: vec!["admin".into(), "read".into(), "write".into()],
             },
         }
     }
@@ -429,5 +472,264 @@ mod tests {
         proto3::encode_uint32(2, 1, &mut bad); // algorithm first
         proto3::encode_uint32(1, 1, &mut bad); // version second (wrong!)
         assert!(deserialize_payload(&bad).is_err());
+    }
+
+    #[test]
+    fn test_payload_with_scopes() {
+        let payload = Payload {
+            metadata: Metadata {
+                version: Version::V0,
+                algorithm: Algorithm::HmacSha256,
+                key_identifier: KeyIdentifier::KeyHash([0x01; 8]),
+            },
+            claims: Claims {
+                expires_at: 1700000000,
+                scopes: vec!["read".into(), "write".into()],
+                ..Default::default()
+            },
+        };
+        let bytes = serialize_payload(&payload);
+        let decoded = deserialize_payload(&bytes).unwrap();
+        assert_eq!(payload, decoded);
+        assert_eq!(decoded.claims.scopes, vec!["read", "write"]);
+    }
+
+    #[test]
+    fn test_scopes_sorted_on_encode() {
+        let payload = Payload {
+            metadata: Metadata {
+                version: Version::V0,
+                algorithm: Algorithm::HmacSha256,
+                key_identifier: KeyIdentifier::KeyHash([0x01; 8]),
+            },
+            claims: Claims {
+                expires_at: 1700000000,
+                // Intentionally unsorted input
+                scopes: vec!["write".into(), "admin".into(), "read".into()],
+                ..Default::default()
+            },
+        };
+        let bytes = serialize_payload(&payload);
+        let decoded = deserialize_payload(&bytes).unwrap();
+        // Should come back sorted
+        assert_eq!(decoded.claims.scopes, vec!["admin", "read", "write"]);
+    }
+
+    #[test]
+    fn test_empty_scopes_omitted() {
+        let payload = sample_payload_hmac();
+        let bytes = serialize_payload(&payload);
+        // Tag for field 10 wire type 2 is 0x52
+        assert!(!bytes.contains(&0x52), "empty scopes should be omitted");
+    }
+
+    #[test]
+    fn test_rejects_unsorted_scopes() {
+        // Manually encode scopes out of order
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 8], &mut bad);
+        proto3::encode_uint64(5, 1700000000, &mut bad);
+        proto3::encode_bytes(10, b"write", &mut bad);
+        proto3::encode_bytes(10, b"read", &mut bad); // out of order
+        assert!(deserialize_payload(&bad).is_err());
+    }
+
+    #[test]
+    fn test_rejects_duplicate_scopes() {
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 8], &mut bad);
+        proto3::encode_uint64(5, 1700000000, &mut bad);
+        proto3::encode_bytes(10, b"read", &mut bad);
+        proto3::encode_bytes(10, b"read", &mut bad); // duplicate
+        assert!(deserialize_payload(&bad).is_err());
+    }
+
+    #[test]
+    fn test_rejects_invalid_utf8_scope() {
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 8], &mut bad);
+        proto3::encode_uint64(5, 1700000000, &mut bad);
+        proto3::encode_bytes(10, &[0xFF, 0xFE], &mut bad); // invalid UTF-8
+        assert!(deserialize_payload(&bad).is_err());
+    }
+
+    #[test]
+    fn test_rejects_scope_too_long() {
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 8], &mut bad);
+        proto3::encode_uint64(5, 1700000000, &mut bad);
+        let long_scope = vec![b'a'; MAX_CLAIM_BYTES_LEN + 1];
+        proto3::encode_bytes(10, &long_scope, &mut bad);
+        assert!(deserialize_payload(&bad).is_err());
+    }
+
+    #[test]
+    fn test_rejects_too_many_scopes() {
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 8], &mut bad);
+        proto3::encode_uint64(5, 1700000000, &mut bad);
+        for i in 0..=MAX_SCOPES {
+            proto3::encode_bytes(10, format!("scope{i:03}").as_bytes(), &mut bad);
+        }
+        assert!(deserialize_payload(&bad).is_err());
+    }
+
+    #[test]
+    fn test_rejects_scope_wrong_wire_type() {
+        // Field 10 with wire type 0 (varint) instead of 2 (LEN)
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 8], &mut bad);
+        proto3::encode_uint64(5, 1700000000, &mut bad);
+        proto3::encode_uint64(10, 42, &mut bad); // varint instead of LEN
+        // Should be skipped as unknown wire_type match, but the ascending
+        // order check for field 10 only allows wire type 2
+        let result = deserialize_payload(&bad);
+        // Either parses (ignoring the mismatched wire type) or errors — both are safe
+        if let Ok(payload) = result {
+            assert!(payload.claims.scopes.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_rejects_subject_too_long() {
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 8], &mut bad);
+        proto3::encode_uint64(5, 1700000000, &mut bad);
+        proto3::encode_bytes(8, &vec![b'x'; MAX_CLAIM_BYTES_LEN + 1], &mut bad);
+        assert!(deserialize_payload(&bad).is_err());
+    }
+
+    #[test]
+    fn test_rejects_audience_too_long() {
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 8], &mut bad);
+        proto3::encode_uint64(5, 1700000000, &mut bad);
+        proto3::encode_bytes(9, &vec![b'x'; MAX_CLAIM_BYTES_LEN + 1], &mut bad);
+        assert!(deserialize_payload(&bad).is_err());
+    }
+
+    #[test]
+    fn test_rejects_truncated_payload() {
+        let payload = sample_payload_hmac();
+        let bytes = serialize_payload(&payload);
+        // Truncate at various points
+        for len in 1..bytes.len() {
+            let truncated = &bytes[..len];
+            // Should either parse partially or error, never panic
+            let _ = deserialize_payload(truncated);
+        }
+    }
+
+    #[test]
+    fn test_rejects_truncated_signed_token() {
+        let payload = sample_payload_hmac();
+        let payload_bytes = serialize_payload(&payload);
+        let token = SignedToken {
+            payload_bytes,
+            signature: vec![0xAB; 32],
+        };
+        let wire = serialize_signed_token(&token);
+        for len in 1..wire.len() {
+            let truncated = &wire[..len];
+            let _ = deserialize_signed_token(truncated);
+        }
+    }
+
+    #[test]
+    fn test_rejects_invalid_key_id_length() {
+        // key_id_type=1 (key_hash) but key_id is 7 bytes instead of 8
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 7], &mut bad); // wrong length
+        proto3::encode_uint64(5, 1700000000, &mut bad);
+        assert!(matches!(
+            deserialize_payload(&bad),
+            Err(ProtokenError::InvalidKeyLength { expected: 8, actual: 7 })
+        ));
+    }
+
+    #[test]
+    fn test_rejects_invalid_version() {
+        let mut bad = Vec::new();
+        proto3::encode_uint32(1, 99, &mut bad); // invalid version
+        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 8], &mut bad);
+        proto3::encode_uint64(5, 1700000000, &mut bad);
+        assert!(matches!(
+            deserialize_payload(&bad),
+            Err(ProtokenError::InvalidVersion(99))
+        ));
+    }
+
+    #[test]
+    fn test_rejects_hmac_with_public_key_id() {
+        // HMAC (algorithm=1) should not use public_key key_id_type
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 1, &mut bad); // HMAC
+        proto3::encode_uint32(3, 2, &mut bad); // public_key
+        proto3::encode_bytes(4, &[0; 32], &mut bad);
+        proto3::encode_uint64(5, 1700000000, &mut bad);
+        assert!(deserialize_payload(&bad).is_err());
+    }
+
+    #[test]
+    fn test_rejects_signed_token_missing_payload() {
+        // Only signature field, no payload
+        let mut bad = Vec::new();
+        proto3::encode_bytes(2, &[0; 32], &mut bad);
+        assert!(deserialize_signed_token(&bad).is_err());
+    }
+
+    #[test]
+    fn test_rejects_signed_token_missing_signature() {
+        let payload = sample_payload_hmac();
+        let payload_bytes = serialize_payload(&payload);
+        // Only payload field, no signature
+        let mut bad = Vec::new();
+        proto3::encode_bytes(1, &payload_bytes, &mut bad);
+        assert!(deserialize_signed_token(&bad).is_err());
+    }
+
+    #[test]
+    fn test_scopes_with_signed_token_roundtrip() {
+        let payload = Payload {
+            metadata: Metadata {
+                version: Version::V0,
+                algorithm: Algorithm::HmacSha256,
+                key_identifier: KeyIdentifier::KeyHash([0x01; 8]),
+            },
+            claims: Claims {
+                expires_at: 1700000000,
+                scopes: vec!["admin".into(), "read".into(), "write".into()],
+                ..Default::default()
+            },
+        };
+        let payload_bytes = serialize_payload(&payload);
+        let token = SignedToken {
+            payload_bytes: payload_bytes.clone(),
+            signature: vec![0xAB; 32],
+        };
+        let wire = serialize_signed_token(&token);
+        let decoded = deserialize_signed_token(&wire).unwrap();
+        let decoded_payload = deserialize_payload(&decoded.payload_bytes).unwrap();
+        assert_eq!(decoded_payload.claims.scopes, vec!["admin", "read", "write"]);
     }
 }

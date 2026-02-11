@@ -129,6 +129,9 @@ pub struct Claims {
         serialize_with = "serialize_optional_bytes"
     )]
     pub audience: Vec<u8>,
+    /// Scopes (empty list = not set). Each entry is a UTF-8 string.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -146,8 +149,11 @@ fn serialize_optional_bytes<S: serde::Serializer>(
     }
 }
 
-/// Maximum length for subject and audience fields (bytes).
+/// Maximum length for subject, audience, and individual scope fields (bytes).
 pub const MAX_CLAIM_BYTES_LEN: usize = 255;
+
+/// Maximum number of scope entries.
+pub const MAX_SCOPES: usize = 32;
 
 /// The payload that gets serialized and signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
