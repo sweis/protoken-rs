@@ -14,4 +14,13 @@ base64 = "0.22"
 hex = "0.4"
 thiserror = "2"
 
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+
 [dev-dependencies]

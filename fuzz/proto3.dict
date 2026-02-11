@@ -1,0 +1,25 @@
+# Proto3 wire format tokens for protoken fuzzing
+# Field tags (field_number << 3 | wire_type)
+"\x08"  # field 1 varint (version)
+"\x10"  # field 2 varint (algorithm)
+"\x18"  # field 3 varint (key_id_type)
+"\x22"  # field 4 LEN (key_id)
+"\x28"  # field 5 varint (expires_at)
+"\x30"  # field 6 varint (not_before)
+"\x38"  # field 7 varint (issued_at)
+"\x42"  # field 8 LEN (subject)
+"\x4a"  # field 9 LEN (audience)
+"\x52"  # field 10 LEN (scope)
+"\x0a"  # SignedToken field 1 LEN (payload)
+"\x12"  # SignedToken field 2 LEN (signature)
+
+# Common varint values
+"\x00"  # 0
+"\x01"  # 1 (HMAC-SHA256 / key_hash)
+"\x02"  # 2 (Ed25519 / public_key)
+"\x08"  # 8 (key_hash length)
+"\x20"  # 32 (HMAC sig / Ed25519 pubkey length)
+"\x40"  # 64 (Ed25519 sig length)
+
+# Timestamp varints (1700000000)
+"\x80\xe2\xcf\xaa\x06"

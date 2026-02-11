@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Generates test vectors for protoken wire format regression testing.
 //! Run with: cargo run --bin gen_test_vectors
 
@@ -17,7 +18,9 @@ fn main() {
         metadata: Metadata {
             version: Version::V0,
             algorithm: Algorithm::HmacSha256,
-            key_identifier: KeyIdentifier::KeyHash([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]),
+            key_identifier: KeyIdentifier::KeyHash([
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+            ]),
         },
         claims: Claims {
             expires_at: 1700000000,
@@ -213,8 +216,7 @@ fn main() {
         expires_at: ed25519_expires,
         ..Default::default()
     };
-    let ed25519_token =
-        sign_ed25519(&pkcs8_bytes, ed25519_claims, ed25519_key_id).unwrap();
+    let ed25519_token = sign_ed25519(&pkcs8_bytes, ed25519_claims, ed25519_key_id).unwrap();
     vectors.push(serde_json::json!({
         "name": "signed_ed25519_keyhash",
         "type": "signed_token",

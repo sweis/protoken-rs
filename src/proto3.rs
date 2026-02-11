@@ -64,6 +64,7 @@ pub fn encode_bytes(field: u32, value: &[u8], buf: &mut Vec<u8>) {
 // --- Decoding ---
 
 /// Decode a varint, advancing pos. Returns error on truncation or overlong encoding.
+#[allow(clippy::indexing_slicing)] // bounds checked before access
 pub fn decode_varint(data: &[u8], pos: &mut usize) -> Result<u64, ProtokenError> {
     let start = *pos;
     let mut value: u64 = 0;
@@ -121,10 +122,8 @@ pub fn read_varint_value(data: &[u8], pos: &mut usize) -> Result<u64, ProtokenEr
 
 /// Read a length-delimited field value (caller already consumed the tag).
 /// Returns the byte slice.
-pub fn read_bytes_value<'a>(
-    data: &'a [u8],
-    pos: &mut usize,
-) -> Result<&'a [u8], ProtokenError> {
+#[allow(clippy::indexing_slicing)] // bounds checked before access
+pub fn read_bytes_value<'a>(data: &'a [u8], pos: &mut usize) -> Result<&'a [u8], ProtokenError> {
     let len = decode_varint(data, pos)? as usize;
     if *pos + len > data.len() {
         return Err(ProtokenError::MalformedEncoding(format!(
@@ -176,6 +175,7 @@ pub fn skip_field(wire_type: u32, data: &[u8], pos: &mut usize) -> Result<(), Pr
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -206,11 +206,7 @@ mod tests {
         for &(value, expected_len) in cases {
             let mut buf = Vec::new();
             encode_varint(value, &mut buf);
-            assert_eq!(
-                buf.len(),
-                expected_len,
-                "varint size mismatch for {value}"
-            );
+            assert_eq!(buf.len(), expected_len, "varint size mismatch for {value}");
         }
     }
 
@@ -242,7 +238,11 @@ mod tests {
     fn test_bytes_field_encoding() {
         // key_id field 4, 8 bytes → tag 0x22, length 0x08, then bytes
         let mut buf = Vec::new();
-        encode_bytes(4, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08], &mut buf);
+        encode_bytes(
+            4,
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            &mut buf,
+        );
         assert_eq!(buf[0], 0x22); // tag
         assert_eq!(buf[1], 0x08); // length
         assert_eq!(&buf[2..], &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
@@ -274,11 +274,7 @@ mod tests {
         for &(field, wire_type, expected_byte) in cases {
             let mut buf = Vec::new();
             encode_tag(field, wire_type, &mut buf);
-            assert_eq!(
-                buf.len(),
-                1,
-                "field {field} tag should be single byte"
-            );
+            assert_eq!(buf.len(), 1, "field {field} tag should be single byte");
             assert_eq!(
                 buf[0], expected_byte,
                 "field {field} wire_type {wire_type}: expected 0x{expected_byte:02X}, got 0x{:02X}",

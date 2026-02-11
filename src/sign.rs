@@ -9,6 +9,8 @@ use crate::serialize::{serialize_payload, serialize_signed_token};
 use crate::types::*;
 
 /// Compute the 8-byte key hash: SHA-256(key_material)[0..8].
+#[must_use]
+#[allow(clippy::indexing_slicing)] // SHA-256 always produces 32 bytes >= KEY_HASH_LEN
 pub fn compute_key_hash(key_material: &[u8]) -> [u8; KEY_HASH_LEN] {
     use ring::digest;
     let hash = digest::digest(&digest::SHA256, key_material);
@@ -19,6 +21,7 @@ pub fn compute_key_hash(key_material: &[u8]) -> [u8; KEY_HASH_LEN] {
 
 /// Sign a token with HMAC-SHA256.
 /// Returns the serialized SignedToken wire bytes.
+#[must_use]
 pub fn sign_hmac(key: &[u8], claims: Claims) -> Vec<u8> {
     let key_hash = compute_key_hash(key);
     let payload = Payload {
@@ -89,6 +92,7 @@ pub fn generate_ed25519_key() -> Result<Vec<u8>, ProtokenError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::serialize::{deserialize_payload, deserialize_signed_token};
