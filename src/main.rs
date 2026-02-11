@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::io::{self, Read as _};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -104,7 +106,9 @@ fn main() {
             subject,
             audience,
             scope,
-        } => cmd_sign(&algorithm, &key, hex_key, &duration, &output, subject, audience, scope),
+        } => cmd_sign(
+            &algorithm, &key, hex_key, &duration, &output, subject, audience, scope,
+        ),
         Command::Verify {
             algorithm,
             key,
@@ -153,6 +157,7 @@ fn cmd_inspect(token_arg: Option<String>) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_sign(
     algorithm: &str,
     key_path: &str,
@@ -229,9 +234,7 @@ fn cmd_verify(
         "hmac" => verify_hmac(&key_bytes, &token_bytes, now)?,
         "ed25519" => verify_ed25519(&key_bytes, &token_bytes, now)?,
         _ => {
-            return Err(
-                format!("unknown algorithm: {algorithm} (use 'hmac' or 'ed25519')").into(),
-            )
+            return Err(format!("unknown algorithm: {algorithm} (use 'hmac' or 'ed25519')").into())
         }
     };
 
@@ -288,8 +291,7 @@ fn read_token_bytes(token_arg: Option<String>) -> Result<Vec<u8>, Box<dyn std::e
 fn read_key_file(path: &str, hex_encoded: bool) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let raw = std::fs::read(path)?;
     if hex_encoded {
-        let hex_str =
-            String::from_utf8(raw).map_err(|_| "hex key file is not valid UTF-8")?;
+        let hex_str = String::from_utf8(raw).map_err(|_| "hex key file is not valid UTF-8")?;
         Ok(hex::decode(hex_str.trim())?)
     } else {
         Ok(raw)

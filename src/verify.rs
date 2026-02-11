@@ -99,8 +99,7 @@ pub fn verify_ed25519(
     }
 
     // Verify signature over the raw payload bytes
-    let peer_public_key =
-        signature::UnparsedPublicKey::new(&signature::ED25519, public_key_bytes);
+    let peer_public_key = signature::UnparsedPublicKey::new(&signature::ED25519, public_key_bytes);
     peer_public_key
         .verify(&token.payload_bytes, &token.signature)
         .map_err(|_| {
@@ -133,6 +132,7 @@ fn check_temporal_claims(claims: &Claims, now: u64) -> Result<(), ProtokenError>
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use crate::sign::{ed25519_key_hash, generate_ed25519_key, sign_ed25519, sign_hmac};

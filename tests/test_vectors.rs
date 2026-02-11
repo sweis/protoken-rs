@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 //! Regression tests that verify serialization against stored test vectors.
 //! If any test here fails, it means the wire format has changed.
 
@@ -37,7 +43,9 @@ fn test_vector_payload_hmac_keyhash() {
         metadata: Metadata {
             version: Version::V0,
             algorithm: Algorithm::HmacSha256,
-            key_identifier: KeyIdentifier::KeyHash([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]),
+            key_identifier: KeyIdentifier::KeyHash([
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+            ]),
         },
         claims: Claims {
             expires_at: 1700000000,
@@ -217,7 +225,10 @@ fn test_vector_signed_hmac() {
         v["expected_hex"].as_str().unwrap(),
         "signed_hmac wire format mismatch"
     );
-    assert_eq!(token_bytes.len(), v["expected_len"].as_u64().unwrap() as usize);
+    assert_eq!(
+        token_bytes.len(),
+        v["expected_len"].as_u64().unwrap() as usize
+    );
 
     // Verify the token is valid
     let verified = verify_hmac(key, &token_bytes, expires_at).unwrap();

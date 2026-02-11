@@ -24,6 +24,7 @@ use crate::proto3;
 use crate::types::*;
 
 /// Serialize a Payload into canonical proto3 bytes.
+#[must_use]
 pub fn serialize_payload(payload: &Payload) -> Vec<u8> {
     let mut buf = Vec::with_capacity(32);
 
@@ -162,8 +163,8 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
     }
 
     // Validate required fields
-    let version = Version::from_byte(version as u8)
-        .ok_or(ProtokenError::InvalidVersion(version as u8))?;
+    let version =
+        Version::from_byte(version as u8).ok_or(ProtokenError::InvalidVersion(version as u8))?;
 
     let algorithm = Algorithm::from_byte(algorithm as u8)
         .ok_or(ProtokenError::InvalidAlgorithm(algorithm as u8))?;
@@ -219,6 +220,7 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
 }
 
 /// Serialize a SignedToken as proto3: { Payload payload = 1; bytes signature = 2; }
+#[must_use]
 pub fn serialize_signed_token(token: &SignedToken) -> Vec<u8> {
     let mut buf = Vec::with_capacity(token.payload_bytes.len() + token.signature.len() + 6);
     proto3::encode_bytes(1, &token.payload_bytes, &mut buf);
@@ -282,6 +284,7 @@ pub fn deserialize_signed_token(data: &[u8]) -> Result<SignedToken, ProtokenErro
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -290,7 +293,9 @@ mod tests {
             metadata: Metadata {
                 version: Version::V0,
                 algorithm: Algorithm::HmacSha256,
-                key_identifier: KeyIdentifier::KeyHash([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]),
+                key_identifier: KeyIdentifier::KeyHash([
+                    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                ]),
             },
             claims: Claims {
                 expires_at: 1700000000,
@@ -356,7 +361,10 @@ mod tests {
         // key_id: tag 0x22, length 0x08, then 8 bytes
         assert_eq!(bytes[4], 0x22);
         assert_eq!(bytes[5], 0x08);
-        assert_eq!(&bytes[6..14], &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        assert_eq!(
+            &bytes[6..14],
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+        );
         // expires_at: tag 0x28, varint 1700000000
         assert_eq!(bytes[14], 0x28);
     }
@@ -593,8 +601,8 @@ mod tests {
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_uint64(5, 1700000000, &mut bad);
         proto3::encode_uint64(10, 42, &mut bad); // varint instead of LEN
-        // Should be skipped as unknown wire_type match, but the ascending
-        // order check for field 10 only allows wire type 2
+                                                 // Should be skipped as unknown wire_type match, but the ascending
+                                                 // order check for field 10 only allows wire type 2
         let result = deserialize_payload(&bad);
         // Either parses (ignoring the mismatched wire type) or errors — both are safe
         if let Ok(payload) = result {
@@ -661,7 +669,10 @@ mod tests {
         proto3::encode_uint64(5, 1700000000, &mut bad);
         assert!(matches!(
             deserialize_payload(&bad),
-            Err(ProtokenError::InvalidKeyLength { expected: 8, actual: 7 })
+            Err(ProtokenError::InvalidKeyLength {
+                expected: 8,
+                actual: 7
+            })
         ));
     }
 
@@ -730,6 +741,9 @@ mod tests {
         let wire = serialize_signed_token(&token);
         let decoded = deserialize_signed_token(&wire).unwrap();
         let decoded_payload = deserialize_payload(&decoded.payload_bytes).unwrap();
-        assert_eq!(decoded_payload.claims.scopes, vec!["admin", "read", "write"]);
+        assert_eq!(
+            decoded_payload.claims.scopes,
+            vec!["admin", "read", "write"]
+        );
     }
 }
