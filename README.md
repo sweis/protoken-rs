@@ -1,84 +1,136 @@
 # protoken-rs
 
-Minimal signed tokens as an alternative to JWTs. Binary wire format, HMAC-SHA256 or Ed25519 signatures, 51-107 bytes per token.
+Minimal signed tokens as an alternative to JWTs. Binary wire format, HMAC-SHA256 or Ed25519 signatures.
 
-## Wire Format (v0)
+## Wire Format (v1) — Canonical Proto3
 
-### Payload
+v1 payloads use proto3 wire encoding with canonical rules: fields in ascending order, minimal varints, default values omitted. The output is valid proto3 that any protobuf library can decode, but is also simple enough to parse without one.
 
-Fixed-layout binary. All multi-byte integers are big-endian. No length prefixes — every field size is determined by earlier fields.
+### Proto3 Schema (for reference)
 
-```
-Offset  Size  Field         Values
-------  ----  -----         ------
-0       1     version       0x00
-1       1     algorithm     0x01 = HMAC-SHA256, 0x02 = Ed25519
-2       1     key_id_type   0x01 = key_hash, 0x02 = public_key
-3       N     key_id        N depends on (algorithm, key_id_type)
-3+N     8     expires_at    uint64 big-endian, Unix seconds
-```
+```proto
+message Payload {
+  uint32 version = 1;      // always 1 for v1
+  uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519
+  uint32 key_id_type = 3;  // 1 = key_hash, 2 = public_key
+  bytes  key_id = 4;       // 8 bytes (key_hash) or 32 bytes (public_key)
+  uint64 expires_at = 5;   // Unix seconds
+  uint64 not_before = 6;   // optional (0 = omitted)
+  uint64 issued_at = 7;    // optional (0 = omitted)
+  bytes  subject = 8;      // optional (empty = omitted), max 255 bytes
+  bytes  audience = 9;     // optional (empty = omitted), max 255 bytes
+}
 
-Key identifier sizes:
-
-| key_id_type | Size | Description |
-|-------------|------|-------------|
-| key_hash (0x01) | 8 bytes | SHA-256(key_material)[0..8] |
-| public_key (0x02) | 32 bytes | Raw Ed25519 public key |
-
-HMAC-SHA256 tokens always use `key_hash`. Ed25519 tokens may use either.
-
-### Signed Token
-
-```
-[ payload_bytes | signature ]
+message SignedToken {
+  Payload payload = 1;     // canonical-encoded Payload submessage
+  bytes   signature = 2;   // HMAC-SHA256 (32 bytes) or Ed25519 (64 bytes)
+}
 ```
 
-No delimiter — the parser reads byte 1 (algorithm) to determine the signature length, then splits from the end.
+### Payload Wire Format
 
-| Algorithm | Signature size |
-|-----------|---------------|
-| HMAC-SHA256 | 32 bytes |
-| Ed25519 | 64 bytes |
+Each field is a single-byte tag followed by the value. Tags encode `(field_number << 3) | wire_type`:
 
-### Token Sizes
+```
+Tag   Field          Wire Type  Encoding
+---   -----          ---------  --------
+0x08  version        varint     always 0x08 0x01 for v1
+0x10  algorithm      varint     0x01 = HMAC, 0x02 = Ed25519
+0x18  key_id_type    varint     0x01 = key_hash, 0x02 = public_key
+0x22  key_id         LEN        varint length + raw bytes
+0x28  expires_at     varint     Unix timestamp
+0x30  not_before     varint     omitted if 0
+0x38  issued_at      varint     omitted if 0
+0x42  subject        LEN        omitted if empty
+0x4A  audience       LEN        omitted if empty
+```
+
+Varint encoding: 7 bits per byte, MSB = continuation flag, little-endian byte order. Values 0-127 fit in 1 byte. Timestamps (~1.7B-4.1B) fit in 5 bytes.
+
+### Canonical Encoding Rules
+
+1. Fields serialized exactly once, in ascending field-number order
+2. Varints use minimal encoding (no zero-padding)
+3. Fields set to default values (0, empty bytes) are **omitted**
+4. No unknown fields
+5. `bytes` fields use wire type 2 with minimal-length varint prefix
+
+### SignedToken Wire Format
+
+```
+0A <varint:payload_len> <canonical_payload_bytes> 12 <varint:sig_len> <signature_bytes>
+```
+
+The signature is computed over `<canonical_payload_bytes>` — the exact bytes inside field 1.
+
+### Annotated Example: v1 HMAC Token
+
+```
+Payload (22 bytes):
+  08 01           version = 1
+  10 01           algorithm = HMAC-SHA256
+  18 01           key_id_type = key_hash
+  22 08           key_id: 8 bytes follow
+    66 b0 78 77 8e ab 1c d4
+  28 80 e2 cf aa 06   expires_at = 1700000000
+
+SignedToken envelope:
+  0A 16           field 1 (payload): 22 bytes follow
+    <22 payload bytes>
+  12 20           field 2 (signature): 32 bytes follow
+    <32 HMAC-SHA256 bytes>
+
+Total: 58 bytes
+```
+
+### Format Auto-Detection
+
+The parser distinguishes formats by first byte:
+- `0x00` — v0 custom format
+- `0x08` or `0x10` — v1 Payload (proto3)
+- `0x0A` — v1 SignedToken (proto3)
+
+### Token Sizes (v1)
 
 | Configuration | Payload | Sig | Total |
 |---|---|---|---|
-| HMAC-SHA256 + key_hash | 19 B | 32 B | **51 B** |
-| Ed25519 + key_hash | 19 B | 64 B | **83 B** |
-| Ed25519 + public_key | 43 B | 64 B | **107 B** |
+| HMAC + key_hash (minimal) | ~22 B | 32 B | ~58 B |
+| HMAC + key_hash + sub/aud | ~50 B | 32 B | ~86 B |
+| Ed25519 + key_hash (minimal) | ~22 B | 64 B | ~90 B |
+| Ed25519 + public_key + sub/aud | ~70 B | 64 B | ~138 B |
 
-### Key Hash
+Sizes vary by 1-2 bytes depending on varint-encoded timestamp values.
+
+---
+
+## Wire Format (v0) — Legacy
+
+Fixed-layout binary, kept for backward compatibility. v0 tokens start with byte `0x00`.
+
+```
+[ version:1 | algorithm:1 | key_id_type:1 | key_id:N | expires_at:8(BE) ]
+```
+
+SignedToken: `[ payload | signature ]` (split by algorithm-determined sig length).
+
+| Configuration | Total |
+|---|---|
+| HMAC + key_hash | **51 B** |
+| Ed25519 + key_hash | **83 B** |
+
+---
+
+## Key Hash
 
 ```
 key_hash = SHA-256(key_material)[0..8]
 ```
 
-For HMAC: hash the raw symmetric key. For Ed25519: hash the 32-byte public key. The 8-byte truncation is for key *identification* only — it lets the verifier select the right key from a set.
+For HMAC: hash the raw symmetric key. For Ed25519: hash the 32-byte public key. The 8-byte truncation is for key *identification* only.
 
-### Test Vectors
+## Test Vectors
 
-Stored in `testdata/v0_vectors.json`. Example HMAC token (51 bytes):
-
-```
-Key (ASCII): protoken-test-vector-key-do-not-use-in-production!!
-expires_at:  1700000000 (2023-11-14T22:13:20Z)
-
-Payload (19 bytes):
-  00                              version = 0
-  01                              algorithm = HMAC-SHA256
-  01                              key_id_type = key_hash
-  66 b0 78 77 8e ab 1c d4        key_hash
-  00 00 00 00 65 53 f1 00        expires_at = 1700000000
-
-HMAC-SHA256 signature (32 bytes):
-  5d 1c 04 15 f5 77 1c 16  da d2 19 76 48 80 5c 98
-  40 52 1e d5 5e e1 54 7d  07 80 e0 20 9d 87 22 41
-
-Full token (hex):
-  00010166b078778eab1cd4000000006553f100
-  5d1c0415f5771c16dad2197648805c9840521ed55ee1547d0780e0209d872241
-```
+Stored in `testdata/v0_vectors.json`. Regenerate with `cargo run --bin gen_test_vectors`.
 
 ## CLI
 
@@ -86,16 +138,19 @@ Full token (hex):
 # Generate an Ed25519 key pair
 protoken generate-key
 
-# Sign (HMAC)
-protoken sign -a hmac -k keyfile -d 4d
+# Sign v1 token (default)
+protoken sign -a hmac -k keyfile -d 4d --subject "user:alice" --audience "api"
 
-# Sign (Ed25519)
+# Sign v0 token (legacy)
+protoken sign -a hmac -k keyfile -d 4d --version 0
+
+# Sign with Ed25519
 protoken sign -a ed25519 -k private.pkcs8 -d 1h
 
-# Verify
+# Verify (auto-detects v0/v1)
 protoken verify -a hmac -k keyfile -t <token>
 
-# Inspect (no key needed)
+# Inspect (no key needed, auto-detects v0/v1)
 protoken inspect -t <token>
 ```
 

@@ -31,4 +31,10 @@ pub enum ProtokenError {
 
     #[error("key hash mismatch")]
     KeyHashMismatch,
+
+    #[error("malformed encoding: {0}")]
+    MalformedEncoding(String),
+
+    #[error("token not yet valid: not_before is {not_before}, current time is {now}")]
+    TokenNotYetValid { not_before: u64, now: u64 },
 }

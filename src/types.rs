@@ -1,16 +1,19 @@
 use serde::Serialize;
 
 /// Token format version.
+/// V0 = custom fixed-layout binary. V1+ = canonical proto3 wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[repr(u8)]
 pub enum Version {
     V0 = 0,
+    V1 = 1,
 }
 
 impl Version {
     pub fn from_byte(b: u8) -> Option<Version> {
         match b {
             0 => Some(Version::V0),
+            1 => Some(Version::V1),
             _ => None,
         }
     }
@@ -107,11 +110,47 @@ pub struct Metadata {
 }
 
 /// Token claims.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Claims {
     /// Expiration time as Unix timestamp (seconds since epoch).
     pub expires_at: u64,
+    /// Earliest valid time (0 = not set).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub not_before: u64,
+    /// Token creation time (0 = not set).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub issued_at: u64,
+    /// Subject identifier (empty = not set).
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_optional_bytes"
+    )]
+    pub subject: Vec<u8>,
+    /// Audience identifier (empty = not set).
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_optional_bytes"
+    )]
+    pub audience: Vec<u8>,
 }
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+/// Serialize bytes as a UTF-8 string if valid, otherwise as hex.
+fn serialize_optional_bytes<S: serde::Serializer>(
+    bytes: &[u8],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => serializer.serialize_str(s),
+        Err(_) => serializer.serialize_str(&format!("hex:{}", hex::encode(bytes))),
+    }
+}
+
+/// Maximum length for subject and audience fields (bytes).
+pub const MAX_CLAIM_BYTES_LEN: usize = 255;
 
 /// The payload that gets serialized and signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
