@@ -132,8 +132,8 @@ fn test_vector_payload_full_claims() {
             expires_at: 1700000000,
             not_before: 1699990000,
             issued_at: 1699990000,
-            subject: b"user:alice".to_vec(),
-            audience: b"api.example.com".to_vec(),
+            subject: "user:alice".into(),
+            audience: "api.example.com".into(),
             ..Default::default()
         },
     };

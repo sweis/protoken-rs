@@ -17,8 +17,8 @@ message Payload {
   uint64 expires_at = 5;   // Unix seconds
   uint64 not_before = 6;   // optional (0 = omitted)
   uint64 issued_at = 7;    // optional (0 = omitted)
-  bytes  subject = 8;      // optional (empty = omitted), max 255 bytes
-  bytes  audience = 9;     // optional (empty = omitted), max 255 bytes
+  string subject = 8;      // optional (empty = omitted), max 255 bytes
+  string audience = 9;     // optional (empty = omitted), max 255 bytes
   repeated string scope = 10; // optional, sorted, max 32 entries
 }
 
@@ -42,8 +42,8 @@ Tag   Field          Wire Type  Encoding
 0x28  expires_at     varint     Unix timestamp
 0x30  not_before     varint     omitted if 0
 0x38  issued_at      varint     omitted if 0
-0x42  subject        LEN        omitted if empty
-0x4A  audience       LEN        omitted if empty
+0x42  subject        LEN        UTF-8 string, omitted if empty
+0x4A  audience       LEN        UTF-8 string, omitted if empty
 0x52  scope          LEN        repeated, sorted, omitted if empty
 ```
 

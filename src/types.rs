@@ -117,18 +117,12 @@ pub struct Claims {
     /// Token creation time (0 = not set).
     #[serde(skip_serializing_if = "is_zero")]
     pub issued_at: u64,
-    /// Subject identifier (empty = not set).
-    #[serde(
-        skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_optional_bytes"
-    )]
-    pub subject: Vec<u8>,
-    /// Audience identifier (empty = not set).
-    #[serde(
-        skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_optional_bytes"
-    )]
-    pub audience: Vec<u8>,
+    /// Subject identifier (empty = not set), max 255 bytes.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub subject: String,
+    /// Audience identifier (empty = not set), max 255 bytes.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub audience: String,
     /// Scopes (empty list = not set). Each entry is a UTF-8 string.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub scopes: Vec<String>,
@@ -136,17 +130,6 @@ pub struct Claims {
 
 fn is_zero(v: &u64) -> bool {
     *v == 0
-}
-
-/// Serialize bytes as a UTF-8 string if valid, otherwise as hex.
-fn serialize_optional_bytes<S: serde::Serializer>(
-    bytes: &[u8],
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    match std::str::from_utf8(bytes) {
-        Ok(s) => serializer.serialize_str(s),
-        Err(_) => serializer.serialize_str(&format!("hex:{}", hex::encode(bytes))),
-    }
 }
 
 /// Maximum length for subject, audience, and individual scope fields (bytes).

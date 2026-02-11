@@ -160,7 +160,7 @@ mod tests {
             expires_at: 1800000000,
             not_before: 1799990000,
             issued_at: 1799990000,
-            subject: b"test".to_vec(),
+            subject: "test".into(),
             ..Default::default()
         };
 
@@ -194,8 +194,8 @@ mod tests {
         let key_id = ed25519_key_hash(&pkcs8).unwrap();
         let claims = Claims {
             expires_at: 1800000000,
-            subject: b"user:alice".to_vec(),
-            audience: b"api.example.com".to_vec(),
+            subject: "user:alice".into(),
+            audience: "api.example.com".into(),
             ..Default::default()
         };
 

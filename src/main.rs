@@ -188,8 +188,8 @@ fn cmd_sign(
         expires_at,
         not_before: now,
         issued_at: now,
-        subject: subject.map(|s| s.into_bytes()).unwrap_or_default(),
-        audience: audience.map(|s| s.into_bytes()).unwrap_or_default(),
+        subject: subject.unwrap_or_default(),
+        audience: audience.unwrap_or_default(),
         scopes,
     };
 
