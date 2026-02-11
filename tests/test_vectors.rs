@@ -218,7 +218,7 @@ fn test_vector_signed_hmac() {
         expires_at,
         ..Default::default()
     };
-    let token_bytes = sign_hmac(key, claims);
+    let token_bytes = sign_hmac(key, claims).unwrap();
 
     assert_eq!(
         hex::encode(&token_bytes),

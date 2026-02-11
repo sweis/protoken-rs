@@ -19,7 +19,7 @@ message Payload {
   uint64 issued_at = 7;    // optional (0 = omitted)
   string subject = 8;      // optional (empty = omitted), max 255 bytes
   string audience = 9;     // optional (empty = omitted), max 255 bytes
-  repeated string scope = 10; // optional, sorted, max 32 entries
+  repeated string scope = 10; // optional, sorted, max 32 entries, each max 255 bytes
 }
 
 message SignedToken {
@@ -111,14 +111,17 @@ Stored in `testdata/vectors.json`. Regenerate with `cargo run --bin gen_test_vec
 ## CLI
 
 ```sh
-# Generate an Ed25519 key pair
+# Generate an Ed25519 key pair (outputs JSON with private_key_pkcs8_hex, public_key_hex, key_hash_hex)
 protoken generate-key
 
-# Sign a token
+# Sign a token (duration examples: 4d, 1h, 30m, 5s)
 protoken sign -a hmac -k keyfile -d 4d --subject "user:alice" --audience "api" --scope read --scope write
 
 # Sign with Ed25519
 protoken sign -a ed25519 -k private.pkcs8 -d 1h
+
+# Sign with hex-encoded key file
+protoken sign -a hmac -k keyfile.hex --hex-key -d 4d
 
 # Verify
 protoken verify -a hmac -k keyfile -t <token>
@@ -127,4 +130,8 @@ protoken verify -a hmac -k keyfile -t <token>
 protoken inspect -t <token>
 ```
 
-Token input/output accepts hex or base64url (no padding).
+### CLI Notes
+
+- **Token encoding**: Input accepts hex or base64url (tried in that order). Output defaults to base64url (no padding); use `-o hex` for hex.
+- **`--hex-key`**: Reads the key file as hex-encoded text instead of raw bytes.
+- **Key files**: For HMAC, use at least 32 bytes of cryptographically random key material. For Ed25519, use the PKCS#8 DER file from `generate-key`.

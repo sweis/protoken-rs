@@ -21,8 +21,10 @@ pub fn compute_key_hash(key_material: &[u8]) -> [u8; KEY_HASH_LEN] {
 
 /// Sign a token with HMAC-SHA256.
 /// Returns the serialized SignedToken wire bytes.
-#[must_use]
-pub fn sign_hmac(key: &[u8], claims: Claims) -> Vec<u8> {
+///
+/// For HMAC-SHA256, use at least 32 bytes of cryptographically random key material.
+pub fn sign_hmac(key: &[u8], claims: Claims) -> Result<Vec<u8>, ProtokenError> {
+    claims.validate()?;
     let key_hash = compute_key_hash(key);
     let payload = Payload {
         metadata: Metadata {
@@ -41,7 +43,7 @@ pub fn sign_hmac(key: &[u8], claims: Claims) -> Vec<u8> {
         payload_bytes,
         signature: tag.as_ref().to_vec(),
     };
-    serialize_signed_token(&token)
+    Ok(serialize_signed_token(&token))
 }
 
 /// Sign a token with Ed25519.
@@ -51,6 +53,7 @@ pub fn sign_ed25519(
     claims: Claims,
     key_id: KeyIdentifier,
 ) -> Result<Vec<u8>, ProtokenError> {
+    claims.validate()?;
     let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_private_key)
         .map_err(|e| ProtokenError::SigningFailed(format!("invalid Ed25519 key: {e}")))?;
 
@@ -105,7 +108,7 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_hmac(key, claims);
+        let token_bytes = sign_hmac(key, claims).unwrap();
         let token = deserialize_signed_token(&token_bytes).unwrap();
         let payload = deserialize_payload(&token.payload_bytes).unwrap();
 
@@ -179,7 +182,7 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_hmac(key, claims.clone());
+        let token_bytes = sign_hmac(key, claims.clone()).unwrap();
         let token = deserialize_signed_token(&token_bytes).unwrap();
         let payload = deserialize_payload(&token.payload_bytes).unwrap();
 
