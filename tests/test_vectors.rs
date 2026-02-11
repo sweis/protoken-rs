@@ -126,6 +126,7 @@ fn test_vector_payload_full_claims() {
             issued_at: 1699990000,
             subject: b"user:alice".to_vec(),
             audience: b"api.example.com".to_vec(),
+            ..Default::default()
         },
     };
 
@@ -164,6 +165,36 @@ fn test_vector_payload_max() {
         v["expected_hex"].as_str().unwrap(),
         "payload_hmac_max wire format mismatch"
     );
+}
+
+#[test]
+fn test_vector_payload_scopes() {
+    let vectors = load_vectors();
+    let v = find_vector(&vectors, "payload_hmac_scopes");
+
+    let payload = Payload {
+        metadata: Metadata {
+            version: Version::V0,
+            algorithm: Algorithm::HmacSha256,
+            key_identifier: KeyIdentifier::KeyHash([0x22; 8]),
+        },
+        claims: Claims {
+            expires_at: 1700000000,
+            scopes: vec!["admin".into(), "read".into(), "write".into()],
+            ..Default::default()
+        },
+    };
+
+    let bytes = serialize_payload(&payload);
+    assert_eq!(
+        hex::encode(&bytes),
+        v["expected_hex"].as_str().unwrap(),
+        "payload_hmac_scopes wire format mismatch"
+    );
+    assert_eq!(bytes.len(), v["expected_len"].as_u64().unwrap() as usize);
+
+    let decoded = deserialize_payload(&bytes).unwrap();
+    assert_eq!(decoded, payload);
 }
 
 // === Signed token vectors ===
@@ -295,6 +326,7 @@ fn test_vector_deserialize_from_stored_hex() {
         "payload_ed25519_pubkey",
         "payload_hmac_full_claims",
         "payload_hmac_max",
+        "payload_hmac_scopes",
     ] {
         let v = find_vector(&vectors, name);
         let bytes = hex::decode(v["expected_hex"].as_str().unwrap()).unwrap();

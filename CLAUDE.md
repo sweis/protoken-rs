@@ -28,6 +28,7 @@ message Payload {
   uint64 issued_at = 7;    // optional (0 = omitted)
   bytes  subject = 8;      // optional (empty = omitted), max 255 bytes
   bytes  audience = 9;     // optional (empty = omitted), max 255 bytes
+  repeated string scope = 10; // optional, sorted, max 32 entries, each max 255 bytes
 }
 
 message SignedToken {
@@ -36,7 +37,7 @@ message SignedToken {
 }
 ```
 
-7. Canonical encoding rules: fields in ascending order, minimal varints, default values (0/empty) omitted.
+7. Canonical encoding rules: fields in ascending order, minimal varints, default values (0/empty) omitted. Repeated fields (scope) appear consecutively, sorted lexicographically, no duplicates.
 8. The version field is reserved and always 0. It will not appear on the wire until we finalize the format.
 9. SignedToken wraps Payload as a submessage. The signature is computed over the canonical Payload bytes inside field 1.
 

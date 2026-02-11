@@ -59,6 +59,10 @@ enum Command {
         /// Audience identifier (optional)
         #[arg(long)]
         audience: Option<String>,
+
+        /// Scope entries (repeatable, e.g. --scope read --scope write)
+        #[arg(long)]
+        scope: Vec<String>,
     },
 
     /// Verify a signed token against a key and current time.
@@ -99,7 +103,8 @@ fn main() {
             output,
             subject,
             audience,
-        } => cmd_sign(&algorithm, &key, hex_key, &duration, &output, subject, audience),
+            scope,
+        } => cmd_sign(&algorithm, &key, hex_key, &duration, &output, subject, audience, scope),
         Command::Verify {
             algorithm,
             key,
@@ -156,6 +161,7 @@ fn cmd_sign(
     output_format: &str,
     subject: Option<String>,
     audience: Option<String>,
+    scopes: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let key_bytes = read_key_file(key_path, hex_key)?;
 
@@ -179,6 +185,7 @@ fn cmd_sign(
         issued_at: now,
         subject: subject.map(|s| s.into_bytes()).unwrap_or_default(),
         audience: audience.map(|s| s.into_bytes()).unwrap_or_default(),
+        scopes,
     };
 
     let token_bytes = match algorithm {

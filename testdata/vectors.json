@@ -67,6 +67,23 @@
       "type": "payload"
     },
     {
+      "expected_hex": "10011801220822222222222222222880e2cfaa06520561646d696e52047265616452057772697465",
+      "expected_len": 40,
+      "input": {
+        "algorithm": 1,
+        "expires_at": 1700000000,
+        "key_id_hex": "2222222222222222",
+        "key_id_type": 1,
+        "scopes": [
+          "admin",
+          "read",
+          "write"
+        ]
+      },
+      "name": "payload_hmac_scopes",
+      "type": "payload"
+    },
+    {
       "expected_hex": "0a1410011801220866b078778eab1cd42880e2cfaa061220fc5679ce9fcc7bca58df7abdd7a33aacd35c95f92c8904939da581add78d90ce",
       "expected_len": 56,
       "input": {

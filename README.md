@@ -19,6 +19,7 @@ message Payload {
   uint64 issued_at = 7;    // optional (0 = omitted)
   bytes  subject = 8;      // optional (empty = omitted), max 255 bytes
   bytes  audience = 9;     // optional (empty = omitted), max 255 bytes
+  repeated string scope = 10; // optional, sorted, max 32 entries
 }
 
 message SignedToken {
@@ -43,17 +44,19 @@ Tag   Field          Wire Type  Encoding
 0x38  issued_at      varint     omitted if 0
 0x42  subject        LEN        omitted if empty
 0x4A  audience       LEN        omitted if empty
+0x52  scope          LEN        repeated, sorted, omitted if empty
 ```
 
 Varint encoding: 7 bits per byte, MSB = continuation flag, little-endian byte order. Values 0-127 fit in 1 byte. Timestamps (~1.7B-4.1B) fit in 5 bytes.
 
 ### Canonical Encoding Rules
 
-1. Fields serialized exactly once, in ascending field-number order
+1. Fields serialized in ascending field-number order (once each, except repeated fields)
 2. Varints use minimal encoding (no zero-padding)
 3. Fields set to default values (0, empty bytes) are **omitted**
 4. No unknown fields
-5. `bytes` fields use wire type 2 with minimal-length varint prefix
+5. `bytes`/`string` fields use wire type 2 with minimal-length varint prefix
+6. Repeated fields (`scope`) appear consecutively, sorted lexicographically, no duplicates
 
 ### SignedToken Wire Format
 
@@ -112,7 +115,7 @@ Stored in `testdata/vectors.json`. Regenerate with `cargo run --bin gen_test_vec
 protoken generate-key
 
 # Sign a token
-protoken sign -a hmac -k keyfile -d 4d --subject "user:alice" --audience "api"
+protoken sign -a hmac -k keyfile -d 4d --subject "user:alice" --audience "api" --scope read --scope write
 
 # Sign with Ed25519
 protoken sign -a ed25519 -k private.pkcs8 -d 1h
