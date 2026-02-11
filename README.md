@@ -1,16 +1,16 @@
 # protoken-rs
 
-Minimal signed tokens as an alternative to JWTs. Binary wire format, HMAC-SHA256 or Ed25519 signatures.
+Minimal signed tokens as an alternative to JWTs. Binary wire format using canonical proto3 encoding, HMAC-SHA256 or Ed25519 signatures.
 
-## Wire Format (v1) — Canonical Proto3
+## Wire Format — Canonical Proto3
 
-v1 payloads use proto3 wire encoding with canonical rules: fields in ascending order, minimal varints, default values omitted. The output is valid proto3 that any protobuf library can decode, but is also simple enough to parse without one.
+Payloads use proto3 wire encoding with canonical rules: fields in ascending order, minimal varints, default values omitted. The output is valid proto3 that any protobuf library can decode, but is also simple enough to parse without one.
 
-### Proto3 Schema (for reference)
+### Proto3 Schema
 
 ```proto
 message Payload {
-  uint32 version = 1;      // always 1 for v1
+  uint32 version = 1;      // reserved, always 0 (omitted on wire)
   uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519
   uint32 key_id_type = 3;  // 1 = key_hash, 2 = public_key
   bytes  key_id = 4;       // 8 bytes (key_hash) or 32 bytes (public_key)
@@ -34,7 +34,7 @@ Each field is a single-byte tag followed by the value. Tags encode `(field_numbe
 ```
 Tag   Field          Wire Type  Encoding
 ---   -----          ---------  --------
-0x08  version        varint     always 0x08 0x01 for v1
+0x08  version        varint     reserved (omitted when 0)
 0x10  algorithm      varint     0x01 = HMAC, 0x02 = Ed25519
 0x18  key_id_type    varint     0x01 = key_hash, 0x02 = public_key
 0x22  key_id         LEN        varint length + raw bytes
@@ -63,11 +63,10 @@ Varint encoding: 7 bits per byte, MSB = continuation flag, little-endian byte or
 
 The signature is computed over `<canonical_payload_bytes>` — the exact bytes inside field 1.
 
-### Annotated Example: v1 HMAC Token
+### Annotated Example: HMAC Token
 
 ```
-Payload (22 bytes):
-  08 01           version = 1
+Payload (20 bytes):
   10 01           algorithm = HMAC-SHA256
   18 01           key_id_type = key_hash
   22 08           key_id: 8 bytes follow
@@ -75,50 +74,24 @@ Payload (22 bytes):
   28 80 e2 cf aa 06   expires_at = 1700000000
 
 SignedToken envelope:
-  0A 16           field 1 (payload): 22 bytes follow
-    <22 payload bytes>
+  0A 14           field 1 (payload): 20 bytes follow
+    <20 payload bytes>
   12 20           field 2 (signature): 32 bytes follow
     <32 HMAC-SHA256 bytes>
 
-Total: 58 bytes
+Total: 56 bytes
 ```
 
-### Format Auto-Detection
-
-The parser distinguishes formats by first byte:
-- `0x00` — v0 custom format
-- `0x08` or `0x10` — v1 Payload (proto3)
-- `0x0A` — v1 SignedToken (proto3)
-
-### Token Sizes (v1)
+### Token Sizes
 
 | Configuration | Payload | Sig | Total |
 |---|---|---|---|
-| HMAC + key_hash (minimal) | ~22 B | 32 B | ~58 B |
+| HMAC + key_hash (minimal) | ~20 B | 32 B | ~56 B |
 | HMAC + key_hash + sub/aud | ~50 B | 32 B | ~86 B |
-| Ed25519 + key_hash (minimal) | ~22 B | 64 B | ~90 B |
+| Ed25519 + key_hash (minimal) | ~20 B | 64 B | ~88 B |
 | Ed25519 + public_key + sub/aud | ~70 B | 64 B | ~138 B |
 
 Sizes vary by 1-2 bytes depending on varint-encoded timestamp values.
-
----
-
-## Wire Format (v0) — Legacy
-
-Fixed-layout binary, kept for backward compatibility. v0 tokens start with byte `0x00`.
-
-```
-[ version:1 | algorithm:1 | key_id_type:1 | key_id:N | expires_at:8(BE) ]
-```
-
-SignedToken: `[ payload | signature ]` (split by algorithm-determined sig length).
-
-| Configuration | Total |
-|---|---|
-| HMAC + key_hash | **51 B** |
-| Ed25519 + key_hash | **83 B** |
-
----
 
 ## Key Hash
 
@@ -130,7 +103,7 @@ For HMAC: hash the raw symmetric key. For Ed25519: hash the 32-byte public key. 
 
 ## Test Vectors
 
-Stored in `testdata/v0_vectors.json`. Regenerate with `cargo run --bin gen_test_vectors`.
+Stored in `testdata/vectors.json`. Regenerate with `cargo run --bin gen_test_vectors`.
 
 ## CLI
 
@@ -138,19 +111,16 @@ Stored in `testdata/v0_vectors.json`. Regenerate with `cargo run --bin gen_test_
 # Generate an Ed25519 key pair
 protoken generate-key
 
-# Sign v1 token (default)
+# Sign a token
 protoken sign -a hmac -k keyfile -d 4d --subject "user:alice" --audience "api"
-
-# Sign v0 token (legacy)
-protoken sign -a hmac -k keyfile -d 4d --version 0
 
 # Sign with Ed25519
 protoken sign -a ed25519 -k private.pkcs8 -d 1h
 
-# Verify (auto-detects v0/v1)
+# Verify
 protoken verify -a hmac -k keyfile -t <token>
 
-# Inspect (no key needed, auto-detects v0/v1)
+# Inspect (no key needed)
 protoken inspect -t <token>
 ```
 

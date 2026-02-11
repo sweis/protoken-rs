@@ -7,8 +7,7 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 
 use protoken::serialize::{deserialize_payload, deserialize_signed_token};
 use protoken::sign::{
-    compute_key_hash, ed25519_key_hash, generate_ed25519_key, sign_ed25519, sign_ed25519_v1,
-    sign_hmac, sign_hmac_v1,
+    compute_key_hash, ed25519_key_hash, generate_ed25519_key, sign_ed25519, sign_hmac,
 };
 use protoken::types::Claims;
 use protoken::verify::{verify_ed25519, verify_hmac};
@@ -53,15 +52,11 @@ enum Command {
         #[arg(short, long, default_value = "base64")]
         output: String,
 
-        /// Wire format version: 0 or 1 (default: 1)
-        #[arg(long, default_value_t = 1)]
-        version: u8,
-
-        /// Subject identifier (optional, v1 only)
+        /// Subject identifier (optional)
         #[arg(long)]
         subject: Option<String>,
 
-        /// Audience identifier (optional, v1 only)
+        /// Audience identifier (optional)
         #[arg(long)]
         audience: Option<String>,
     },
@@ -102,10 +97,9 @@ fn main() {
             hex_key,
             duration,
             output,
-            version,
             subject,
             audience,
-        } => cmd_sign(&algorithm, &key, hex_key, &duration, &output, version, subject, audience),
+        } => cmd_sign(&algorithm, &key, hex_key, &duration, &output, subject, audience),
         Command::Verify {
             algorithm,
             key,
@@ -154,14 +148,12 @@ fn cmd_inspect(token_arg: Option<String>) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn cmd_sign(
     algorithm: &str,
     key_path: &str,
     hex_key: bool,
     duration_str: &str,
     output_format: &str,
-    version: u8,
     subject: Option<String>,
     audience: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -181,37 +173,21 @@ fn cmd_sign(
         .checked_add(duration.as_secs())
         .ok_or("duration overflow")?;
 
-    let token_bytes = match version {
-        0 => {
-            // v0 format (legacy)
-            match algorithm {
-                "hmac" => sign_hmac(&key_bytes, expires_at),
-                "ed25519" => {
-                    let key_id = ed25519_key_hash(&key_bytes)?;
-                    sign_ed25519(&key_bytes, expires_at, key_id)?
-                }
-                _ => return Err(format!("unknown algorithm: {algorithm}").into()),
-            }
+    let claims = Claims {
+        expires_at,
+        not_before: now,
+        issued_at: now,
+        subject: subject.map(|s| s.into_bytes()).unwrap_or_default(),
+        audience: audience.map(|s| s.into_bytes()).unwrap_or_default(),
+    };
+
+    let token_bytes = match algorithm {
+        "hmac" => sign_hmac(&key_bytes, claims),
+        "ed25519" => {
+            let key_id = ed25519_key_hash(&key_bytes)?;
+            sign_ed25519(&key_bytes, claims, key_id)?
         }
-        1 => {
-            // v1 format (proto3)
-            let claims = Claims {
-                expires_at,
-                not_before: now,
-                issued_at: now,
-                subject: subject.map(|s| s.into_bytes()).unwrap_or_default(),
-                audience: audience.map(|s| s.into_bytes()).unwrap_or_default(),
-            };
-            match algorithm {
-                "hmac" => sign_hmac_v1(&key_bytes, claims),
-                "ed25519" => {
-                    let key_id = ed25519_key_hash(&key_bytes)?;
-                    sign_ed25519_v1(&key_bytes, claims, key_id)?
-                }
-                _ => return Err(format!("unknown algorithm: {algorithm}").into()),
-            }
-        }
-        _ => return Err(format!("unknown version: {version} (use 0 or 1)").into()),
+        _ => return Err(format!("unknown algorithm: {algorithm}").into()),
     };
 
     match output_format {

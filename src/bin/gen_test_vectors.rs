@@ -19,13 +19,15 @@ fn main() {
             algorithm: Algorithm::HmacSha256,
             key_identifier: KeyIdentifier::KeyHash([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]),
         },
-        claims: Claims { expires_at: 1700000000, ..Default::default() },
+        claims: Claims {
+            expires_at: 1700000000,
+            ..Default::default()
+        },
     };
     vectors.push(serde_json::json!({
         "name": "payload_hmac_keyhash",
         "type": "payload",
         "input": {
-            "version": 0,
             "algorithm": 1,
             "key_id_type": 1,
             "key_id_hex": "0102030405060708",
@@ -42,13 +44,15 @@ fn main() {
             algorithm: Algorithm::Ed25519,
             key_identifier: KeyIdentifier::KeyHash([0xaa; 8]),
         },
-        claims: Claims { expires_at: 1800000000, ..Default::default() },
+        claims: Claims {
+            expires_at: 1800000000,
+            ..Default::default()
+        },
     };
     vectors.push(serde_json::json!({
         "name": "payload_ed25519_keyhash",
         "type": "payload",
         "input": {
-            "version": 0,
             "algorithm": 2,
             "key_id_type": 1,
             "key_id_hex": "aaaaaaaaaaaaaaaa",
@@ -66,13 +70,15 @@ fn main() {
             algorithm: Algorithm::Ed25519,
             key_identifier: KeyIdentifier::PublicKey(fake_pk.clone()),
         },
-        claims: Claims { expires_at: 1900000000, ..Default::default() },
+        claims: Claims {
+            expires_at: 1900000000,
+            ..Default::default()
+        },
     };
     vectors.push(serde_json::json!({
         "name": "payload_ed25519_pubkey",
         "type": "payload",
         "input": {
-            "version": 0,
             "algorithm": 2,
             "key_id_type": 2,
             "key_id_hex": hex::encode(&fake_pk),
@@ -82,24 +88,33 @@ fn main() {
         "expected_len": serialize_payload(&p3).len()
     }));
 
-    // Vector 4: HMAC + key_hash, expires_at = 0 (edge case)
+    // Vector 4: HMAC + key_hash, with optional claims
     let p4 = Payload {
         metadata: Metadata {
             version: Version::V0,
             algorithm: Algorithm::HmacSha256,
-            key_identifier: KeyIdentifier::KeyHash([0x00; 8]),
+            key_identifier: KeyIdentifier::KeyHash([0x11; 8]),
         },
-        claims: Claims { expires_at: 0, ..Default::default() },
+        claims: Claims {
+            expires_at: 1700000000,
+            not_before: 1699990000,
+            issued_at: 1699990000,
+            subject: b"user:alice".to_vec(),
+            audience: b"api.example.com".to_vec(),
+        },
     };
     vectors.push(serde_json::json!({
-        "name": "payload_hmac_zeros",
+        "name": "payload_hmac_full_claims",
         "type": "payload",
         "input": {
-            "version": 0,
             "algorithm": 1,
             "key_id_type": 1,
-            "key_id_hex": "0000000000000000",
-            "expires_at": 0u64
+            "key_id_hex": "1111111111111111",
+            "expires_at": 1700000000u64,
+            "not_before": 1699990000u64,
+            "issued_at": 1699990000u64,
+            "subject": "user:alice",
+            "audience": "api.example.com"
         },
         "expected_hex": hex::encode(serialize_payload(&p4)),
         "expected_len": serialize_payload(&p4).len()
@@ -112,13 +127,15 @@ fn main() {
             algorithm: Algorithm::HmacSha256,
             key_identifier: KeyIdentifier::KeyHash([0xff; 8]),
         },
-        claims: Claims { expires_at: u64::MAX, ..Default::default() },
+        claims: Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        },
     };
     vectors.push(serde_json::json!({
         "name": "payload_hmac_max",
         "type": "payload",
         "input": {
-            "version": 0,
             "algorithm": 1,
             "key_id_type": 1,
             "key_id_hex": "ffffffffffffffff",
@@ -130,13 +147,16 @@ fn main() {
 
     // === HMAC signed token vectors ===
 
-    // Use a well-known key so anyone can reproduce
     let hmac_key = b"protoken-test-vector-key-do-not-use-in-production!!";
     let hmac_key_hash = compute_key_hash(hmac_key);
 
     // Vector 6: HMAC signed token
     let hmac_expires = 1700000000u64;
-    let hmac_token = sign_hmac(hmac_key, hmac_expires);
+    let hmac_claims = Claims {
+        expires_at: hmac_expires,
+        ..Default::default()
+    };
+    let hmac_token = sign_hmac(hmac_key, hmac_claims);
     vectors.push(serde_json::json!({
         "name": "signed_hmac",
         "type": "signed_token",
@@ -148,23 +168,25 @@ fn main() {
         },
         "expected_hex": hex::encode(&hmac_token),
         "expected_len": hmac_token.len(),
-        "payload_len": 19,
-        "signature_len": 32
     }));
 
     // === Ed25519 signed token vectors ===
-    // We need a fixed key. Generate one and embed the PKCS#8 bytes.
-    // To make this reproducible, we use a hardcoded PKCS#8 key.
+
     let pkcs8_hex = generate_fixed_ed25519_key();
     let pkcs8_bytes = hex::decode(&pkcs8_hex).unwrap();
     let key_pair = Ed25519KeyPair::from_pkcs8(&pkcs8_bytes).unwrap();
     let public_key = key_pair.public_key().as_ref();
-    let ed25519_key_hash = compute_key_hash(public_key);
+    let ed25519_key_hash_val = compute_key_hash(public_key);
 
     // Vector 7: Ed25519 signed token with key_hash
     let ed25519_expires = 1800000000u64;
-    let ed25519_key_id = KeyIdentifier::KeyHash(ed25519_key_hash);
-    let ed25519_token = sign_ed25519(&pkcs8_bytes, ed25519_expires, ed25519_key_id).unwrap();
+    let ed25519_key_id = KeyIdentifier::KeyHash(ed25519_key_hash_val);
+    let ed25519_claims = Claims {
+        expires_at: ed25519_expires,
+        ..Default::default()
+    };
+    let ed25519_token =
+        sign_ed25519(&pkcs8_bytes, ed25519_claims, ed25519_key_id).unwrap();
     vectors.push(serde_json::json!({
         "name": "signed_ed25519_keyhash",
         "type": "signed_token",
@@ -172,19 +194,22 @@ fn main() {
             "algorithm": "ed25519",
             "private_key_pkcs8_hex": pkcs8_hex,
             "public_key_hex": hex::encode(public_key),
-            "key_hash_hex": hex::encode(ed25519_key_hash),
+            "key_hash_hex": hex::encode(ed25519_key_hash_val),
             "key_id_type": "key_hash",
             "expires_at": ed25519_expires
         },
         "expected_hex": hex::encode(&ed25519_token),
         "expected_len": ed25519_token.len(),
-        "payload_len": 19,
-        "signature_len": 64
     }));
 
     // Vector 8: Ed25519 signed token with embedded public key
     let ed25519_key_id_pk = KeyIdentifier::PublicKey(public_key.to_vec());
-    let ed25519_token_pk = sign_ed25519(&pkcs8_bytes, ed25519_expires, ed25519_key_id_pk).unwrap();
+    let ed25519_claims_pk = Claims {
+        expires_at: ed25519_expires,
+        ..Default::default()
+    };
+    let ed25519_token_pk =
+        sign_ed25519(&pkcs8_bytes, ed25519_claims_pk, ed25519_key_id_pk).unwrap();
     vectors.push(serde_json::json!({
         "name": "signed_ed25519_pubkey",
         "type": "signed_token",
@@ -197,8 +222,6 @@ fn main() {
         },
         "expected_hex": hex::encode(&ed25519_token_pk),
         "expected_len": ed25519_token_pk.len(),
-        "payload_len": 43,
-        "signature_len": 64
     }));
 
     // === Key hash vectors ===
@@ -213,12 +236,11 @@ fn main() {
         "name": "key_hash_ed25519_pubkey",
         "type": "key_hash",
         "input_hex": hex::encode(public_key),
-        "expected_hex": hex::encode(ed25519_key_hash)
+        "expected_hex": hex::encode(ed25519_key_hash_val)
     }));
 
     let output = serde_json::json!({
-        "format_version": "v0",
-        "description": "Protoken v0 wire format test vectors. Any change in these values indicates a wire format regression.",
+        "description": "Protoken wire format test vectors (canonical proto3). Any change in these values indicates a wire format regression.",
         "generated_by": "gen_test_vectors",
         "vectors": vectors
     });

@@ -1,173 +1,29 @@
 //! Deterministic binary serialization for protoken payloads and signed tokens.
 //!
-//! ## v0 Wire Format (custom fixed-layout)
-//!   [ version:1 | algorithm:1 | key_id_type:1 | key_id:N | expires_at:8 ]
-//!   SignedToken: [ payload | signature ] (split by algorithm-determined sig length)
+//! Uses canonical proto3 wire encoding: fields in ascending order, minimal
+//! varints, default values omitted.
 //!
-//! ## v1 Wire Format (canonical proto3)
-//!   Payload: proto3 message with fields 1-9 in ascending order
-//!   SignedToken: proto3 message { Payload payload = 1; bytes signature = 2; }
+//! Payload proto3 fields:
+//!   uint32 version = 1;      tag 0x08
+//!   uint32 algorithm = 2;    tag 0x10
+//!   uint32 key_id_type = 3;  tag 0x18
+//!   bytes  key_id = 4;       tag 0x22
+//!   uint64 expires_at = 5;   tag 0x28
+//!   uint64 not_before = 6;   tag 0x30
+//!   uint64 issued_at = 7;    tag 0x38
+//!   bytes  subject = 8;      tag 0x42
+//!   bytes  audience = 9;     tag 0x4A
 //!
-//! Auto-detection by first byte: 0x00 = v0, 0x08/0x10 = v1 Payload, 0x0A = v1 SignedToken.
+//! SignedToken proto3 fields:
+//!   Payload payload = 1;     tag 0x0A (submessage)
+//!   bytes   signature = 2;   tag 0x12
 
 use crate::error::ProtokenError;
 use crate::proto3;
 use crate::types::*;
 
-// ─── v0 constants ───
-
-const MIN_V0_PAYLOAD_LEN: usize = 19;
-const V0_HEADER_LEN: usize = 3;
-const EXPIRES_AT_LEN: usize = 8;
-
-// ─── v0 serialization (unchanged) ───
-
-/// Serialize a v0 Payload into deterministic bytes.
-pub fn serialize_payload_v0(payload: &Payload) -> Vec<u8> {
-    let key_id_len = payload.metadata.key_identifier.value_len();
-    let total_len = V0_HEADER_LEN + key_id_len + EXPIRES_AT_LEN;
-    let mut buf = Vec::with_capacity(total_len);
-
-    buf.push(payload.metadata.version.to_byte());
-    buf.push(payload.metadata.algorithm.to_byte());
-    buf.push(payload.metadata.key_identifier.key_id_type().to_byte());
-
-    match &payload.metadata.key_identifier {
-        KeyIdentifier::KeyHash(hash) => buf.extend_from_slice(hash),
-        KeyIdentifier::PublicKey(pk) => buf.extend_from_slice(pk),
-    }
-
-    buf.extend_from_slice(&payload.claims.expires_at.to_be_bytes());
-
-    debug_assert_eq!(buf.len(), total_len);
-    buf
-}
-
-/// Deserialize a v0 Payload from deterministic bytes.
-pub fn deserialize_payload_v0(data: &[u8]) -> Result<Payload, ProtokenError> {
-    if data.len() < V0_HEADER_LEN + 1 {
-        return Err(ProtokenError::PayloadTooShort {
-            expected: V0_HEADER_LEN + 1,
-            actual: data.len(),
-        });
-    }
-
-    let version = Version::from_byte(data[0])
-        .ok_or(ProtokenError::InvalidVersion(data[0]))?;
-    let algorithm = Algorithm::from_byte(data[1])
-        .ok_or(ProtokenError::InvalidAlgorithm(data[1]))?;
-    let key_id_type = KeyIdType::from_byte(data[2])
-        .ok_or(ProtokenError::InvalidKeyIdType(data[2]))?;
-
-    let key_id_len = match key_id_type {
-        KeyIdType::KeyHash => KEY_HASH_LEN,
-        KeyIdType::PublicKey => match algorithm {
-            Algorithm::Ed25519 => ED25519_PUBLIC_KEY_LEN,
-            Algorithm::HmacSha256 => {
-                return Err(ProtokenError::InvalidKeyIdType(key_id_type.to_byte()));
-            }
-        },
-    };
-
-    let expected_len = V0_HEADER_LEN + key_id_len + EXPIRES_AT_LEN;
-    if data.len() != expected_len {
-        return Err(ProtokenError::PayloadTooShort {
-            expected: expected_len,
-            actual: data.len(),
-        });
-    }
-
-    let key_id_start = V0_HEADER_LEN;
-    let key_id_end = key_id_start + key_id_len;
-    let key_identifier = match key_id_type {
-        KeyIdType::KeyHash => {
-            let mut hash = [0u8; KEY_HASH_LEN];
-            hash.copy_from_slice(&data[key_id_start..key_id_end]);
-            KeyIdentifier::KeyHash(hash)
-        }
-        KeyIdType::PublicKey => {
-            KeyIdentifier::PublicKey(data[key_id_start..key_id_end].to_vec())
-        }
-    };
-
-    let expires_at_bytes: [u8; 8] = data[key_id_end..key_id_end + 8]
-        .try_into()
-        .expect("slice is exactly 8 bytes");
-    let expires_at = u64::from_be_bytes(expires_at_bytes);
-
-    Ok(Payload {
-        metadata: Metadata {
-            version,
-            algorithm,
-            key_identifier,
-        },
-        claims: Claims {
-            expires_at,
-            ..Default::default()
-        },
-    })
-}
-
-/// Serialize a v0 SignedToken: payload || signature.
-pub fn serialize_signed_token_v0(token: &SignedToken) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(token.payload_bytes.len() + token.signature.len());
-    buf.extend_from_slice(&token.payload_bytes);
-    buf.extend_from_slice(&token.signature);
-    buf
-}
-
-/// Deserialize a v0 SignedToken from wire bytes.
-pub fn deserialize_signed_token_v0(data: &[u8]) -> Result<SignedToken, ProtokenError> {
-    if data.len() < 2 {
-        return Err(ProtokenError::TokenTooShort {
-            expected: 2,
-            actual: data.len(),
-        });
-    }
-
-    let algorithm = Algorithm::from_byte(data[1])
-        .ok_or(ProtokenError::InvalidAlgorithm(data[1]))?;
-
-    let sig_len = algorithm.signature_len();
-
-    if data.len() <= sig_len {
-        return Err(ProtokenError::TokenTooShort {
-            expected: sig_len + MIN_V0_PAYLOAD_LEN,
-            actual: data.len(),
-        });
-    }
-
-    let payload_len = data.len() - sig_len;
-    let payload_bytes = data[..payload_len].to_vec();
-    let signature = data[payload_len..].to_vec();
-
-    deserialize_payload_v0(&payload_bytes)?;
-
-    Ok(SignedToken {
-        payload_bytes,
-        signature,
-    })
-}
-
-// ─── v1 serialization (canonical proto3) ───
-//
-// Payload proto3 fields:
-//   uint32 version = 1;      tag 0x08
-//   uint32 algorithm = 2;    tag 0x10
-//   uint32 key_id_type = 3;  tag 0x18
-//   bytes  key_id = 4;       tag 0x22
-//   uint64 expires_at = 5;   tag 0x28
-//   uint64 not_before = 6;   tag 0x30
-//   uint64 issued_at = 7;    tag 0x38
-//   bytes  subject = 8;      tag 0x42
-//   bytes  audience = 9;     tag 0x4A
-//
-// SignedToken proto3 fields:
-//   Payload payload = 1;     tag 0x0A (submessage)
-//   bytes   signature = 2;   tag 0x12
-
-/// Serialize a v1 Payload into canonical proto3 bytes.
-pub fn serialize_payload_v1(payload: &Payload) -> Vec<u8> {
+/// Serialize a Payload into canonical proto3 bytes.
+pub fn serialize_payload(payload: &Payload) -> Vec<u8> {
     let mut buf = Vec::with_capacity(32);
 
     proto3::encode_uint32(1, payload.metadata.version.to_byte() as u32, &mut buf);
@@ -192,8 +48,15 @@ pub fn serialize_payload_v1(payload: &Payload) -> Vec<u8> {
     buf
 }
 
-/// Deserialize a v1 Payload from canonical proto3 bytes.
-pub fn deserialize_payload_v1(data: &[u8]) -> Result<Payload, ProtokenError> {
+/// Deserialize a Payload from canonical proto3 bytes.
+pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
+    if data.is_empty() {
+        return Err(ProtokenError::PayloadTooShort {
+            expected: 1,
+            actual: 0,
+        });
+    }
+
     let mut version: u32 = 0;
     let mut algorithm: u32 = 0;
     let mut key_id_type: u32 = 0;
@@ -260,11 +123,6 @@ pub fn deserialize_payload_v1(data: &[u8]) -> Result<Payload, ProtokenError> {
     // Validate required fields
     let version = Version::from_byte(version as u8)
         .ok_or(ProtokenError::InvalidVersion(version as u8))?;
-    if version == Version::V0 {
-        return Err(ProtokenError::MalformedEncoding(
-            "version 0 must use v0 custom format, not proto3".into(),
-        ));
-    }
 
     let algorithm = Algorithm::from_byte(algorithm as u8)
         .ok_or(ProtokenError::InvalidAlgorithm(algorithm as u8))?;
@@ -318,17 +176,24 @@ pub fn deserialize_payload_v1(data: &[u8]) -> Result<Payload, ProtokenError> {
     })
 }
 
-/// Serialize a v1 SignedToken as proto3: { Payload payload = 1; bytes signature = 2; }
-pub fn serialize_signed_token_v1(token: &SignedToken) -> Vec<u8> {
+/// Serialize a SignedToken as proto3: { Payload payload = 1; bytes signature = 2; }
+pub fn serialize_signed_token(token: &SignedToken) -> Vec<u8> {
     let mut buf = Vec::with_capacity(token.payload_bytes.len() + token.signature.len() + 6);
     proto3::encode_bytes(1, &token.payload_bytes, &mut buf);
     proto3::encode_bytes(2, &token.signature, &mut buf);
     buf
 }
 
-/// Deserialize a v1 SignedToken from proto3 bytes.
+/// Deserialize a SignedToken from proto3 bytes.
 /// Returns the raw payload bytes (for signature verification) and signature.
-pub fn deserialize_signed_token_v1(data: &[u8]) -> Result<SignedToken, ProtokenError> {
+pub fn deserialize_signed_token(data: &[u8]) -> Result<SignedToken, ProtokenError> {
+    if data.is_empty() {
+        return Err(ProtokenError::TokenTooShort {
+            expected: 1,
+            actual: 0,
+        });
+    }
+
     let mut payload_bytes: Option<Vec<u8>> = None;
     let mut signature: Option<Vec<u8>> = None;
 
@@ -366,7 +231,7 @@ pub fn deserialize_signed_token_v1(data: &[u8]) -> Result<SignedToken, ProtokenE
     })?;
 
     // Validate payload is parseable
-    deserialize_payload_v1(&payload_bytes)?;
+    deserialize_payload(&payload_bytes)?;
 
     Ok(SignedToken {
         payload_bytes,
@@ -374,69 +239,9 @@ pub fn deserialize_signed_token_v1(data: &[u8]) -> Result<SignedToken, ProtokenE
     })
 }
 
-// ─── Auto-detecting wrappers ───
-
-/// Serialize a Payload, choosing format based on version.
-pub fn serialize_payload(payload: &Payload) -> Vec<u8> {
-    match payload.metadata.version {
-        Version::V0 => serialize_payload_v0(payload),
-        Version::V1 => serialize_payload_v1(payload),
-    }
-}
-
-/// Deserialize a Payload, auto-detecting v0 vs v1 by first byte.
-pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
-    if data.is_empty() {
-        return Err(ProtokenError::PayloadTooShort {
-            expected: 1,
-            actual: 0,
-        });
-    }
-    match data[0] {
-        0x00 => deserialize_payload_v0(data),
-        // 0x08 = field 1 (version) varint, 0x10 = field 2 (algorithm) varint
-        0x08 | 0x10 => deserialize_payload_v1(data),
-        b => Err(ProtokenError::MalformedEncoding(format!(
-            "unrecognized payload format: first byte 0x{b:02X}"
-        ))),
-    }
-}
-
-/// Serialize a SignedToken, choosing format based on payload version.
-pub fn serialize_signed_token(token: &SignedToken) -> Vec<u8> {
-    // Detect version from payload bytes
-    if !token.payload_bytes.is_empty() && token.payload_bytes[0] != 0x00 {
-        serialize_signed_token_v1(token)
-    } else {
-        serialize_signed_token_v0(token)
-    }
-}
-
-/// Deserialize a SignedToken, auto-detecting v0 vs v1 by first byte.
-pub fn deserialize_signed_token(data: &[u8]) -> Result<SignedToken, ProtokenError> {
-    if data.is_empty() {
-        return Err(ProtokenError::TokenTooShort {
-            expected: 1,
-            actual: 0,
-        });
-    }
-    match data[0] {
-        0x00 => deserialize_signed_token_v0(data),
-        // 0x0A = field 1 (payload submessage) LEN
-        0x0A => deserialize_signed_token_v1(data),
-        b => Err(ProtokenError::MalformedEncoding(format!(
-            "unrecognized token format: first byte 0x{b:02X}"
-        ))),
-    }
-}
-
-// ─── Tests ───
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ─── v0 tests (unchanged) ───
 
     fn sample_payload_hmac() -> Payload {
         Payload {
@@ -452,144 +257,10 @@ mod tests {
         }
     }
 
-    fn sample_payload_ed25519() -> Payload {
+    fn sample_payload_full() -> Payload {
         Payload {
             metadata: Metadata {
                 version: Version::V0,
-                algorithm: Algorithm::Ed25519,
-                key_identifier: KeyIdentifier::KeyHash([0xaa; 8]),
-            },
-            claims: Claims {
-                expires_at: 1800000000,
-                ..Default::default()
-            },
-        }
-    }
-
-    #[test]
-    fn test_payload_roundtrip_hmac() {
-        let payload = sample_payload_hmac();
-        let bytes = serialize_payload(&payload);
-        assert_eq!(bytes.len(), 19);
-        let decoded = deserialize_payload(&bytes).unwrap();
-        assert_eq!(payload, decoded);
-    }
-
-    #[test]
-    fn test_payload_roundtrip_ed25519() {
-        let payload = sample_payload_ed25519();
-        let bytes = serialize_payload(&payload);
-        assert_eq!(bytes.len(), 19);
-        let decoded = deserialize_payload(&bytes).unwrap();
-        assert_eq!(payload, decoded);
-    }
-
-    #[test]
-    fn test_payload_deterministic() {
-        let payload = sample_payload_hmac();
-        let bytes1 = serialize_payload(&payload);
-        let bytes2 = serialize_payload(&payload);
-        assert_eq!(bytes1, bytes2, "serialization must be deterministic");
-    }
-
-    #[test]
-    fn test_payload_wire_format() {
-        let payload = sample_payload_hmac();
-        let bytes = serialize_payload(&payload);
-
-        assert_eq!(bytes[0], 0x00); // version V0
-        assert_eq!(bytes[1], 0x01); // algorithm HMAC-SHA256
-        assert_eq!(bytes[2], 0x01); // key_id_type KeyHash
-        assert_eq!(&bytes[3..11], &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
-        assert_eq!(&bytes[11..19], &1700000000u64.to_be_bytes());
-    }
-
-    #[test]
-    fn test_deserialize_payload_too_short() {
-        assert!(deserialize_payload(&[]).is_err());
-        assert!(deserialize_payload_v0(&[0x00]).is_err());
-        assert!(deserialize_payload_v0(&[0x00, 0x01]).is_err());
-        assert!(deserialize_payload_v0(&[0x00, 0x01, 0x01]).is_err());
-    }
-
-    #[test]
-    fn test_deserialize_payload_invalid_version() {
-        let mut bytes = serialize_payload_v0(&sample_payload_hmac());
-        bytes[0] = 0xFF;
-        assert!(matches!(
-            deserialize_payload_v0(&bytes),
-            Err(ProtokenError::InvalidVersion(0xFF))
-        ));
-    }
-
-    #[test]
-    fn test_deserialize_payload_invalid_algorithm() {
-        let mut bytes = serialize_payload_v0(&sample_payload_hmac());
-        bytes[1] = 0xFF;
-        assert!(matches!(
-            deserialize_payload_v0(&bytes),
-            Err(ProtokenError::InvalidAlgorithm(0xFF))
-        ));
-    }
-
-    #[test]
-    fn test_signed_token_roundtrip() {
-        let payload_bytes = serialize_payload_v0(&sample_payload_hmac());
-        let signature = vec![0xAB; 32];
-        let token = SignedToken {
-            payload_bytes: payload_bytes.clone(),
-            signature: signature.clone(),
-        };
-        let wire = serialize_signed_token_v0(&token);
-        assert_eq!(wire.len(), 19 + 32);
-
-        let decoded = deserialize_signed_token_v0(&wire).unwrap();
-        assert_eq!(decoded.payload_bytes, payload_bytes);
-        assert_eq!(decoded.signature, signature);
-    }
-
-    #[test]
-    fn test_signed_token_ed25519_roundtrip() {
-        let payload_bytes = serialize_payload_v0(&sample_payload_ed25519());
-        let signature = vec![0xCD; 64];
-        let token = SignedToken {
-            payload_bytes: payload_bytes.clone(),
-            signature: signature.clone(),
-        };
-        let wire = serialize_signed_token_v0(&token);
-        assert_eq!(wire.len(), 19 + 64);
-
-        let decoded = deserialize_signed_token_v0(&wire).unwrap();
-        assert_eq!(decoded.payload_bytes, payload_bytes);
-        assert_eq!(decoded.signature, signature);
-    }
-
-    #[test]
-    fn test_deserialize_signed_token_too_short() {
-        assert!(deserialize_signed_token(&[]).is_err());
-        assert!(deserialize_signed_token_v0(&[0x00]).is_err());
-    }
-
-    // ─── v1 tests ───
-
-    fn sample_payload_v1_hmac() -> Payload {
-        Payload {
-            metadata: Metadata {
-                version: Version::V1,
-                algorithm: Algorithm::HmacSha256,
-                key_identifier: KeyIdentifier::KeyHash([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]),
-            },
-            claims: Claims {
-                expires_at: 1700000000,
-                ..Default::default()
-            },
-        }
-    }
-
-    fn sample_payload_v1_full() -> Payload {
-        Payload {
-            metadata: Metadata {
-                version: Version::V1,
                 algorithm: Algorithm::Ed25519,
                 key_identifier: KeyIdentifier::KeyHash([0xaa; 8]),
             },
@@ -604,58 +275,58 @@ mod tests {
     }
 
     #[test]
-    fn test_v1_payload_roundtrip_hmac() {
-        let payload = sample_payload_v1_hmac();
-        let bytes = serialize_payload_v1(&payload);
-        let decoded = deserialize_payload_v1(&bytes).unwrap();
+    fn test_payload_roundtrip_hmac() {
+        let payload = sample_payload_hmac();
+        let bytes = serialize_payload(&payload);
+        let decoded = deserialize_payload(&bytes).unwrap();
         assert_eq!(payload, decoded);
     }
 
     #[test]
-    fn test_v1_payload_roundtrip_full() {
-        let payload = sample_payload_v1_full();
-        let bytes = serialize_payload_v1(&payload);
-        let decoded = deserialize_payload_v1(&bytes).unwrap();
+    fn test_payload_roundtrip_full() {
+        let payload = sample_payload_full();
+        let bytes = serialize_payload(&payload);
+        let decoded = deserialize_payload(&bytes).unwrap();
         assert_eq!(payload, decoded);
     }
 
     #[test]
-    fn test_v1_payload_deterministic() {
-        let payload = sample_payload_v1_full();
-        let bytes1 = serialize_payload_v1(&payload);
-        let bytes2 = serialize_payload_v1(&payload);
-        assert_eq!(bytes1, bytes2, "v1 serialization must be deterministic");
+    fn test_payload_deterministic() {
+        let payload = sample_payload_full();
+        let bytes1 = serialize_payload(&payload);
+        let bytes2 = serialize_payload(&payload);
+        assert_eq!(bytes1, bytes2, "serialization must be deterministic");
     }
 
     #[test]
-    fn test_v1_payload_wire_format() {
-        let payload = sample_payload_v1_hmac();
-        let bytes = serialize_payload_v1(&payload);
+    fn test_payload_wire_format() {
+        let payload = sample_payload_hmac();
+        let bytes = serialize_payload(&payload);
 
-        // version=1: tag 0x08, value 0x01
-        assert_eq!(bytes[0], 0x08);
-        assert_eq!(bytes[1], 0x01);
+        // version=0 is default, omitted per proto3
         // algorithm=1: tag 0x10, value 0x01
-        assert_eq!(bytes[2], 0x10);
-        assert_eq!(bytes[3], 0x01);
+        assert_eq!(bytes[0], 0x10);
+        assert_eq!(bytes[1], 0x01);
         // key_id_type=1: tag 0x18, value 0x01
-        assert_eq!(bytes[4], 0x18);
-        assert_eq!(bytes[5], 0x01);
+        assert_eq!(bytes[2], 0x18);
+        assert_eq!(bytes[3], 0x01);
         // key_id: tag 0x22, length 0x08, then 8 bytes
-        assert_eq!(bytes[6], 0x22);
-        assert_eq!(bytes[7], 0x08);
-        assert_eq!(&bytes[8..16], &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        assert_eq!(bytes[4], 0x22);
+        assert_eq!(bytes[5], 0x08);
+        assert_eq!(&bytes[6..14], &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
         // expires_at: tag 0x28, varint 1700000000
-        assert_eq!(bytes[16], 0x28);
+        assert_eq!(bytes[14], 0x28);
     }
 
     #[test]
-    fn test_v1_payload_default_omission() {
-        // When not_before=0, issued_at=0, subject/audience empty,
+    fn test_payload_default_omission() {
+        // When version=0, not_before=0, issued_at=0, subject/audience empty,
         // those fields should not appear in the encoding
-        let payload = sample_payload_v1_hmac();
-        let bytes = serialize_payload_v1(&payload);
+        let payload = sample_payload_hmac();
+        let bytes = serialize_payload(&payload);
 
+        // Should NOT contain tag for field 1 (0x08) since version=0
+        assert_ne!(bytes[0], 0x08, "version=0 should be omitted");
         // Should NOT contain tags for fields 6 (0x30), 7 (0x38), 8 (0x42), 9 (0x4A)
         assert!(!bytes.contains(&0x30), "not_before=0 should be omitted");
         assert!(!bytes.contains(&0x38), "issued_at=0 should be omitted");
@@ -664,9 +335,9 @@ mod tests {
     }
 
     #[test]
-    fn test_v1_payload_with_optional_fields() {
-        let payload = sample_payload_v1_full();
-        let bytes = serialize_payload_v1(&payload);
+    fn test_payload_with_optional_fields() {
+        let payload = sample_payload_full();
+        let bytes = serialize_payload(&payload);
 
         // Should contain tags for fields 6, 7, 8, 9
         assert!(bytes.contains(&0x30), "not_before should be present");
@@ -676,10 +347,10 @@ mod tests {
     }
 
     #[test]
-    fn test_v1_payload_ed25519_pubkey() {
+    fn test_payload_ed25519_pubkey() {
         let payload = Payload {
             metadata: Metadata {
-                version: Version::V1,
+                version: Version::V0,
                 algorithm: Algorithm::Ed25519,
                 key_identifier: KeyIdentifier::PublicKey(vec![0xbb; 32]),
             },
@@ -688,112 +359,75 @@ mod tests {
                 ..Default::default()
             },
         };
-        let bytes = serialize_payload_v1(&payload);
-        let decoded = deserialize_payload_v1(&bytes).unwrap();
+        let bytes = serialize_payload(&payload);
+        let decoded = deserialize_payload(&bytes).unwrap();
         assert_eq!(payload, decoded);
     }
 
     #[test]
-    fn test_v1_signed_token_roundtrip() {
-        let payload = sample_payload_v1_hmac();
-        let payload_bytes = serialize_payload_v1(&payload);
+    fn test_deserialize_payload_too_short() {
+        assert!(deserialize_payload(&[]).is_err());
+    }
+
+    #[test]
+    fn test_deserialize_payload_invalid_algorithm() {
+        // Manually encode algorithm=255
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 255, &mut bad);
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 8], &mut bad);
+        proto3::encode_uint64(5, 1700000000, &mut bad);
+        assert!(matches!(
+            deserialize_payload(&bad),
+            Err(ProtokenError::InvalidAlgorithm(255))
+        ));
+    }
+
+    #[test]
+    fn test_signed_token_roundtrip() {
+        let payload = sample_payload_hmac();
+        let payload_bytes = serialize_payload(&payload);
         let signature = vec![0xAB; 32];
         let token = SignedToken {
             payload_bytes: payload_bytes.clone(),
             signature: signature.clone(),
         };
-        let wire = serialize_signed_token_v1(&token);
+        let wire = serialize_signed_token(&token);
 
         // Should start with 0x0A (field 1, LEN)
         assert_eq!(wire[0], 0x0A);
 
-        let decoded = deserialize_signed_token_v1(&wire).unwrap();
+        let decoded = deserialize_signed_token(&wire).unwrap();
         assert_eq!(decoded.payload_bytes, payload_bytes);
         assert_eq!(decoded.signature, signature);
     }
 
     #[test]
-    fn test_v1_signed_token_ed25519_roundtrip() {
-        let payload = sample_payload_v1_full();
-        let payload_bytes = serialize_payload_v1(&payload);
+    fn test_signed_token_ed25519_roundtrip() {
+        let payload = sample_payload_full();
+        let payload_bytes = serialize_payload(&payload);
         let signature = vec![0xCD; 64];
         let token = SignedToken {
             payload_bytes: payload_bytes.clone(),
             signature: signature.clone(),
         };
-        let wire = serialize_signed_token_v1(&token);
-        let decoded = deserialize_signed_token_v1(&wire).unwrap();
+        let wire = serialize_signed_token(&token);
+        let decoded = deserialize_signed_token(&wire).unwrap();
         assert_eq!(decoded.payload_bytes, payload_bytes);
         assert_eq!(decoded.signature, signature);
     }
 
-    // ─── Auto-detection tests ───
-
     #[test]
-    fn test_auto_detect_payload_v0() {
-        let payload = sample_payload_hmac();
-        let bytes = serialize_payload(&payload);
-        assert_eq!(bytes[0], 0x00);
-        let decoded = deserialize_payload(&bytes).unwrap();
-        assert_eq!(decoded.metadata.version, Version::V0);
+    fn test_deserialize_signed_token_too_short() {
+        assert!(deserialize_signed_token(&[]).is_err());
     }
 
     #[test]
-    fn test_auto_detect_payload_v1() {
-        let payload = sample_payload_v1_hmac();
-        let bytes = serialize_payload(&payload);
-        assert_eq!(bytes[0], 0x08);
-        let decoded = deserialize_payload(&bytes).unwrap();
-        assert_eq!(decoded.metadata.version, Version::V1);
-    }
-
-    #[test]
-    fn test_auto_detect_signed_token_v0() {
-        let payload_bytes = serialize_payload_v0(&sample_payload_hmac());
-        let token = SignedToken {
-            payload_bytes,
-            signature: vec![0xAB; 32],
-        };
-        let wire = serialize_signed_token(&token);
-        assert_eq!(wire[0], 0x00); // v0 format
-        let decoded = deserialize_signed_token(&wire).unwrap();
-        assert_eq!(decoded.signature.len(), 32);
-    }
-
-    #[test]
-    fn test_auto_detect_signed_token_v1() {
-        let payload_bytes = serialize_payload_v1(&sample_payload_v1_hmac());
-        let token = SignedToken {
-            payload_bytes,
-            signature: vec![0xAB; 32],
-        };
-        let wire = serialize_signed_token(&token);
-        assert_eq!(wire[0], 0x0A); // v1 proto3 format
-        let decoded = deserialize_signed_token(&wire).unwrap();
-        assert_eq!(decoded.signature.len(), 32);
-    }
-
-    #[test]
-    fn test_v1_rejects_non_ascending_fields() {
+    fn test_rejects_non_ascending_fields() {
         // Manually encode fields out of order: field 2 before field 1
         let mut bad = Vec::new();
         proto3::encode_uint32(2, 1, &mut bad); // algorithm first
         proto3::encode_uint32(1, 1, &mut bad); // version second (wrong!)
-        assert!(deserialize_payload_v1(&bad).is_err());
-    }
-
-    #[test]
-    fn test_v1_rejects_version_zero() {
-        // Proto3 format with explicit version=0 should fail
-        // (version=0 is omitted per proto3, so this is a manually crafted test)
-        let mut bad = Vec::new();
-        // Skip version (field 1, which would encode version=0 as absent)
-        proto3::encode_uint32(2, 1, &mut bad); // algorithm=HMAC
-        proto3::encode_uint32(3, 1, &mut bad); // key_id_type=key_hash
-        proto3::encode_bytes(4, &[0; 8], &mut bad); // key_id
-        proto3::encode_uint64(5, 1700000000, &mut bad); // expires_at
-
-        // version defaults to 0, which should be rejected
-        assert!(deserialize_payload_v1(&bad).is_err());
+        assert!(deserialize_payload(&bad).is_err());
     }
 }
