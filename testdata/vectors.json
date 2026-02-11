@@ -1,76 +1,74 @@
 {
-  "description": "Protoken v0 wire format test vectors. Any change in these values indicates a wire format regression.",
-  "format_version": "v0",
+  "description": "Protoken wire format test vectors (canonical proto3). Any change in these values indicates a wire format regression.",
   "generated_by": "gen_test_vectors",
   "vectors": [
     {
-      "expected_hex": "0001010102030405060708000000006553f100",
-      "expected_len": 19,
+      "expected_hex": "10011801220801020304050607082880e2cfaa06",
+      "expected_len": 20,
       "input": {
         "algorithm": 1,
         "expires_at": 1700000000,
         "key_id_hex": "0102030405060708",
-        "key_id_type": 1,
-        "version": 0
+        "key_id_type": 1
       },
       "name": "payload_hmac_keyhash",
       "type": "payload"
     },
     {
-      "expected_hex": "000201aaaaaaaaaaaaaaaa000000006b49d200",
-      "expected_len": 19,
+      "expected_hex": "100218012208aaaaaaaaaaaaaaaa2880a4a7da06",
+      "expected_len": 20,
       "input": {
         "algorithm": 2,
         "expires_at": 1800000000,
         "key_id_hex": "aaaaaaaaaaaaaaaa",
-        "key_id_type": 1,
-        "version": 0
+        "key_id_type": 1
       },
       "name": "payload_ed25519_keyhash",
       "type": "payload"
     },
     {
-      "expected_hex": "000202bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb00000000713fb300",
-      "expected_len": 43,
+      "expected_hex": "100218022220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2880e6fe8907",
+      "expected_len": 44,
       "input": {
         "algorithm": 2,
         "expires_at": 1900000000,
         "key_id_hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "key_id_type": 2,
-        "version": 0
+        "key_id_type": 2
       },
       "name": "payload_ed25519_pubkey",
       "type": "payload"
     },
     {
-      "expected_hex": "00010100000000000000000000000000000000",
-      "expected_len": 19,
+      "expected_hex": "10011801220811111111111111112880e2cfaa0630f093cfaa0638f093cfaa06420a757365723a616c6963654a0f6170692e6578616d706c652e636f6d",
+      "expected_len": 61,
       "input": {
         "algorithm": 1,
-        "expires_at": 0,
-        "key_id_hex": "0000000000000000",
+        "audience": "api.example.com",
+        "expires_at": 1700000000,
+        "issued_at": 1699990000,
+        "key_id_hex": "1111111111111111",
         "key_id_type": 1,
-        "version": 0
+        "not_before": 1699990000,
+        "subject": "user:alice"
       },
-      "name": "payload_hmac_zeros",
+      "name": "payload_hmac_full_claims",
       "type": "payload"
     },
     {
-      "expected_hex": "000101ffffffffffffffffffffffffffffffff",
-      "expected_len": 19,
+      "expected_hex": "100118012208ffffffffffffffff28ffffffffffffffffff01",
+      "expected_len": 25,
       "input": {
         "algorithm": 1,
         "expires_at": 18446744073709551615,
         "key_id_hex": "ffffffffffffffff",
-        "key_id_type": 1,
-        "version": 0
+        "key_id_type": 1
       },
       "name": "payload_hmac_max",
       "type": "payload"
     },
     {
-      "expected_hex": "00010166b078778eab1cd4000000006553f1005d1c0415f5771c16dad2197648805c9840521ed55ee1547d0780e0209d872241",
-      "expected_len": 51,
+      "expected_hex": "0a1410011801220866b078778eab1cd42880e2cfaa061220fc5679ce9fcc7bca58df7abdd7a33aacd35c95f92c8904939da581add78d90ce",
+      "expected_len": 56,
       "input": {
         "algorithm": "hmac",
         "expires_at": 1700000000,
@@ -78,13 +76,11 @@
         "key_hex": "70726f746f6b656e2d746573742d766563746f722d6b65792d646f2d6e6f742d7573652d696e2d70726f64756374696f6e2121"
       },
       "name": "signed_hmac",
-      "payload_len": 19,
-      "signature_len": 32,
       "type": "signed_token"
     },
     {
-      "expected_hex": "00020161ba51c9d9c3b0f7000000006b49d2003a4582082289dc0d14d537bfb6506927c0192bb4fd1bc1880350ef905b4149e8991abf11c4dfaba3633fda1107c2877a29a37661a95c7fb00cc92fe587d42002",
-      "expected_len": 83,
+      "expected_hex": "0a1410021801220861ba51c9d9c3b0f72880a4a7da0612403b5166433828a21ea5d4b46d081b0f6dee2532886157dfb3828f2e3f539c1db04c5609e0c8abe306cab31a0cd0c8b9ab67bbdf4c68a2b8129e91ea31e6dd8805",
+      "expected_len": 88,
       "input": {
         "algorithm": "ed25519",
         "expires_at": 1800000000,
@@ -94,13 +90,11 @@
         "public_key_hex": "b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e8"
       },
       "name": "signed_ed25519_keyhash",
-      "payload_len": 19,
-      "signature_len": 64,
       "type": "signed_token"
     },
     {
-      "expected_hex": "000202b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e8000000006b49d2001e4b55c2d2827fd8a6ddf15a35463b019450b0f8671e3cc5a2168568ac2a94625d4d14d44b5cfee01343d547714ec9e8c31b6f7f42e4603a60b7b3ac8948eb09",
-      "expected_len": 107,
+      "expected_hex": "0a2c100218022220b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e82880a4a7da061240b9791660af10a58a5cff941abfc8a1a29d71fa09b4b1ed30cdaed5bbe19e1bba248256fe7fa9c66b29a5492284a87eeeacefa662f595ecdeb782ff678e28c70f",
+      "expected_len": 112,
       "input": {
         "algorithm": "ed25519",
         "expires_at": 1800000000,
@@ -109,8 +103,6 @@
         "public_key_hex": "b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e8"
       },
       "name": "signed_ed25519_pubkey",
-      "payload_len": 43,
-      "signature_len": 64,
       "type": "signed_token"
     },
     {

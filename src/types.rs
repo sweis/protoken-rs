@@ -1,19 +1,16 @@
 use serde::Serialize;
 
 /// Token format version.
-/// V0 = custom fixed-layout binary. V1+ = canonical proto3 wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[repr(u8)]
 pub enum Version {
     V0 = 0,
-    V1 = 1,
 }
 
 impl Version {
     pub fn from_byte(b: u8) -> Option<Version> {
         match b {
             0 => Some(Version::V0),
-            1 => Some(Version::V1),
             _ => None,
         }
     }
