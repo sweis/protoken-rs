@@ -1,3 +1,4 @@
+use crate::error::ProtokenError;
 use serde::Serialize;
 
 /// Token format version.
@@ -128,6 +129,43 @@ pub struct Claims {
     pub scopes: Vec<String>,
 }
 
+impl Claims {
+    /// Validate that all claim fields are within allowed limits.
+    pub fn validate(&self) -> Result<(), ProtokenError> {
+        if self.subject.len() > MAX_CLAIM_BYTES_LEN {
+            return Err(ProtokenError::MalformedEncoding(format!(
+                "subject too long: {} bytes (max {})",
+                self.subject.len(),
+                MAX_CLAIM_BYTES_LEN
+            )));
+        }
+        if self.audience.len() > MAX_CLAIM_BYTES_LEN {
+            return Err(ProtokenError::MalformedEncoding(format!(
+                "audience too long: {} bytes (max {})",
+                self.audience.len(),
+                MAX_CLAIM_BYTES_LEN
+            )));
+        }
+        if self.scopes.len() > MAX_SCOPES {
+            return Err(ProtokenError::MalformedEncoding(format!(
+                "too many scopes: {} (max {})",
+                self.scopes.len(),
+                MAX_SCOPES
+            )));
+        }
+        for scope in &self.scopes {
+            if scope.len() > MAX_CLAIM_BYTES_LEN {
+                return Err(ProtokenError::MalformedEncoding(format!(
+                    "scope entry too long: {} bytes (max {})",
+                    scope.len(),
+                    MAX_CLAIM_BYTES_LEN
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn is_zero(v: &u64) -> bool {
     *v == 0
 }
@@ -151,6 +189,12 @@ pub struct SignedToken {
     pub payload_bytes: Vec<u8>,
     pub signature: Vec<u8>,
 }
+
+/// Maximum size of serialized payload bytes in a SignedToken.
+pub const MAX_PAYLOAD_BYTES: usize = 4096;
+
+/// Maximum size of signature bytes in a SignedToken.
+pub const MAX_SIGNATURE_BYTES: usize = 128;
 
 /// Constant: key hash length in bytes.
 pub const KEY_HASH_LEN: usize = 8;

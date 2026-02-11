@@ -8,6 +8,23 @@ use crate::serialize::{deserialize_payload, deserialize_signed_token};
 use crate::sign::compute_key_hash;
 use crate::types::*;
 
+/// Constant-time byte slice comparison to prevent timing side-channels.
+/// Returns Ok(()) if slices are equal, Err(()) otherwise.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> Result<(), ()> {
+    if a.len() != b.len() {
+        return Err(());
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    if diff == 0 {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
 /// Result of a successful token verification.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VerifiedClaims {
@@ -35,13 +52,11 @@ pub fn verify_hmac(
         )));
     }
 
-    // Check key hash
+    // Check key hash (constant-time comparison)
     let expected_hash = compute_key_hash(key);
     match &payload.metadata.key_identifier {
         KeyIdentifier::KeyHash(hash) => {
-            if hash != &expected_hash {
-                return Err(ProtokenError::KeyHashMismatch);
-            }
+            constant_time_eq(hash, &expected_hash).map_err(|_| ProtokenError::KeyHashMismatch)?;
         }
         KeyIdentifier::PublicKey(_) => {
             return Err(ProtokenError::VerificationFailed(
@@ -83,18 +98,14 @@ pub fn verify_ed25519(
         )));
     }
 
-    // Check key identity
+    // Check key identity (constant-time comparison)
     let expected_hash = compute_key_hash(public_key_bytes);
     match &payload.metadata.key_identifier {
         KeyIdentifier::KeyHash(hash) => {
-            if hash != &expected_hash {
-                return Err(ProtokenError::KeyHashMismatch);
-            }
+            constant_time_eq(hash, &expected_hash).map_err(|_| ProtokenError::KeyHashMismatch)?;
         }
         KeyIdentifier::PublicKey(pk) => {
-            if pk.as_slice() != public_key_bytes {
-                return Err(ProtokenError::KeyHashMismatch);
-            }
+            constant_time_eq(pk, public_key_bytes).map_err(|_| ProtokenError::KeyHashMismatch)?;
         }
     }
 
@@ -145,7 +156,7 @@ mod tests {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let token_bytes = sign_hmac(key, claims);
+        let token_bytes = sign_hmac(key, claims).unwrap();
 
         let result = verify_hmac(key, &token_bytes, 1700000000);
         assert!(result.is_ok());
@@ -161,7 +172,7 @@ mod tests {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let token_bytes = sign_hmac(key, claims);
+        let token_bytes = sign_hmac(key, claims).unwrap();
 
         let result = verify_hmac(wrong_key, &token_bytes, 0);
         assert!(result.is_err());
@@ -174,7 +185,7 @@ mod tests {
             expires_at: 1000,
             ..Default::default()
         };
-        let token_bytes = sign_hmac(key, claims);
+        let token_bytes = sign_hmac(key, claims).unwrap();
 
         let result = verify_hmac(key, &token_bytes, 2000);
         assert!(matches!(result, Err(ProtokenError::TokenExpired { .. })));
@@ -187,7 +198,7 @@ mod tests {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let mut token_bytes = sign_hmac(key, claims);
+        let mut token_bytes = sign_hmac(key, claims).unwrap();
         // Corrupt a byte in the payload area (after the proto3 envelope header)
         token_bytes[5] ^= 0xFF;
 
@@ -202,7 +213,7 @@ mod tests {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let mut token_bytes = sign_hmac(key, claims);
+        let mut token_bytes = sign_hmac(key, claims).unwrap();
         let last = token_bytes.len() - 1;
         token_bytes[last] ^= 0xFF;
 
@@ -272,7 +283,7 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_hmac(key, claims);
+        let token_bytes = sign_hmac(key, claims).unwrap();
 
         for i in 0..token_bytes.len() {
             let mut corrupted = token_bytes.clone();
@@ -296,7 +307,7 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_hmac(key, claims);
+        let token_bytes = sign_hmac(key, claims).unwrap();
 
         for i in 0..token_bytes.len() {
             let mut corrupted = token_bytes.clone();
@@ -347,7 +358,7 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_hmac(key, claims);
+        let token_bytes = sign_hmac(key, claims).unwrap();
 
         // Before not_before -> should fail
         let result = verify_hmac(key, &token_bytes, 3000);

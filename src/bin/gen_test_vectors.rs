@@ -187,7 +187,7 @@ fn main() {
         expires_at: hmac_expires,
         ..Default::default()
     };
-    let hmac_token = sign_hmac(hmac_key, hmac_claims);
+    let hmac_token = sign_hmac(hmac_key, hmac_claims).unwrap();
     vectors.push(serde_json::json!({
         "name": "signed_hmac",
         "type": "signed_token",

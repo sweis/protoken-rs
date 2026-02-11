@@ -238,6 +238,7 @@ pub fn serialize_signed_token(token: &SignedToken) -> Vec<u8> {
 
 /// Deserialize a SignedToken from proto3 bytes.
 /// Returns the raw payload bytes (for signature verification) and signature.
+/// Callers should use `deserialize_payload()` on `payload_bytes` to validate and parse the payload.
 pub fn deserialize_signed_token(data: &[u8]) -> Result<SignedToken, ProtokenError> {
     if data.is_empty() {
         return Err(ProtokenError::TokenTooShort {
@@ -264,10 +265,26 @@ pub fn deserialize_signed_token(data: &[u8]) -> Result<SignedToken, ProtokenErro
 
         match (field_number, wire_type) {
             (1, 2) => {
-                payload_bytes = Some(proto3::read_bytes_value(data, &mut pos)?.to_vec());
+                let bytes = proto3::read_bytes_value(data, &mut pos)?;
+                if bytes.len() > MAX_PAYLOAD_BYTES {
+                    return Err(ProtokenError::MalformedEncoding(format!(
+                        "payload too large: {} bytes (max {})",
+                        bytes.len(),
+                        MAX_PAYLOAD_BYTES
+                    )));
+                }
+                payload_bytes = Some(bytes.to_vec());
             }
             (2, 2) => {
-                signature = Some(proto3::read_bytes_value(data, &mut pos)?.to_vec());
+                let bytes = proto3::read_bytes_value(data, &mut pos)?;
+                if bytes.len() > MAX_SIGNATURE_BYTES {
+                    return Err(ProtokenError::MalformedEncoding(format!(
+                        "signature too large: {} bytes (max {})",
+                        bytes.len(),
+                        MAX_SIGNATURE_BYTES
+                    )));
+                }
+                signature = Some(bytes.to_vec());
             }
             (_, _) => {
                 proto3::skip_field(wire_type, data, &mut pos)?;
@@ -281,9 +298,6 @@ pub fn deserialize_signed_token(data: &[u8]) -> Result<SignedToken, ProtokenErro
     let signature = signature.ok_or_else(|| {
         ProtokenError::MalformedEncoding("missing signature field in SignedToken".into())
     })?;
-
-    // Validate payload is parseable
-    deserialize_payload(&payload_bytes)?;
 
     Ok(SignedToken {
         payload_bytes,

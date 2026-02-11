@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use std::io::{self, Read as _};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -177,7 +175,7 @@ fn cmd_sign(
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system time before epoch")
+        .map_err(|_| "system clock is set before Unix epoch (1970-01-01)")?
         .as_secs();
 
     let expires_at = now
@@ -194,7 +192,7 @@ fn cmd_sign(
     };
 
     let token_bytes = match algorithm {
-        "hmac" => sign_hmac(&key_bytes, claims),
+        "hmac" => sign_hmac(&key_bytes, claims)?,
         "ed25519" => {
             let key_id = ed25519_key_hash(&key_bytes)?;
             sign_ed25519(&key_bytes, claims, key_id)?
@@ -227,7 +225,7 @@ fn cmd_verify(
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system time before epoch")
+        .map_err(|_| "system clock is set before Unix epoch (1970-01-01)")?
         .as_secs();
 
     let verified = match algorithm {
