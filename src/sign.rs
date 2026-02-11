@@ -5,7 +5,7 @@ use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 
 use crate::error::ProtokenError;
-use crate::serialize::serialize_payload;
+use crate::serialize::{serialize_payload, serialize_signed_token};
 use crate::types::*;
 
 /// Compute the 8-byte key hash: SHA-256(key_material)[0..8].
@@ -17,12 +17,10 @@ pub fn compute_key_hash(key_material: &[u8]) -> [u8; KEY_HASH_LEN] {
     truncated
 }
 
-/// Sign a payload with HMAC-SHA256.
-///
-/// `key` is the raw symmetric key bytes.
-/// `expires_at` is the Unix timestamp for token expiration.
-///
-/// Returns the serialized SignedToken wire bytes.
+// ─── v0 signing (kept for backward compatibility) ───
+
+/// Sign a v0 payload with HMAC-SHA256.
+/// Returns the serialized v0 SignedToken wire bytes.
 pub fn sign_hmac(key: &[u8], expires_at: u64) -> Vec<u8> {
     let key_hash = compute_key_hash(key);
     let payload = Payload {
@@ -31,7 +29,10 @@ pub fn sign_hmac(key: &[u8], expires_at: u64) -> Vec<u8> {
             algorithm: Algorithm::HmacSha256,
             key_identifier: KeyIdentifier::KeyHash(key_hash),
         },
-        claims: Claims { expires_at },
+        claims: Claims {
+            expires_at,
+            ..Default::default()
+        },
     };
 
     let payload_bytes = serialize_payload(&payload);
@@ -43,13 +44,8 @@ pub fn sign_hmac(key: &[u8], expires_at: u64) -> Vec<u8> {
     token_bytes
 }
 
-/// Sign a payload with Ed25519.
-///
-/// `pkcs8_private_key` is the PKCS#8-encoded Ed25519 private key.
-/// `expires_at` is the Unix timestamp for token expiration.
-/// `key_id` determines how the key is identified in the token.
-///
-/// Returns the serialized SignedToken wire bytes.
+/// Sign a v0 payload with Ed25519.
+/// Returns the serialized v0 SignedToken wire bytes.
 pub fn sign_ed25519(
     pkcs8_private_key: &[u8],
     expires_at: u64,
@@ -64,7 +60,10 @@ pub fn sign_ed25519(
             algorithm: Algorithm::Ed25519,
             key_identifier: key_id,
         },
-        claims: Claims { expires_at },
+        claims: Claims {
+            expires_at,
+            ..Default::default()
+        },
     };
 
     let payload_bytes = serialize_payload(&payload);
@@ -77,6 +76,63 @@ pub fn sign_ed25519(
     token_bytes.extend_from_slice(sig_bytes);
     Ok(token_bytes)
 }
+
+// ─── v1 signing ───
+
+/// Sign a v1 token with HMAC-SHA256.
+/// Returns the serialized v1 SignedToken wire bytes (proto3 envelope).
+pub fn sign_hmac_v1(key: &[u8], claims: Claims) -> Vec<u8> {
+    let key_hash = compute_key_hash(key);
+    let payload = Payload {
+        metadata: Metadata {
+            version: Version::V1,
+            algorithm: Algorithm::HmacSha256,
+            key_identifier: KeyIdentifier::KeyHash(key_hash),
+        },
+        claims,
+    };
+
+    let payload_bytes = serialize_payload(&payload);
+    let signing_key = hmac::Key::new(hmac::HMAC_SHA256, key);
+    let tag = hmac::sign(&signing_key, &payload_bytes);
+
+    let token = SignedToken {
+        payload_bytes,
+        signature: tag.as_ref().to_vec(),
+    };
+    serialize_signed_token(&token)
+}
+
+/// Sign a v1 token with Ed25519.
+/// Returns the serialized v1 SignedToken wire bytes (proto3 envelope).
+pub fn sign_ed25519_v1(
+    pkcs8_private_key: &[u8],
+    claims: Claims,
+    key_id: KeyIdentifier,
+) -> Result<Vec<u8>, ProtokenError> {
+    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_private_key)
+        .map_err(|e| ProtokenError::SigningFailed(format!("invalid Ed25519 key: {e}")))?;
+
+    let payload = Payload {
+        metadata: Metadata {
+            version: Version::V1,
+            algorithm: Algorithm::Ed25519,
+            key_identifier: key_id,
+        },
+        claims,
+    };
+
+    let payload_bytes = serialize_payload(&payload);
+    let sig = key_pair.sign(&payload_bytes);
+
+    let token = SignedToken {
+        payload_bytes,
+        signature: sig.as_ref().to_vec(),
+    };
+    Ok(serialize_signed_token(&token))
+}
+
+// ─── Shared utilities ───
 
 /// Compute the KeyIdentifier::KeyHash for an Ed25519 key pair's public key.
 pub fn ed25519_key_hash(pkcs8_private_key: &[u8]) -> Result<KeyIdentifier, ProtokenError> {
@@ -100,6 +156,8 @@ pub fn generate_ed25519_key() -> Result<Vec<u8>, ProtokenError> {
 mod tests {
     use super::*;
     use crate::serialize::{deserialize_payload, deserialize_signed_token};
+
+    // ─── v0 tests ───
 
     #[test]
     fn test_sign_hmac_produces_valid_token() {
@@ -162,7 +220,64 @@ mod tests {
 
         let t1 = sign_ed25519(&pkcs8, expires_at, key_id.clone()).unwrap();
         let t2 = sign_ed25519(&pkcs8, expires_at, key_id).unwrap();
-        // Ed25519 is deterministic: same key + same message = same signature
+        assert_eq!(t1, t2);
+    }
+
+    // ─── v1 tests ───
+
+    #[test]
+    fn test_sign_hmac_v1() {
+        let key = b"test-secret-key-for-hmac";
+        let claims = Claims {
+            expires_at: 1700000000,
+            not_before: 1699990000,
+            issued_at: 1699990000,
+            ..Default::default()
+        };
+
+        let token_bytes = sign_hmac_v1(key, claims.clone());
+        let token = deserialize_signed_token(&token_bytes).unwrap();
+        let payload = deserialize_payload(&token.payload_bytes).unwrap();
+
+        assert_eq!(payload.metadata.version, Version::V1);
+        assert_eq!(payload.metadata.algorithm, Algorithm::HmacSha256);
+        assert_eq!(payload.claims, claims);
+    }
+
+    #[test]
+    fn test_sign_ed25519_v1() {
+        let pkcs8 = generate_ed25519_key().unwrap();
+        let key_id = ed25519_key_hash(&pkcs8).unwrap();
+        let claims = Claims {
+            expires_at: 1800000000,
+            subject: b"user:alice".to_vec(),
+            audience: b"api.example.com".to_vec(),
+            ..Default::default()
+        };
+
+        let token_bytes = sign_ed25519_v1(&pkcs8, claims.clone(), key_id).unwrap();
+        let token = deserialize_signed_token(&token_bytes).unwrap();
+        let payload = deserialize_payload(&token.payload_bytes).unwrap();
+
+        assert_eq!(payload.metadata.version, Version::V1);
+        assert_eq!(payload.metadata.algorithm, Algorithm::Ed25519);
+        assert_eq!(payload.claims, claims);
+    }
+
+    #[test]
+    fn test_sign_ed25519_v1_deterministic() {
+        let pkcs8 = generate_ed25519_key().unwrap();
+        let key_id = ed25519_key_hash(&pkcs8).unwrap();
+        let claims = Claims {
+            expires_at: 1800000000,
+            not_before: 1799990000,
+            issued_at: 1799990000,
+            subject: b"test".to_vec(),
+            ..Default::default()
+        };
+
+        let t1 = sign_ed25519_v1(&pkcs8, claims.clone(), key_id.clone()).unwrap();
+        let t2 = sign_ed25519_v1(&pkcs8, claims, key_id).unwrap();
         assert_eq!(t1, t2);
     }
 }

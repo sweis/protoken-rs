@@ -1,0 +1,289 @@
+//! Minimal proto3 wire format encoder/decoder.
+//!
+//! Produces canonical encoding per our rules:
+//! - Fields in ascending field-number order
+//! - Minimal varint encoding (no zero-padding)
+//! - Default values (0, empty bytes) omitted
+//! - No unknown fields
+//!
+//! All field numbers are <= 15, so tags are single bytes.
+
+use crate::error::ProtokenError;
+
+// Wire types
+const WIRE_VARINT: u32 = 0;
+const WIRE_LEN: u32 = 2;
+
+// --- Encoding ---
+
+/// Encode a varint (unsigned, minimal encoding).
+pub fn encode_varint(mut value: u64, buf: &mut Vec<u8>) {
+    loop {
+        if value <= 0x7F {
+            buf.push(value as u8);
+            return;
+        }
+        buf.push((value as u8 & 0x7F) | 0x80);
+        value >>= 7;
+    }
+}
+
+/// Encode a field tag: (field_number << 3) | wire_type.
+fn encode_tag(field_number: u32, wire_type: u32, buf: &mut Vec<u8>) {
+    encode_varint(((field_number as u64) << 3) | wire_type as u64, buf);
+}
+
+/// Encode a uint32 field. Omits if value is 0 (proto3 default).
+pub fn encode_uint32(field: u32, value: u32, buf: &mut Vec<u8>) {
+    if value == 0 {
+        return;
+    }
+    encode_tag(field, WIRE_VARINT, buf);
+    encode_varint(value as u64, buf);
+}
+
+/// Encode a uint64 field. Omits if value is 0 (proto3 default).
+pub fn encode_uint64(field: u32, value: u64, buf: &mut Vec<u8>) {
+    if value == 0 {
+        return;
+    }
+    encode_tag(field, WIRE_VARINT, buf);
+    encode_varint(value, buf);
+}
+
+/// Encode a bytes/submessage field. Omits if value is empty (proto3 default).
+pub fn encode_bytes(field: u32, value: &[u8], buf: &mut Vec<u8>) {
+    if value.is_empty() {
+        return;
+    }
+    encode_tag(field, WIRE_LEN, buf);
+    encode_varint(value.len() as u64, buf);
+    buf.extend_from_slice(value);
+}
+
+// --- Decoding ---
+
+/// Decode a varint, advancing pos. Returns error on truncation or overlong encoding.
+pub fn decode_varint(data: &[u8], pos: &mut usize) -> Result<u64, ProtokenError> {
+    let start = *pos;
+    let mut value: u64 = 0;
+    let mut shift: u32 = 0;
+
+    loop {
+        if *pos >= data.len() {
+            return Err(ProtokenError::MalformedEncoding(
+                "unexpected end of input in varint".into(),
+            ));
+        }
+        let byte = data[*pos];
+        *pos += 1;
+
+        value |= ((byte & 0x7F) as u64) << shift;
+
+        if byte & 0x80 == 0 {
+            // Reject non-minimal encoding: leading zero byte (except for value 0 itself)
+            if byte == 0 && *pos - start > 1 {
+                return Err(ProtokenError::MalformedEncoding(
+                    "non-minimal varint encoding".into(),
+                ));
+            }
+            return Ok(value);
+        }
+
+        shift += 7;
+        if shift >= 64 {
+            return Err(ProtokenError::MalformedEncoding(
+                "varint exceeds 64 bits".into(),
+            ));
+        }
+    }
+}
+
+/// Decode a field tag, returning (field_number, wire_type).
+pub fn decode_tag(data: &[u8], pos: &mut usize) -> Result<(u32, u32), ProtokenError> {
+    let tag = decode_varint(data, pos)?;
+    let field_number = (tag >> 3) as u32;
+    let wire_type = (tag & 0x07) as u32;
+
+    if field_number == 0 {
+        return Err(ProtokenError::MalformedEncoding(
+            "field number 0 is invalid".into(),
+        ));
+    }
+
+    Ok((field_number, wire_type))
+}
+
+/// Read a varint field value (caller already consumed the tag).
+pub fn read_varint_value(data: &[u8], pos: &mut usize) -> Result<u64, ProtokenError> {
+    decode_varint(data, pos)
+}
+
+/// Read a length-delimited field value (caller already consumed the tag).
+/// Returns the byte slice.
+pub fn read_bytes_value<'a>(
+    data: &'a [u8],
+    pos: &mut usize,
+) -> Result<&'a [u8], ProtokenError> {
+    let len = decode_varint(data, pos)? as usize;
+    if *pos + len > data.len() {
+        return Err(ProtokenError::MalformedEncoding(format!(
+            "length-delimited field extends past end: need {} bytes at offset {}, have {}",
+            len,
+            *pos,
+            data.len()
+        )));
+    }
+    let start = *pos;
+    *pos += len;
+    Ok(&data[start..*pos])
+}
+
+/// Skip a field value based on wire type.
+pub fn skip_field(wire_type: u32, data: &[u8], pos: &mut usize) -> Result<(), ProtokenError> {
+    match wire_type {
+        0 => {
+            decode_varint(data, pos)?;
+        }
+        1 => {
+            // 64-bit fixed
+            if *pos + 8 > data.len() {
+                return Err(ProtokenError::MalformedEncoding(
+                    "unexpected end of input in fixed64".into(),
+                ));
+            }
+            *pos += 8;
+        }
+        2 => {
+            read_bytes_value(data, pos)?;
+        }
+        5 => {
+            // 32-bit fixed
+            if *pos + 4 > data.len() {
+                return Err(ProtokenError::MalformedEncoding(
+                    "unexpected end of input in fixed32".into(),
+                ));
+            }
+            *pos += 4;
+        }
+        _ => {
+            return Err(ProtokenError::MalformedEncoding(format!(
+                "unknown wire type: {wire_type}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_varint_roundtrip() {
+        for value in [0u64, 1, 127, 128, 16383, 16384, 1700000000, u64::MAX] {
+            let mut buf = Vec::new();
+            encode_varint(value, &mut buf);
+            let mut pos = 0;
+            let decoded = decode_varint(&buf, &mut pos).unwrap();
+            assert_eq!(decoded, value, "varint roundtrip failed for {value}");
+            assert_eq!(pos, buf.len(), "varint did not consume all bytes");
+        }
+    }
+
+    #[test]
+    fn test_varint_encoding_size() {
+        let cases: &[(u64, usize)] = &[
+            (0, 1),
+            (1, 1),
+            (127, 1),
+            (128, 2),
+            (16383, 2),
+            (16384, 3),
+            (1700000000, 5),
+            (u64::MAX, 10),
+        ];
+        for &(value, expected_len) in cases {
+            let mut buf = Vec::new();
+            encode_varint(value, &mut buf);
+            assert_eq!(
+                buf.len(),
+                expected_len,
+                "varint size mismatch for {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_varint_minimality() {
+        // Non-minimal encoding: value 1 encoded as [0x81, 0x00] (2 bytes instead of 1)
+        let non_minimal = &[0x81, 0x00];
+        let mut pos = 0;
+        let result = decode_varint(non_minimal, &mut pos);
+        assert!(result.is_err(), "should reject non-minimal varint");
+    }
+
+    #[test]
+    fn test_uint32_field_encoding() {
+        // algorithm = 1, field 2 → tag 0x10, value 0x01
+        let mut buf = Vec::new();
+        encode_uint32(2, 1, &mut buf);
+        assert_eq!(buf, &[0x10, 0x01]);
+    }
+
+    #[test]
+    fn test_uint32_field_default_omitted() {
+        let mut buf = Vec::new();
+        encode_uint32(1, 0, &mut buf);
+        assert!(buf.is_empty(), "default value should be omitted");
+    }
+
+    #[test]
+    fn test_bytes_field_encoding() {
+        // key_id field 4, 8 bytes → tag 0x22, length 0x08, then bytes
+        let mut buf = Vec::new();
+        encode_bytes(4, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08], &mut buf);
+        assert_eq!(buf[0], 0x22); // tag
+        assert_eq!(buf[1], 0x08); // length
+        assert_eq!(&buf[2..], &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+    }
+
+    #[test]
+    fn test_bytes_field_empty_omitted() {
+        let mut buf = Vec::new();
+        encode_bytes(4, &[], &mut buf);
+        assert!(buf.is_empty(), "empty bytes should be omitted");
+    }
+
+    #[test]
+    fn test_field_tag_values() {
+        // Verify our field tag bytes match the proto3 spec
+        let cases: &[(u32, u32, u8)] = &[
+            (1, WIRE_VARINT, 0x08), // version
+            (2, WIRE_VARINT, 0x10), // algorithm
+            (3, WIRE_VARINT, 0x18), // key_id_type
+            (4, WIRE_LEN, 0x22),    // key_id
+            (5, WIRE_VARINT, 0x28), // expires_at
+            (6, WIRE_VARINT, 0x30), // not_before
+            (7, WIRE_VARINT, 0x38), // issued_at
+            (8, WIRE_LEN, 0x42),    // subject
+            (9, WIRE_LEN, 0x4A),    // audience
+            (1, WIRE_LEN, 0x0A),    // SignedToken.payload
+            (2, WIRE_LEN, 0x12),    // SignedToken.signature
+        ];
+        for &(field, wire_type, expected_byte) in cases {
+            let mut buf = Vec::new();
+            encode_tag(field, wire_type, &mut buf);
+            assert_eq!(
+                buf.len(),
+                1,
+                "field {field} tag should be single byte"
+            );
+            assert_eq!(
+                buf[0], expected_byte,
+                "field {field} wire_type {wire_type}: expected 0x{expected_byte:02X}, got 0x{:02X}",
+                buf[0]
+            );
+        }
+    }
+}

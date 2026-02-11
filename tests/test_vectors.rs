@@ -39,7 +39,7 @@ fn test_vector_payload_hmac_keyhash() {
             algorithm: Algorithm::HmacSha256,
             key_identifier: KeyIdentifier::KeyHash([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]),
         },
-        claims: Claims { expires_at: 1700000000 },
+        claims: Claims { expires_at: 1700000000, ..Default::default() },
     };
 
     let bytes = serialize_payload(&payload);
@@ -66,7 +66,7 @@ fn test_vector_payload_ed25519_keyhash() {
             algorithm: Algorithm::Ed25519,
             key_identifier: KeyIdentifier::KeyHash([0xaa; 8]),
         },
-        claims: Claims { expires_at: 1800000000 },
+        claims: Claims { expires_at: 1800000000, ..Default::default() },
     };
 
     let bytes = serialize_payload(&payload);
@@ -88,7 +88,7 @@ fn test_vector_payload_ed25519_pubkey() {
             algorithm: Algorithm::Ed25519,
             key_identifier: KeyIdentifier::PublicKey(vec![0xbb; 32]),
         },
-        claims: Claims { expires_at: 1900000000 },
+        claims: Claims { expires_at: 1900000000, ..Default::default() },
     };
 
     let bytes = serialize_payload(&payload);
@@ -111,7 +111,7 @@ fn test_vector_payload_zeros() {
             algorithm: Algorithm::HmacSha256,
             key_identifier: KeyIdentifier::KeyHash([0x00; 8]),
         },
-        claims: Claims { expires_at: 0 },
+        claims: Claims { expires_at: 0, ..Default::default() },
     };
 
     let bytes = serialize_payload(&payload);
@@ -133,7 +133,7 @@ fn test_vector_payload_max() {
             algorithm: Algorithm::HmacSha256,
             key_identifier: KeyIdentifier::KeyHash([0xff; 8]),
         },
-        claims: Claims { expires_at: u64::MAX },
+        claims: Claims { expires_at: u64::MAX, ..Default::default() },
     };
 
     let bytes = serialize_payload(&payload);
