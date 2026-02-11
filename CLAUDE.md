@@ -26,8 +26,8 @@ message Payload {
   uint64 expires_at = 5;   // Unix seconds
   uint64 not_before = 6;   // optional (0 = omitted)
   uint64 issued_at = 7;    // optional (0 = omitted)
-  bytes  subject = 8;      // optional (empty = omitted), max 255 bytes
-  bytes  audience = 9;     // optional (empty = omitted), max 255 bytes
+  string subject = 8;      // optional (empty = omitted), max 255 bytes
+  string audience = 9;     // optional (empty = omitted), max 255 bytes
   repeated string scope = 10; // optional, sorted, max 32 entries, each max 255 bytes
 }
 
@@ -85,7 +85,7 @@ All TODO items 1-8 are implemented:
 - `src/verify.rs` - Verification with key hash matching, expiry and not_before checking
 - `src/main.rs` - CLI tool with `inspect`, `sign`, `verify`, `generate-key` commands
 - `src/error.rs` - Error types
-- 51 tests (39 unit + 12 integration) including byte-level corruption tests
+- 74 tests (61 unit + 13 integration) including byte-level corruption tests
 
 ## Research Prior Art
 

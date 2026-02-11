@@ -292,7 +292,7 @@ mod tests {
         let claims = Claims {
             expires_at: u64::MAX,
             not_before: 1000,
-            subject: b"test".to_vec(),
+            subject: "test".into(),
             ..Default::default()
         };
 
@@ -319,8 +319,8 @@ mod tests {
         let key_id = ed25519_key_hash(&pkcs8).unwrap();
         let claims = Claims {
             expires_at: u64::MAX,
-            subject: b"test".to_vec(),
-            audience: b"svc".to_vec(),
+            subject: "test".into(),
+            audience: "svc".into(),
             ..Default::default()
         };
 

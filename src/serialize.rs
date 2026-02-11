@@ -44,8 +44,8 @@ pub fn serialize_payload(payload: &Payload) -> Vec<u8> {
     proto3::encode_uint64(5, payload.claims.expires_at, &mut buf);
     proto3::encode_uint64(6, payload.claims.not_before, &mut buf);
     proto3::encode_uint64(7, payload.claims.issued_at, &mut buf);
-    proto3::encode_bytes(8, &payload.claims.subject, &mut buf);
-    proto3::encode_bytes(9, &payload.claims.audience, &mut buf);
+    proto3::encode_bytes(8, payload.claims.subject.as_bytes(), &mut buf);
+    proto3::encode_bytes(9, payload.claims.audience.as_bytes(), &mut buf);
 
     // Repeated field 10: scopes, sorted for canonical encoding
     let mut sorted_scopes: Vec<&str> = payload.claims.scopes.iter().map(|s| s.as_str()).collect();
@@ -73,8 +73,8 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
     let mut expires_at: u64 = 0;
     let mut not_before: u64 = 0;
     let mut issued_at: u64 = 0;
-    let mut subject: Vec<u8> = Vec::new();
-    let mut audience: Vec<u8> = Vec::new();
+    let mut subject: String = String::new();
+    let mut audience: String = String::new();
     let mut scopes: Vec<String> = Vec::new();
 
     let mut pos = 0;
@@ -111,7 +111,11 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
                         MAX_CLAIM_BYTES_LEN
                     )));
                 }
-                subject = bytes.to_vec();
+                subject = std::str::from_utf8(bytes)
+                    .map_err(|_| {
+                        ProtokenError::MalformedEncoding("subject is not valid UTF-8".into())
+                    })?
+                    .to_string();
             }
             (9, 2) => {
                 let bytes = proto3::read_bytes_value(data, &mut pos)?;
@@ -122,7 +126,11 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
                         MAX_CLAIM_BYTES_LEN
                     )));
                 }
-                audience = bytes.to_vec();
+                audience = std::str::from_utf8(bytes)
+                    .map_err(|_| {
+                        ProtokenError::MalformedEncoding("audience is not valid UTF-8".into())
+                    })?
+                    .to_string();
             }
             (10, 2) => {
                 let bytes = proto3::read_bytes_value(data, &mut pos)?;
@@ -315,8 +323,8 @@ mod tests {
                 expires_at: 1700000000,
                 not_before: 1699990000,
                 issued_at: 1699990000,
-                subject: b"user:alice".to_vec(),
-                audience: b"api.example.com".to_vec(),
+                subject: "user:alice".into(),
+                audience: "api.example.com".into(),
                 scopes: vec!["admin".into(), "read".into(), "write".into()],
             },
         }
@@ -564,6 +572,28 @@ mod tests {
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_uint64(5, 1700000000, &mut bad);
         proto3::encode_bytes(10, &[0xFF, 0xFE], &mut bad); // invalid UTF-8
+        assert!(deserialize_payload(&bad).is_err());
+    }
+
+    #[test]
+    fn test_rejects_invalid_utf8_subject() {
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 8], &mut bad);
+        proto3::encode_uint64(5, 1700000000, &mut bad);
+        proto3::encode_bytes(8, &[0xFF, 0xFE], &mut bad); // invalid UTF-8
+        assert!(deserialize_payload(&bad).is_err());
+    }
+
+    #[test]
+    fn test_rejects_invalid_utf8_audience() {
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 8], &mut bad);
+        proto3::encode_uint64(5, 1700000000, &mut bad);
+        proto3::encode_bytes(9, &[0xFF, 0xFE], &mut bad); // invalid UTF-8
         assert!(deserialize_payload(&bad).is_err());
     }
 
