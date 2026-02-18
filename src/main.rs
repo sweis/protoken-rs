@@ -3,14 +3,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use clap::{Parser, Subcommand};
-use ring::signature::{Ed25519KeyPair, KeyPair};
+use ed25519_dalek::pkcs8::DecodePrivateKey;
 
 use protoken::serialize::{deserialize_payload, deserialize_signed_token};
 use protoken::sign::{
-    compute_key_hash, ed25519_key_hash, generate_ed25519_key, sign_ed25519, sign_hmac,
+    compute_key_hash, ed25519_key_hash, generate_ed25519_key, generate_mldsa44_key,
+    mldsa44_key_hash, sign_ed25519, sign_hmac, sign_mldsa44, split_mldsa44_key,
 };
 use protoken::types::Claims;
-use protoken::verify::{verify_ed25519, verify_hmac};
+use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
 
 #[derive(Parser)]
 #[command(name = "protoken", about = "Protobuf-inspired signed tokens")]
@@ -31,12 +32,12 @@ enum Command {
 
     /// Sign a new token with the given key and duration.
     Sign {
-        /// Algorithm: "hmac" or "ed25519"
+        /// Algorithm: "hmac", "ed25519", or "ml-dsa-44"
         #[arg(short, long)]
         algorithm: String,
 
         /// Key file path. For HMAC: raw key bytes (or hex with --hex-key).
-        /// For Ed25519: PKCS#8 DER file.
+        /// For Ed25519: PKCS#8 DER file. For ML-DSA-44: raw signing key file.
         #[arg(short, long)]
         key: String,
 
@@ -67,12 +68,13 @@ enum Command {
 
     /// Verify a signed token against a key and current time.
     Verify {
-        /// Algorithm: "hmac" or "ed25519"
+        /// Algorithm: "hmac", "ed25519", or "ml-dsa-44"
         #[arg(short, long)]
         algorithm: String,
 
         /// Key file path. For HMAC: raw key bytes.
         /// For Ed25519: raw 32-byte public key.
+        /// For ML-DSA-44: raw 1,312-byte public key.
         #[arg(short, long)]
         key: String,
 
@@ -85,9 +87,14 @@ enum Command {
         token: Option<String>,
     },
 
-    /// Generate a new Ed25519 key pair. Outputs PKCS#8 private key
-    /// and the public key, both as hex.
-    GenerateKey,
+    /// Generate a new key pair.
+    /// For Ed25519: outputs PKCS#8 private key and public key as hex.
+    /// For ML-DSA-44: outputs signing key, public key, and key hash as hex.
+    GenerateKey {
+        /// Algorithm: "ed25519" (default) or "ml-dsa-44"
+        #[arg(short, long, default_value = "ed25519")]
+        algorithm: String,
+    },
 }
 
 fn main() {
@@ -113,7 +120,7 @@ fn main() {
             hex_key,
             token,
         } => cmd_verify(&algorithm, &key, hex_key, token),
-        Command::GenerateKey => cmd_generate_key(),
+        Command::GenerateKey { algorithm } => cmd_generate_key(&algorithm),
     };
 
     if let Err(e) = result {
@@ -197,6 +204,11 @@ fn cmd_sign(
             let key_id = ed25519_key_hash(&key_bytes)?;
             sign_ed25519(&key_bytes, claims, key_id)?
         }
+        "ml-dsa-44" => {
+            let (sk, pk) = split_mldsa44_key(&key_bytes)?;
+            let key_id = mldsa44_key_hash(pk)?;
+            sign_mldsa44(sk, claims, key_id)?
+        }
         _ => return Err(format!("unknown algorithm: {algorithm}").into()),
     };
 
@@ -231,8 +243,12 @@ fn cmd_verify(
     let verified = match algorithm {
         "hmac" => verify_hmac(&key_bytes, &token_bytes, now)?,
         "ed25519" => verify_ed25519(&key_bytes, &token_bytes, now)?,
+        "ml-dsa-44" => verify_mldsa44(&key_bytes, &token_bytes, now)?,
         _ => {
-            return Err(format!("unknown algorithm: {algorithm} (use 'hmac' or 'ed25519')").into())
+            return Err(format!(
+                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', or 'ml-dsa-44')"
+            )
+            .into())
         }
     };
 
@@ -240,21 +256,51 @@ fn cmd_verify(
     Ok(())
 }
 
-fn cmd_generate_key() -> Result<(), Box<dyn std::error::Error>> {
-    let pkcs8 = generate_ed25519_key()?;
-    let key_pair =
-        Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|e| format!("key parse failed: {e}"))?;
+fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
+    match algorithm {
+        "ed25519" => {
+            let pkcs8 = generate_ed25519_key()?;
+            let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(&pkcs8)
+                .map_err(|e| format!("key parse failed: {e}"))?;
 
-    let public_key_bytes = key_pair.public_key().as_ref();
-    let key_hash = compute_key_hash(public_key_bytes);
+            let public_key_bytes = signing_key.verifying_key().to_bytes();
+            let key_hash = compute_key_hash(&public_key_bytes);
 
-    let output = serde_json::json!({
-        "private_key_pkcs8_hex": hex::encode(&pkcs8),
-        "public_key_hex": hex::encode(public_key_bytes),
-        "key_hash_hex": hex::encode(key_hash),
-    });
+            let output = serde_json::json!({
+                "algorithm": "ed25519",
+                "private_key_pkcs8_hex": hex::encode(&pkcs8),
+                "public_key_hex": hex::encode(public_key_bytes),
+                "key_hash_hex": hex::encode(key_hash),
+            });
 
-    println!("{}", serde_json::to_string_pretty(&output)?);
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        "ml-dsa-44" => {
+            let (sk, pk) = generate_mldsa44_key()?;
+            let key_hash = compute_key_hash(&pk);
+
+            // Combined key (SK || PK) for use with --key flag in sign command
+            let mut combined = sk.clone();
+            combined.extend_from_slice(&pk);
+
+            let output = serde_json::json!({
+                "algorithm": "ml-dsa-44",
+                "combined_key_hex": hex::encode(&combined),
+                "public_key_hex": hex::encode(&pk),
+                "key_hash_hex": hex::encode(key_hash),
+                "signing_key_bytes": sk.len(),
+                "public_key_bytes": pk.len(),
+            });
+
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        _ => {
+            return Err(
+                format!("unknown algorithm: {algorithm} (use 'ed25519' or 'ml-dsa-44')").into(),
+            )
+        }
+    }
+
     Ok(())
 }
 

@@ -10,9 +10,9 @@ Protokens are designed to be a simple, fast replacemenmt for JWTs, ad hoc tokens
 
 ## Design Guidelines
 1. The wire format uses canonical proto3 encoding. Payloads are valid proto3 messages.
-2. These are signed tokens that support a single symmetric MAC and a single asymmetric signature option.
+2. These are signed tokens that support a symmetric MAC and asymmetric signature options.
 3. The symmetric MAC is HMAC-SHA256.
-4. The asymmetric signature is Ed25519.
+4. The asymmetric signatures are Ed25519 and ML-DSA-44 (post-quantum, FIPS 204).
 5. The implementation is in Rust.
 6. The goal is a minimal token format. We start simple and add only fields essential to our use cases.
 
@@ -20,9 +20,9 @@ Protokens are designed to be a simple, fast replacemenmt for JWTs, ad hoc tokens
 ```proto
 message Payload {
   uint32 version = 1;      // reserved, always 0 (omitted on wire)
-  uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519
+  uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44
   uint32 key_id_type = 3;  // 1 = key_hash, 2 = public_key
-  bytes  key_id = 4;       // 8 bytes (key_hash) or 32 bytes (Ed25519 public_key)
+  bytes  key_id = 4;       // 8 bytes (key_hash) or variable (32 B Ed25519, 1312 B ML-DSA-44)
   uint64 expires_at = 5;   // Unix seconds
   uint64 not_before = 6;   // optional (0 = omitted)
   uint64 issued_at = 7;    // optional (0 = omitted)
@@ -33,7 +33,7 @@ message Payload {
 
 message SignedToken {
   Payload payload = 1;     // canonical-encoded Payload submessage
-  bytes   signature = 2;   // HMAC-SHA256 (32 bytes) or Ed25519 (64 bytes)
+  bytes   signature = 2;   // HMAC-SHA256 (32 B), Ed25519 (64 B), or ML-DSA-44 (2420 B)
 }
 ```
 
@@ -67,25 +67,32 @@ This produces valid proto3 that any library can decode, while guaranteeing deter
 Rules: ascending field order, minimal varints, default values omitted, no unknown fields.
 See [design-serialization.md](design-serialization.md) and [research-protobuf-determinism.md](research-protobuf-determinism.md).
 
-### Dependencies (decided 2026-02-10)
-- `ring` for all cryptography (HMAC-SHA256, Ed25519, SHA-256). Battle-tested BoringSSL backend.
-- `clap` (derive) for CLI parsing.
-- `serde` + `serde_json` for JSON output.
-- `humantime` for duration parsing.
-- `base64`, `hex` for encoding.
-- `thiserror` for error types.
+### Post-Quantum Signature: ML-DSA-44 (decided 2026-02-18)
+Added ML-DSA-44 (FIPS 204) as a third algorithm option. Chose over SLH-DSA (huge signatures),
+XMSS, and LMS (both stateful — incompatible with distributed token issuance).
+ML-DSA-44: stateless, ~200μs sign, 2,420 B signatures, 1,312 B public keys.
+Token sizes: ~2,500 B (KeyHash) or ~3,800 B (PublicKey).
+See [research-pq-signatures.md](research-pq-signatures.md) for full analysis.
+
+### Dependencies: RustCrypto (migrated 2026-02-18, originally ring 2026-02-10)
+Migrated from `ring` to RustCrypto ecosystem to unify with `ml-dsa` crate:
+- `ed25519-dalek` for Ed25519 signing/verification (PKCS#8 compatible with former ring keys)
+- `hmac` + `sha2` for HMAC-SHA256 and SHA-256 key hashing
+- `ml-dsa` for ML-DSA-44 (post-quantum), chosen over `fips204` crate (~1,100 dependents vs ~1)
+- `rand` for key generation
+- `clap` (derive) for CLI, `serde`/`serde_json` for JSON, `humantime`, `base64`, `hex`, `thiserror`
 
 ## Implementation Status
 
-All TODO items 1-8 are implemented:
-- `src/types.rs` - Core types (Version, Algorithm, KeyIdentifier, Payload, SignedToken, Claims)
+All TODO items 1-8 are implemented, plus ML-DSA-44 post-quantum support:
+- `src/types.rs` - Core types (Version, Algorithm incl. MlDsa44, KeyIdentifier, Payload, SignedToken, Claims)
 - `src/proto3.rs` - Canonical proto3 wire encoder/decoder
 - `src/serialize.rs` - Deterministic serialization/deserialization for Payload and SignedToken
-- `src/sign.rs` - HMAC-SHA256 and Ed25519 signing
+- `src/sign.rs` - HMAC-SHA256, Ed25519, and ML-DSA-44 signing (RustCrypto)
 - `src/verify.rs` - Verification with key hash matching, expiry and not_before checking
-- `src/main.rs` - CLI tool with `inspect`, `sign`, `verify`, `generate-key` commands
+- `src/main.rs` - CLI tool with `inspect`, `sign`, `verify`, `generate-key` commands (supports all 3 algorithms)
 - `src/error.rs` - Error types
-- 74 tests (61 unit + 13 integration) including byte-level corruption tests
+- 86 tests (73 unit + 13 integration) including byte-level corruption tests for all algorithms
 
 ## Research Prior Art
 

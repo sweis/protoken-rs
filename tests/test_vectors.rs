@@ -7,12 +7,12 @@
 //! Regression tests that verify serialization against stored test vectors.
 //! If any test here fails, it means the wire format has changed.
 
+use ed25519_dalek::pkcs8::DecodePrivateKey;
+
 use protoken::serialize::{deserialize_payload, deserialize_signed_token, serialize_payload};
 use protoken::sign::{compute_key_hash, sign_ed25519, sign_hmac};
 use protoken::types::*;
 use protoken::verify::{verify_ed25519, verify_hmac};
-
-use ring::signature::{Ed25519KeyPair, KeyPair};
 
 /// Load test vectors from testdata/vectors.json.
 fn load_vectors() -> serde_json::Value {
@@ -241,11 +241,11 @@ fn test_vector_signed_ed25519_keyhash() {
     let v = find_vector(&vectors, "signed_ed25519_keyhash");
 
     let pkcs8 = hex::decode(v["input"]["private_key_pkcs8_hex"].as_str().unwrap()).unwrap();
-    let key_pair = Ed25519KeyPair::from_pkcs8(&pkcs8).unwrap();
-    let public_key = key_pair.public_key().as_ref();
+    let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(&pkcs8).unwrap();
+    let public_key = signing_key.verifying_key().to_bytes();
 
     let expires_at = 1800000000u64;
-    let key_hash = compute_key_hash(public_key);
+    let key_hash = compute_key_hash(&public_key);
     let key_id = KeyIdentifier::KeyHash(key_hash);
     let claims = Claims {
         expires_at,
@@ -260,7 +260,7 @@ fn test_vector_signed_ed25519_keyhash() {
     );
 
     // Verify the token
-    let verified = verify_ed25519(public_key, &token_bytes, expires_at).unwrap();
+    let verified = verify_ed25519(&public_key, &token_bytes, expires_at).unwrap();
     assert_eq!(verified.claims.expires_at, expires_at);
 }
 
@@ -270,8 +270,8 @@ fn test_vector_signed_ed25519_pubkey() {
     let v = find_vector(&vectors, "signed_ed25519_pubkey");
 
     let pkcs8 = hex::decode(v["input"]["private_key_pkcs8_hex"].as_str().unwrap()).unwrap();
-    let key_pair = Ed25519KeyPair::from_pkcs8(&pkcs8).unwrap();
-    let public_key = key_pair.public_key().as_ref();
+    let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(&pkcs8).unwrap();
+    let public_key = signing_key.verifying_key().to_bytes();
 
     let expires_at = 1800000000u64;
     let key_id = KeyIdentifier::PublicKey(public_key.to_vec());
@@ -288,7 +288,7 @@ fn test_vector_signed_ed25519_pubkey() {
     );
 
     // Verify the token
-    let verified = verify_ed25519(public_key, &token_bytes, expires_at).unwrap();
+    let verified = verify_ed25519(&public_key, &token_bytes, expires_at).unwrap();
     assert_eq!(verified.claims.expires_at, expires_at);
 }
 
