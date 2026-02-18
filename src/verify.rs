@@ -1,7 +1,9 @@
-//! Token verification: HMAC-SHA256 and Ed25519.
+//! Token verification: HMAC-SHA256, Ed25519, and ML-DSA-44.
 
-use ring::hmac;
-use ring::signature;
+use hmac::{Hmac, Mac};
+use ml_dsa::signature::Verifier as _;
+use ml_dsa::MlDsa44;
+use sha2::Sha256;
 
 use crate::error::ProtokenError;
 use crate::serialize::{deserialize_payload, deserialize_signed_token};
@@ -66,8 +68,10 @@ pub fn verify_hmac(
     }
 
     // Verify HMAC over the raw payload bytes
-    let verification_key = hmac::Key::new(hmac::HMAC_SHA256, key);
-    hmac::verify(&verification_key, &token.payload_bytes, &token.signature)
+    let mut mac = Hmac::<Sha256>::new_from_slice(key)
+        .map_err(|e| ProtokenError::VerificationFailed(format!("invalid HMAC key: {e}")))?;
+    mac.update(&token.payload_bytes);
+    mac.verify_slice(&token.signature)
         .map_err(|_| ProtokenError::VerificationFailed("HMAC verification failed".into()))?;
 
     check_temporal_claims(&payload.claims, now)?;
@@ -109,12 +113,93 @@ pub fn verify_ed25519(
         }
     }
 
-    // Verify signature over the raw payload bytes
-    let peer_public_key = signature::UnparsedPublicKey::new(&signature::ED25519, public_key_bytes);
-    peer_public_key
-        .verify(&token.payload_bytes, &token.signature)
+    // Parse the public key and signature
+    let vk_bytes: [u8; ED25519_PUBLIC_KEY_LEN] = public_key_bytes.try_into().map_err(|_| {
+        ProtokenError::VerificationFailed(format!(
+            "invalid Ed25519 public key: expected {} bytes, got {}",
+            ED25519_PUBLIC_KEY_LEN,
+            public_key_bytes.len()
+        ))
+    })?;
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&vk_bytes).map_err(|e| {
+        ProtokenError::VerificationFailed(format!("invalid Ed25519 public key: {e}"))
+    })?;
+
+    let sig_bytes: [u8; ED25519_SIG_LEN] = token.signature.as_slice().try_into().map_err(|_| {
+        ProtokenError::VerificationFailed(format!(
+            "invalid Ed25519 signature: expected {} bytes, got {}",
+            ED25519_SIG_LEN,
+            token.signature.len()
+        ))
+    })?;
+    let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+
+    verifying_key
+        .verify(&token.payload_bytes, &signature)
         .map_err(|_| {
             ProtokenError::VerificationFailed("Ed25519 signature verification failed".into())
+        })?;
+
+    check_temporal_claims(&payload.claims, now)?;
+
+    Ok(VerifiedClaims {
+        claims: payload.claims,
+        metadata: payload.metadata,
+    })
+}
+
+/// Verify an ML-DSA-44 signed token.
+///
+/// `public_key_bytes` is the ML-DSA-44 public key (1,312 bytes).
+/// `token_bytes` is the serialized SignedToken wire bytes.
+/// `now` is the current Unix timestamp for expiry checking.
+pub fn verify_mldsa44(
+    public_key_bytes: &[u8],
+    token_bytes: &[u8],
+    now: u64,
+) -> Result<VerifiedClaims, ProtokenError> {
+    let token = deserialize_signed_token(token_bytes)?;
+    let payload = deserialize_payload(&token.payload_bytes)?;
+
+    if payload.metadata.algorithm != Algorithm::MlDsa44 {
+        return Err(ProtokenError::VerificationFailed(format!(
+            "expected ML-DSA-44, got {:?}",
+            payload.metadata.algorithm
+        )));
+    }
+
+    // Check key identity (constant-time comparison)
+    let expected_hash = compute_key_hash(public_key_bytes);
+    match &payload.metadata.key_identifier {
+        KeyIdentifier::KeyHash(hash) => {
+            constant_time_eq(hash, &expected_hash).map_err(|_| ProtokenError::KeyHashMismatch)?;
+        }
+        KeyIdentifier::PublicKey(pk) => {
+            constant_time_eq(pk, public_key_bytes).map_err(|_| ProtokenError::KeyHashMismatch)?;
+        }
+    }
+
+    // Parse the public key
+    let vk_encoded: &ml_dsa::EncodedVerifyingKey<MlDsa44> =
+        public_key_bytes.try_into().map_err(|_| {
+            ProtokenError::VerificationFailed(format!(
+                "invalid ML-DSA-44 public key: expected {} bytes, got {}",
+                MLDSA44_PUBLIC_KEY_LEN,
+                public_key_bytes.len()
+            ))
+        })?;
+    let verifying_key = ml_dsa::VerifyingKey::<MlDsa44>::decode(vk_encoded);
+
+    // Parse the signature
+    let signature =
+        ml_dsa::Signature::<MlDsa44>::try_from(token.signature.as_slice()).map_err(|_| {
+            ProtokenError::VerificationFailed("invalid ML-DSA-44 signature encoding".into())
+        })?;
+
+    verifying_key
+        .verify(&token.payload_bytes, &signature)
+        .map_err(|_| {
+            ProtokenError::VerificationFailed("ML-DSA-44 signature verification failed".into())
         })?;
 
     check_temporal_claims(&payload.claims, now)?;
@@ -146,8 +231,12 @@ fn check_temporal_claims(claims: &Claims, now: u64) -> Result<(), ProtokenError>
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-    use crate::sign::{ed25519_key_hash, generate_ed25519_key, sign_ed25519, sign_hmac};
-    use ring::signature::{Ed25519KeyPair, KeyPair};
+    use ed25519_dalek::pkcs8::DecodePrivateKey;
+
+    use crate::sign::{
+        ed25519_key_hash, generate_ed25519_key, generate_mldsa44_key, mldsa44_key_hash,
+        sign_ed25519, sign_hmac, sign_mldsa44,
+    };
 
     #[test]
     fn test_verify_hmac_valid() {
@@ -224,8 +313,8 @@ mod tests {
     #[test]
     fn test_verify_ed25519_valid() {
         let pkcs8 = generate_ed25519_key().unwrap();
-        let key_pair = Ed25519KeyPair::from_pkcs8(&pkcs8).unwrap();
-        let public_key_bytes = key_pair.public_key().as_ref();
+        let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(&pkcs8).unwrap();
+        let public_key_bytes = signing_key.verifying_key().to_bytes();
 
         let key_id = ed25519_key_hash(&pkcs8).unwrap();
         let claims = Claims {
@@ -234,15 +323,15 @@ mod tests {
         };
         let token_bytes = sign_ed25519(&pkcs8, claims, key_id).unwrap();
 
-        let result = verify_ed25519(public_key_bytes, &token_bytes, 1700000000);
+        let result = verify_ed25519(&public_key_bytes, &token_bytes, 1700000000);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_verify_ed25519_expired() {
         let pkcs8 = generate_ed25519_key().unwrap();
-        let key_pair = Ed25519KeyPair::from_pkcs8(&pkcs8).unwrap();
-        let public_key_bytes = key_pair.public_key().as_ref();
+        let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(&pkcs8).unwrap();
+        let public_key_bytes = signing_key.verifying_key().to_bytes();
 
         let key_id = ed25519_key_hash(&pkcs8).unwrap();
         let claims = Claims {
@@ -251,15 +340,15 @@ mod tests {
         };
         let token_bytes = sign_ed25519(&pkcs8, claims, key_id).unwrap();
 
-        let result = verify_ed25519(public_key_bytes, &token_bytes, 2000);
+        let result = verify_ed25519(&public_key_bytes, &token_bytes, 2000);
         assert!(matches!(result, Err(ProtokenError::TokenExpired { .. })));
     }
 
     #[test]
     fn test_verify_ed25519_corrupted_signature() {
         let pkcs8 = generate_ed25519_key().unwrap();
-        let key_pair = Ed25519KeyPair::from_pkcs8(&pkcs8).unwrap();
-        let public_key_bytes = key_pair.public_key().as_ref();
+        let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(&pkcs8).unwrap();
+        let public_key_bytes = signing_key.verifying_key().to_bytes();
 
         let key_id = ed25519_key_hash(&pkcs8).unwrap();
         let claims = Claims {
@@ -270,7 +359,7 @@ mod tests {
         let last = token_bytes.len() - 1;
         token_bytes[last] ^= 0xFF;
 
-        let result = verify_ed25519(public_key_bytes, &token_bytes, 0);
+        let result = verify_ed25519(&public_key_bytes, &token_bytes, 0);
         assert!(result.is_err());
     }
 
@@ -324,8 +413,8 @@ mod tests {
     #[test]
     fn test_ed25519_corrupt_every_byte() {
         let pkcs8 = generate_ed25519_key().unwrap();
-        let key_pair = Ed25519KeyPair::from_pkcs8(&pkcs8).unwrap();
-        let public_key_bytes = key_pair.public_key().as_ref();
+        let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(&pkcs8).unwrap();
+        let public_key_bytes = signing_key.verifying_key().to_bytes();
 
         let key_id = ed25519_key_hash(&pkcs8).unwrap();
         let claims = Claims {
@@ -341,7 +430,7 @@ mod tests {
             let mut corrupted = token_bytes.clone();
             corrupted[i] ^= 0x01;
 
-            let result = verify_ed25519(public_key_bytes, &corrupted, 1000);
+            let result = verify_ed25519(&public_key_bytes, &corrupted, 1000);
             assert!(
                 result.is_err(),
                 "corrupting byte {i} should cause verification failure"
@@ -374,5 +463,125 @@ mod tests {
         // After not_before -> should succeed
         let result = verify_hmac(key, &token_bytes, 6000);
         assert!(result.is_ok());
+    }
+
+    // ML-DSA-44 verification tests
+
+    #[test]
+    fn test_verify_mldsa44_valid() {
+        let (sk, pk) = generate_mldsa44_key().unwrap();
+        let key_id = mldsa44_key_hash(&pk).unwrap();
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let token_bytes = sign_mldsa44(&sk, claims, key_id).unwrap();
+
+        let result = verify_mldsa44(&pk, &token_bytes, 1700000000);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_mldsa44_expired() {
+        let (sk, pk) = generate_mldsa44_key().unwrap();
+        let key_id = mldsa44_key_hash(&pk).unwrap();
+        let claims = Claims {
+            expires_at: 1000,
+            ..Default::default()
+        };
+        let token_bytes = sign_mldsa44(&sk, claims, key_id).unwrap();
+
+        let result = verify_mldsa44(&pk, &token_bytes, 2000);
+        assert!(matches!(result, Err(ProtokenError::TokenExpired { .. })));
+    }
+
+    #[test]
+    fn test_verify_mldsa44_wrong_key() {
+        let (sk1, pk1) = generate_mldsa44_key().unwrap();
+        let (_sk2, pk2) = generate_mldsa44_key().unwrap();
+        let key_id = mldsa44_key_hash(&pk1).unwrap();
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let token_bytes = sign_mldsa44(&sk1, claims, key_id).unwrap();
+
+        let result = verify_mldsa44(&pk2, &token_bytes, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_mldsa44_corrupted_signature() {
+        let (sk, pk) = generate_mldsa44_key().unwrap();
+        let key_id = mldsa44_key_hash(&pk).unwrap();
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let mut token_bytes = sign_mldsa44(&sk, claims, key_id).unwrap();
+        let last = token_bytes.len() - 1;
+        token_bytes[last] ^= 0xFF;
+
+        let result = verify_mldsa44(&pk, &token_bytes, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_mldsa44_with_public_key_id() {
+        let (sk, pk) = generate_mldsa44_key().unwrap();
+        let key_id = KeyIdentifier::PublicKey(pk.clone());
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let token_bytes = sign_mldsa44(&sk, claims, key_id).unwrap();
+
+        let result = verify_mldsa44(&pk, &token_bytes, 0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_mldsa44_not_before() {
+        let (sk, pk) = generate_mldsa44_key().unwrap();
+        let key_id = mldsa44_key_hash(&pk).unwrap();
+        let claims = Claims {
+            expires_at: u64::MAX,
+            not_before: 5000,
+            ..Default::default()
+        };
+
+        let token_bytes = sign_mldsa44(&sk, claims, key_id).unwrap();
+
+        // Before not_before -> should fail
+        let result = verify_mldsa44(&pk, &token_bytes, 3000);
+        assert!(matches!(
+            result,
+            Err(ProtokenError::TokenNotYetValid { .. })
+        ));
+
+        // At not_before -> should succeed
+        let result = verify_mldsa44(&pk, &token_bytes, 5000);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mldsa44_sign_verify_with_full_claims() {
+        let (sk, pk) = generate_mldsa44_key().unwrap();
+        let key_id = mldsa44_key_hash(&pk).unwrap();
+        let claims = Claims {
+            expires_at: u64::MAX,
+            not_before: 1000,
+            issued_at: 1000,
+            subject: "pq-user".into(),
+            audience: "pq-service".into(),
+            scopes: vec!["admin".into(), "read".into(), "write".into()],
+        };
+
+        let token_bytes = sign_mldsa44(&sk, claims.clone(), key_id).unwrap();
+        let result = verify_mldsa44(&pk, &token_bytes, 2000);
+        assert!(result.is_ok());
+        let verified = result.unwrap();
+        assert_eq!(verified.claims, claims);
+        assert_eq!(verified.metadata.algorithm, Algorithm::MlDsa44);
     }
 }

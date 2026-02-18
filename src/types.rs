@@ -27,6 +27,7 @@ impl Version {
 pub enum Algorithm {
     HmacSha256 = 1,
     Ed25519 = 2,
+    MlDsa44 = 3,
 }
 
 impl Algorithm {
@@ -34,6 +35,7 @@ impl Algorithm {
         match b {
             1 => Some(Algorithm::HmacSha256),
             2 => Some(Algorithm::Ed25519),
+            3 => Some(Algorithm::MlDsa44),
             _ => None,
         }
     }
@@ -45,8 +47,9 @@ impl Algorithm {
     /// Returns the signature length in bytes for this algorithm.
     pub fn signature_len(self) -> usize {
         match self {
-            Algorithm::HmacSha256 => 32,
-            Algorithm::Ed25519 => 64,
+            Algorithm::HmacSha256 => HMAC_SHA256_SIG_LEN,
+            Algorithm::Ed25519 => ED25519_SIG_LEN,
+            Algorithm::MlDsa44 => MLDSA44_SIG_LEN,
         }
     }
 }
@@ -194,7 +197,8 @@ pub struct SignedToken {
 pub const MAX_PAYLOAD_BYTES: usize = 4096;
 
 /// Maximum size of signature bytes in a SignedToken.
-pub const MAX_SIGNATURE_BYTES: usize = 128;
+/// Must accommodate ML-DSA-44 signatures (2,420 bytes).
+pub const MAX_SIGNATURE_BYTES: usize = 2560;
 
 /// Constant: key hash length in bytes.
 pub const KEY_HASH_LEN: usize = 8;
@@ -207,3 +211,12 @@ pub const HMAC_SHA256_SIG_LEN: usize = 32;
 
 /// Constant: Ed25519 signature length.
 pub const ED25519_SIG_LEN: usize = 64;
+
+/// Constant: ML-DSA-44 public key length.
+pub const MLDSA44_PUBLIC_KEY_LEN: usize = 1312;
+
+/// Constant: ML-DSA-44 signing key length.
+pub const MLDSA44_SIGNING_KEY_LEN: usize = 2560;
+
+/// Constant: ML-DSA-44 signature length.
+pub const MLDSA44_SIG_LEN: usize = 2420;

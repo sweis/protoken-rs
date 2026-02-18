@@ -2,7 +2,7 @@
 //! Generates test vectors for protoken wire format regression testing.
 //! Run with: cargo run --bin gen_test_vectors
 
-use ring::signature::{Ed25519KeyPair, KeyPair};
+use ed25519_dalek::pkcs8::DecodePrivateKey;
 
 use protoken::serialize::serialize_payload;
 use protoken::sign::{compute_key_hash, sign_ed25519, sign_hmac};
@@ -181,7 +181,7 @@ fn main() {
     let hmac_key = b"protoken-test-vector-key-do-not-use-in-production!!";
     let hmac_key_hash = compute_key_hash(hmac_key);
 
-    // Vector 6: HMAC signed token
+    // Vector 7: HMAC signed token
     let hmac_expires = 1700000000u64;
     let hmac_claims = Claims {
         expires_at: hmac_expires,
@@ -205,11 +205,11 @@ fn main() {
 
     let pkcs8_hex = generate_fixed_ed25519_key();
     let pkcs8_bytes = hex::decode(&pkcs8_hex).unwrap();
-    let key_pair = Ed25519KeyPair::from_pkcs8(&pkcs8_bytes).unwrap();
-    let public_key = key_pair.public_key().as_ref();
-    let ed25519_key_hash_val = compute_key_hash(public_key);
+    let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(&pkcs8_bytes).unwrap();
+    let public_key = signing_key.verifying_key().to_bytes();
+    let ed25519_key_hash_val = compute_key_hash(&public_key);
 
-    // Vector 7: Ed25519 signed token with key_hash
+    // Vector 8: Ed25519 signed token with key_hash
     let ed25519_expires = 1800000000u64;
     let ed25519_key_id = KeyIdentifier::KeyHash(ed25519_key_hash_val);
     let ed25519_claims = Claims {
@@ -232,7 +232,7 @@ fn main() {
         "expected_len": ed25519_token.len(),
     }));
 
-    // Vector 8: Ed25519 signed token with embedded public key
+    // Vector 9: Ed25519 signed token with embedded public key
     let ed25519_key_id_pk = KeyIdentifier::PublicKey(public_key.to_vec());
     let ed25519_claims_pk = Claims {
         expires_at: ed25519_expires,
