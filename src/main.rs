@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use clap::{Parser, Subcommand};
+use colored::Colorize;
 
 use protoken::keys::{
     deserialize_signing_key, deserialize_verifying_key, extract_verifying_key,
@@ -13,7 +14,7 @@ use protoken::sign::{
     compute_key_hash, generate_ed25519_key, generate_hmac_key, generate_mldsa44_key,
     mldsa44_key_hash, sign_ed25519, sign_hmac, sign_mldsa44,
 };
-use protoken::types::{Algorithm, Claims, KeyIdentifier};
+use protoken::types::{Algorithm, Claims, KeyIdentifier, Payload};
 use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -73,12 +74,20 @@ enum Command {
 
         /// Token (base64). If omitted, reads from stdin.
         token: Option<String>,
+
+        /// Output as JSON instead of colored text.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Inspect a token without verifying (no key needed).
     Inspect {
         /// Token (base64). If omitted, reads from stdin.
         token: Option<String>,
+
+        /// Output as JSON instead of colored text.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -95,8 +104,12 @@ fn main() {
             audience,
             scope,
         } => cmd_sign(&keyfile, &duration, subject, audience, scope),
-        Command::Verify { keyfile, token } => cmd_verify(&keyfile, token),
-        Command::Inspect { token } => cmd_inspect(token),
+        Command::Verify {
+            keyfile,
+            token,
+            json,
+        } => cmd_verify(&keyfile, token, json),
+        Command::Inspect { token, json } => cmd_inspect(token, json),
     };
 
     if let Err(e) = result {
@@ -200,7 +213,11 @@ fn cmd_sign(
     Ok(())
 }
 
-fn cmd_verify(keyfile: &str, token_arg: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_verify(
+    keyfile: &str,
+    token_arg: Option<String>,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if keyfile == "-" && token_arg.is_none() {
         return Err("when keyfile is \"-\" (stdin), token must be provided as an argument".into());
     }
@@ -231,32 +248,48 @@ fn cmd_verify(keyfile: &str, token_arg: Option<String>) -> Result<(), Box<dyn st
         }
     };
 
-    println!("{}", serde_json::to_string_pretty(&verified)?);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&verified)?);
+    } else {
+        println!("{}", "OK".green().bold());
+        print_payload_colored(&payload);
+    }
     Ok(())
 }
 
-fn cmd_inspect(token_arg: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_inspect(token_arg: Option<String>, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let token_bytes = read_token_input(token_arg)?;
 
     match deserialize_signed_token(&token_bytes) {
         Ok(token) => {
             let payload = deserialize_payload(&token.payload_bytes)?;
-            let output = serde_json::json!({
-                "type": "SignedToken",
-                "payload": payload,
-                "signature_base64": B64.encode(&token.signature),
-                "total_bytes": token_bytes.len(),
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        }
-        Err(_) => match deserialize_payload(&token_bytes) {
-            Ok(payload) => {
+            if json {
                 let output = serde_json::json!({
-                    "type": "Payload",
+                    "type": "SignedToken",
                     "payload": payload,
+                    "signature_base64": B64.encode(&token.signature),
                     "total_bytes": token_bytes.len(),
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                print_payload_colored(&payload);
+                print_field("Signature", &B64.encode(&token.signature).magenta());
+                print_field("Size", &format_size(token_bytes.len()).cyan());
+            }
+        }
+        Err(_) => match deserialize_payload(&token_bytes) {
+            Ok(payload) => {
+                if json {
+                    let output = serde_json::json!({
+                        "type": "Payload",
+                        "payload": payload,
+                        "total_bytes": token_bytes.len(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    print_payload_colored(&payload);
+                    print_field("Size", &format_size(token_bytes.len()).cyan());
+                }
             }
             Err(e) => {
                 return Err(format!("could not parse as SignedToken or Payload: {e}").into());
@@ -265,6 +298,63 @@ fn cmd_inspect(token_arg: Option<String>) -> Result<(), Box<dyn std::error::Erro
     }
 
     Ok(())
+}
+
+// --- Display helpers ---
+
+fn print_field(label: &str, value: &dyn std::fmt::Display) {
+    println!("  {:>12}  {}", label.bold(), value);
+}
+
+fn print_payload_colored(payload: &Payload) {
+    let algo_name = match payload.metadata.algorithm {
+        Algorithm::HmacSha256 => "HMAC-SHA256",
+        Algorithm::Ed25519 => "Ed25519",
+        Algorithm::MlDsa44 => "ML-DSA-44",
+    };
+    print_field("Algorithm", &algo_name.green());
+
+    let key_id_str = match &payload.metadata.key_identifier {
+        KeyIdentifier::KeyHash(h) => format!("{} (key_hash)", B64.encode(h)),
+        KeyIdentifier::PublicKey(pk) => {
+            if pk.len() <= 32 {
+                format!("{} (public_key)", B64.encode(pk))
+            } else {
+                format!("{}... (public_key, {} B)", B64.encode(&pk[..24]), pk.len())
+            }
+        }
+    };
+    print_field("Key ID", &key_id_str.magenta());
+
+    print_field("Expires", &format_timestamp(payload.claims.expires_at).cyan());
+    if payload.claims.not_before != 0 {
+        print_field("Not Before", &format_timestamp(payload.claims.not_before).cyan());
+    }
+    if payload.claims.issued_at != 0 {
+        print_field("Issued At", &format_timestamp(payload.claims.issued_at).cyan());
+    }
+    if !payload.claims.subject.is_empty() {
+        print_field("Subject", &payload.claims.subject.green());
+    }
+    if !payload.claims.audience.is_empty() {
+        print_field("Audience", &payload.claims.audience.green());
+    }
+    if !payload.claims.scopes.is_empty() {
+        print_field("Scopes", &payload.claims.scopes.join(", ").green());
+    }
+}
+
+fn format_timestamp(unix_secs: u64) -> String {
+    let d = UNIX_EPOCH + std::time::Duration::from_secs(unix_secs);
+    humantime::format_rfc3339_seconds(d).to_string()
+}
+
+fn format_size(bytes: usize) -> String {
+    if bytes >= 1024 {
+        format!("{} B ({:.1} KB)", bytes, bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 // --- I/O helpers ---
