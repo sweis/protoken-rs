@@ -20,35 +20,30 @@ cargo install --path .
 
 ## Usage
 
+All keys are encoded as canonical proto3 messages (`SigningKey` / `VerifyingKey`). The CLI accepts hex or base64-encoded proto bytes for key files and token inputs. Output from `generate-key` and `extract-verifying-key` is a base64-encoded proto that any protobuf decoder can parse.
+
 ### Generate keys
 
 ```sh
-# Ed25519 (default)
-protoken generate-key
+# Ed25519 (default) — outputs base64-encoded SigningKey proto
+protoken generate-key > my.key
 
 # HMAC-SHA256
-protoken generate-key -a hmac
+protoken generate-key -a hmac > my.key
 
 # ML-DSA-44 (post-quantum)
-protoken generate-key -a ml-dsa-44
+protoken generate-key -a ml-dsa-44 > my.key
+
+# Output as hex instead of base64
+protoken generate-key -o hex > my.key
 ```
 
-Output is JSON with hex-encoded proto key bytes:
+### Extract verifying key
 
-```json
-{
-  "algorithm": "ed25519",
-  "signing_key_hex": "0810122048...",
-  "verifying_key_hex": "081012204f...",
-  "key_hash_hex": "a1b2c3d4e5f60718"
-}
-```
-
-Save the signing key to a file:
+For asymmetric algorithms (Ed25519, ML-DSA-44), extract the verifying key to share with verifiers:
 
 ```sh
-protoken generate-key | jq -r .signing_key_hex > my.key
-protoken generate-key | jq -r .verifying_key_hex > my.pub
+protoken extract-verifying-key -k my.key > my.pub
 ```
 
 ### Sign a token
@@ -132,7 +127,7 @@ message VerifyingKey {
 
 ## Test vectors
 
-Stored in `testdata/vectors.json` (wire format regression) and `testdata/reference_vectors.json` (long-lived keys and tokens expiring 2036).
+Stored in `testdata/vectors.json` (wire format regression) and `testdata/reference_vectors.json` (long-lived keys and tokens expiring 2036). All binary data is URL-safe base64 (no padding).
 
 ```sh
 # Regenerate wire format vectors

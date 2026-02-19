@@ -1,52 +1,52 @@
 {
-  "description": "Protoken wire format test vectors (canonical proto3). Any change in these values indicates a wire format regression.",
+  "description": "Protoken wire format test vectors (canonical proto3). All binary data is URL-safe base64 (no padding). Any change in these values indicates a wire format regression.",
   "generated_by": "gen_test_vectors",
   "vectors": [
     {
-      "expected_hex": "10011801220801020304050607082880e2cfaa06",
+      "expected_base64": "EAEYASIIAQIDBAUGBwgogOLPqgY",
       "expected_len": 20,
       "input": {
         "algorithm": 1,
         "expires_at": 1700000000,
-        "key_id_hex": "0102030405060708",
+        "key_id_base64": "AQIDBAUGBwg",
         "key_id_type": 1
       },
       "name": "payload_hmac_keyhash",
       "type": "payload"
     },
     {
-      "expected_hex": "100218012208aaaaaaaaaaaaaaaa2880a4a7da06",
+      "expected_base64": "EAIYASIIqqqqqqqqqqoogKSn2gY",
       "expected_len": 20,
       "input": {
         "algorithm": 2,
         "expires_at": 1800000000,
-        "key_id_hex": "aaaaaaaaaaaaaaaa",
+        "key_id_base64": "qqqqqqqqqqo",
         "key_id_type": 1
       },
       "name": "payload_ed25519_keyhash",
       "type": "payload"
     },
     {
-      "expected_hex": "100218022220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2880e6fe8907",
+      "expected_base64": "EAIYAiIgu7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7sogOb-iQc",
       "expected_len": 44,
       "input": {
         "algorithm": 2,
         "expires_at": 1900000000,
-        "key_id_hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "key_id_base64": "u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7s",
         "key_id_type": 2
       },
       "name": "payload_ed25519_pubkey",
       "type": "payload"
     },
     {
-      "expected_hex": "10011801220811111111111111112880e2cfaa0630f093cfaa0638f093cfaa06420a757365723a616c6963654a0f6170692e6578616d706c652e636f6d",
+      "expected_base64": "EAEYASIIEREREREREREogOLPqgYw8JPPqgY48JPPqgZCCnVzZXI6YWxpY2VKD2FwaS5leGFtcGxlLmNvbQ",
       "expected_len": 61,
       "input": {
         "algorithm": 1,
         "audience": "api.example.com",
         "expires_at": 1700000000,
         "issued_at": 1699990000,
-        "key_id_hex": "1111111111111111",
+        "key_id_base64": "ERERERERERE",
         "key_id_type": 1,
         "not_before": 1699990000,
         "subject": "user:alice"
@@ -55,24 +55,24 @@
       "type": "payload"
     },
     {
-      "expected_hex": "100118012208ffffffffffffffff28ffffffffffffffffff01",
+      "expected_base64": "EAEYASII__________8o____________AQ",
       "expected_len": 25,
       "input": {
         "algorithm": 1,
         "expires_at": 18446744073709551615,
-        "key_id_hex": "ffffffffffffffff",
+        "key_id_base64": "__________8",
         "key_id_type": 1
       },
       "name": "payload_hmac_max",
       "type": "payload"
     },
     {
-      "expected_hex": "10011801220822222222222222222880e2cfaa06520561646d696e52047265616452057772697465",
+      "expected_base64": "EAEYASIIIiIiIiIiIiIogOLPqgZSBWFkbWluUgRyZWFkUgV3cml0ZQ",
       "expected_len": 40,
       "input": {
         "algorithm": 1,
         "expires_at": 1700000000,
-        "key_id_hex": "2222222222222222",
+        "key_id_base64": "IiIiIiIiIiI",
         "key_id_type": 1,
         "scopes": [
           "admin",
@@ -84,53 +84,51 @@
       "type": "payload"
     },
     {
-      "expected_hex": "0a1410011801220866b078778eab1cd42880e2cfaa061220fc5679ce9fcc7bca58df7abdd7a33aacd35c95f92c8904939da581add78d90ce",
+      "expected_base64": "ChQQARgBIghmsHh3jqsc1CiA4s-qBhIg_FZ5zp_Me8pY33q916M6rNNclfksiQSTnaWBrdeNkM4",
       "expected_len": 56,
       "input": {
         "algorithm": "hmac",
         "expires_at": 1700000000,
-        "key_hash_hex": "66b078778eab1cd4",
-        "key_hex": "70726f746f6b656e2d746573742d766563746f722d6b65792d646f2d6e6f742d7573652d696e2d70726f64756374696f6e2121"
+        "key_hash_base64": "ZrB4d46rHNQ",
+        "signing_key_base64": "CAESM3Byb3Rva2VuLXRlc3QtdmVjdG9yLWtleS1kby1ub3QtdXNlLWluLXByb2R1Y3Rpb24hIQ"
       },
       "name": "signed_hmac",
       "type": "signed_token"
     },
     {
-      "expected_hex": "0a1410021801220861ba51c9d9c3b0f72880a4a7da0612403b5166433828a21ea5d4b46d081b0f6dee2532886157dfb3828f2e3f539c1db04c5609e0c8abe306cab31a0cd0c8b9ab67bbdf4c68a2b8129e91ea31e6dd8805",
+      "expected_base64": "ChQQAhgBIghhulHJ2cOw9yiApKfaBhJAO1FmQzgooh6l1LRtCBsPbe4lMohhV9-zgo8uP1OcHbBMVgngyKvjBsqzGgzQyLmrZ7vfTGiiuBKekeox5t2IBQ",
       "expected_len": 88,
       "input": {
         "algorithm": "ed25519",
         "expires_at": 1800000000,
-        "key_hash_hex": "61ba51c9d9c3b0f7",
+        "key_hash_base64": "YbpRydnDsPc",
         "key_id_type": "key_hash",
-        "public_key_hex": "b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e8",
-        "seed_hex": "3cc4bec961d0bf428a58a323812992ea8cd803814871ee8b2477dc3362ac4619"
+        "signing_key_base64": "CAISIDzEvslh0L9CilijI4EpkuqM2AOBSHHuiyR33DNirEYZGiC1QJ-8F00jcoNzJqIhdKkS61okENNE1EE5z5U719uZ6A"
       },
       "name": "signed_ed25519_keyhash",
       "type": "signed_token"
     },
     {
-      "expected_hex": "0a2c100218022220b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e82880a4a7da061240b9791660af10a58a5cff941abfc8a1a29d71fa09b4b1ed30cdaed5bbe19e1bba248256fe7fa9c66b29a5492284a87eeeacefa662f595ecdeb782ff678e28c70f",
+      "expected_base64": "CiwQAhgCIiC1QJ-8F00jcoNzJqIhdKkS61okENNE1EE5z5U719uZ6CiApKfaBhJAuXkWYK8QpYpc_5Qav8ihop1x-gm0se0wza7Vu-GeG7okglb-f6nGaymlSSKEqH7urO-mYvWV7N63gv9njijHDw",
       "expected_len": 112,
       "input": {
         "algorithm": "ed25519",
         "expires_at": 1800000000,
         "key_id_type": "public_key",
-        "public_key_hex": "b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e8",
-        "seed_hex": "3cc4bec961d0bf428a58a323812992ea8cd803814871ee8b2477dc3362ac4619"
+        "signing_key_base64": "CAISIDzEvslh0L9CilijI4EpkuqM2AOBSHHuiyR33DNirEYZGiC1QJ-8F00jcoNzJqIhdKkS61okENNE1EE5z5U719uZ6A"
       },
       "name": "signed_ed25519_pubkey",
       "type": "signed_token"
     },
     {
-      "expected_hex": "66b078778eab1cd4",
-      "input_hex": "70726f746f6b656e2d746573742d766563746f722d6b65792d646f2d6e6f742d7573652d696e2d70726f64756374696f6e2121",
+      "expected_base64": "ZrB4d46rHNQ",
+      "input_base64": "cHJvdG9rZW4tdGVzdC12ZWN0b3Ita2V5LWRvLW5vdC11c2UtaW4tcHJvZHVjdGlvbiEh",
       "name": "key_hash_hmac",
       "type": "key_hash"
     },
     {
-      "expected_hex": "61ba51c9d9c3b0f7",
-      "input_hex": "b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e8",
+      "expected_base64": "YbpRydnDsPc",
+      "input_base64": "tUCfvBdNI3KDcyaiIXSpEutaJBDTRNRBOc-VO9fbmeg",
       "name": "key_hash_ed25519_pubkey",
       "type": "key_hash"
     }

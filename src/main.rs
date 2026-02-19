@@ -16,6 +16,8 @@ use protoken::sign::{
 use protoken::types::{Algorithm, Claims, KeyIdentifier};
 use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
 
+const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
 #[derive(Parser)]
 #[command(name = "protoken", about = "Protobuf-inspired signed tokens")]
 struct Cli {
@@ -33,9 +35,9 @@ enum Command {
         token: Option<String>,
     },
 
-    /// Sign a new token. Key is a hex-encoded SigningKey proto.
+    /// Sign a new token. Key is a hex or base64-encoded SigningKey proto.
     Sign {
-        /// Key file path (hex-encoded SigningKey proto).
+        /// Key file path (hex or base64-encoded SigningKey proto).
         #[arg(short, long)]
         key: String,
 
@@ -63,7 +65,7 @@ enum Command {
     /// Verify a signed token against a key and current time.
     /// Algorithm is detected from the token.
     Verify {
-        /// Key file path (hex-encoded VerifyingKey or SigningKey proto for HMAC).
+        /// Key file path (hex or base64-encoded VerifyingKey or SigningKey proto for HMAC).
         #[arg(short, long)]
         key: String,
 
@@ -72,12 +74,27 @@ enum Command {
         token: Option<String>,
     },
 
-    /// Generate a new key pair.
-    /// Outputs JSON with hex-encoded SigningKey and VerifyingKey protos.
+    /// Generate a new signing key. Outputs a base64 or hex-encoded SigningKey proto.
     GenerateKey {
         /// Algorithm: "hmac", "ed25519" (default), or "ml-dsa-44"
         #[arg(short, long, default_value = "ed25519")]
         algorithm: String,
+
+        /// Output format: "hex" or "base64"
+        #[arg(short, long, default_value = "base64")]
+        output: String,
+    },
+
+    /// Extract a verifying key from a signing key.
+    /// Outputs a base64 or hex-encoded VerifyingKey proto.
+    ExtractVerifyingKey {
+        /// Signing key file path (hex or base64-encoded SigningKey proto).
+        #[arg(short, long)]
+        key: String,
+
+        /// Output format: "hex" or "base64"
+        #[arg(short, long, default_value = "base64")]
+        output: String,
     },
 }
 
@@ -95,7 +112,8 @@ fn main() {
             scope,
         } => cmd_sign(&key, &duration, &output, subject, audience, scope),
         Command::Verify { key, token } => cmd_verify(&key, token),
-        Command::GenerateKey { algorithm } => cmd_generate_key(&algorithm),
+        Command::GenerateKey { algorithm, output } => cmd_generate_key(&algorithm, &output),
+        Command::ExtractVerifyingKey { key, output } => cmd_extract_verifying_key(&key, &output),
     };
 
     if let Err(e) = result {
@@ -145,7 +163,7 @@ fn cmd_sign(
     audience: Option<String>,
     scopes: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let key_bytes = read_hex_key_file(key_path)?;
+    let key_bytes = read_key_file(key_path)?;
     let sk = deserialize_signing_key(&key_bytes)?;
 
     let duration: std::time::Duration = duration_str
@@ -185,12 +203,7 @@ fn cmd_sign(
 
     match output_format {
         "hex" => println!("{}", hex::encode(&token_bytes)),
-        "base64" => {
-            println!(
-                "{}",
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&token_bytes)
-            );
-        }
+        "base64" => println!("{}", B64.encode(&token_bytes)),
         _ => return Err(format!("unknown output format: {output_format}").into()),
     }
 
@@ -198,7 +211,7 @@ fn cmd_sign(
 }
 
 fn cmd_verify(key_path: &str, token_arg: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
-    let key_bytes = read_hex_key_file(key_path)?;
+    let key_bytes = read_key_file(key_path)?;
     let token_bytes = read_token_bytes(token_arg)?;
 
     let now = SystemTime::now()
@@ -229,69 +242,34 @@ fn cmd_verify(key_path: &str, token_arg: Option<String>) -> Result<(), Box<dyn s
     Ok(())
 }
 
-fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
-    match algorithm {
+fn cmd_generate_key(
+    algorithm: &str,
+    output_format: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sk = match algorithm {
         "hmac" => {
             let secret_key = generate_hmac_key();
-            let key_hash = compute_key_hash(&secret_key);
-
-            let sk = ProtoSigningKey {
+            ProtoSigningKey {
                 algorithm: Algorithm::HmacSha256,
                 secret_key,
                 public_key: Vec::new(),
-            };
-            let sk_bytes = serialize_signing_key(&sk);
-
-            let output = serde_json::json!({
-                "algorithm": "hmac-sha256",
-                "signing_key_hex": hex::encode(&sk_bytes),
-                "key_hash_hex": hex::encode(key_hash),
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            }
         }
         "ed25519" => {
             let (seed, pk) = generate_ed25519_key()?;
-            let key_hash = compute_key_hash(&pk);
-
-            let sk = ProtoSigningKey {
+            ProtoSigningKey {
                 algorithm: Algorithm::Ed25519,
                 secret_key: seed,
                 public_key: pk,
-            };
-            let sk_bytes = serialize_signing_key(&sk);
-
-            let vk = extract_verifying_key(&sk)?;
-            let vk_bytes = serialize_verifying_key(&vk);
-
-            let output = serde_json::json!({
-                "algorithm": "ed25519",
-                "signing_key_hex": hex::encode(&sk_bytes),
-                "verifying_key_hex": hex::encode(&vk_bytes),
-                "key_hash_hex": hex::encode(key_hash),
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            }
         }
         "ml-dsa-44" => {
             let (sk_raw, pk) = generate_mldsa44_key()?;
-            let key_hash = compute_key_hash(&pk);
-
-            let sk = ProtoSigningKey {
+            ProtoSigningKey {
                 algorithm: Algorithm::MlDsa44,
                 secret_key: sk_raw,
                 public_key: pk,
-            };
-            let sk_bytes = serialize_signing_key(&sk);
-
-            let vk = extract_verifying_key(&sk)?;
-            let vk_bytes = serialize_verifying_key(&vk);
-
-            let output = serde_json::json!({
-                "algorithm": "ml-dsa-44",
-                "signing_key_hex": hex::encode(&sk_bytes),
-                "verifying_key_hex": hex::encode(&vk_bytes),
-                "key_hash_hex": hex::encode(key_hash),
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            }
         }
         _ => {
             return Err(format!(
@@ -299,8 +277,30 @@ fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
             )
             .into())
         }
-    }
+    };
 
+    let sk_bytes = serialize_signing_key(&sk);
+    print_encoded(&sk_bytes, output_format)
+}
+
+fn cmd_extract_verifying_key(
+    key_path: &str,
+    output_format: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let key_bytes = read_key_file(key_path)?;
+    let sk = deserialize_signing_key(&key_bytes)?;
+    let vk = extract_verifying_key(&sk)?;
+    let vk_bytes = serialize_verifying_key(&vk);
+    print_encoded(&vk_bytes, output_format)
+}
+
+/// Print bytes in the requested encoding (hex or base64).
+fn print_encoded(data: &[u8], format: &str) -> Result<(), Box<dyn std::error::Error>> {
+    match format {
+        "hex" => println!("{}", hex::encode(data)),
+        "base64" => println!("{}", B64.encode(data)),
+        _ => return Err(format!("unknown output format: {format}").into()),
+    }
     Ok(())
 }
 
@@ -315,29 +315,33 @@ fn read_token_bytes(token_arg: Option<String>) -> Result<Vec<u8>, Box<dyn std::e
         }
     };
 
-    // Try hex first, then base64
-    if let Ok(bytes) = hex::decode(&input) {
-        return Ok(bytes);
-    }
-
-    if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&input) {
-        return Ok(bytes);
-    }
-
-    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&input) {
-        return Ok(bytes);
-    }
-
-    Err("could not decode token as hex or base64".into())
+    decode_hex_or_base64(&input)
 }
 
-/// Read a hex-encoded key file and decode it.
+/// Read a key file and decode it from hex or base64.
 /// Rejects files larger than 100 KB to prevent accidental misuse.
-fn read_hex_key_file(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn read_key_file(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let metadata = std::fs::metadata(path)?;
     if metadata.len() > 100_000 {
         return Err(format!("key file too large: {} bytes (max 100,000)", metadata.len()).into());
     }
     let raw = std::fs::read_to_string(path)?;
-    Ok(hex::decode(raw.trim())?)
+    decode_hex_or_base64(raw.trim())
+}
+
+/// Try to decode a string as hex, then URL-safe base64, then standard base64.
+fn decode_hex_or_base64(input: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if let Ok(bytes) = hex::decode(input) {
+        return Ok(bytes);
+    }
+
+    if let Ok(bytes) = B64.decode(input) {
+        return Ok(bytes);
+    }
+
+    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(input) {
+        return Ok(bytes);
+    }
+
+    Err("could not decode as hex or base64".into())
 }
