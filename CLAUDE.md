@@ -35,6 +35,17 @@ message SignedToken {
   Payload payload = 1;     // canonical-encoded Payload submessage
   bytes   signature = 2;   // HMAC-SHA256 (32 B), Ed25519 (64 B), or ML-DSA-44 (2420 B)
 }
+
+message SigningKey {
+  uint32 algorithm = 1;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44
+  bytes secret_key = 2;    // HMAC: raw key (≥32 B); Ed25519: 32 B seed; ML-DSA-44: 2560 B
+  bytes public_key = 3;    // Ed25519: 32 B; ML-DSA-44: 1312 B; empty for HMAC
+}
+
+message VerifyingKey {
+  uint32 algorithm = 1;    // 2 = Ed25519, 3 = ML-DSA-44
+  bytes public_key = 2;    // Ed25519: 32 B; ML-DSA-44: 1312 B
+}
 ```
 
 7. Canonical encoding rules: fields in ascending order, minimal varints, default values (0/empty) omitted. Repeated fields (scope) appear consecutively, sorted lexicographically, no duplicates.
@@ -76,11 +87,17 @@ See [research-pq-signatures.md](research-pq-signatures.md) for full analysis.
 
 ### Dependencies: RustCrypto (migrated 2026-02-18, originally ring 2026-02-10)
 Migrated from `ring` to RustCrypto ecosystem to unify with `ml-dsa` crate:
-- `ed25519-dalek` for Ed25519 signing/verification (PKCS#8 compatible with former ring keys)
+- `ed25519-dalek` for Ed25519 signing/verification (raw 32-byte seeds, no PKCS#8)
 - `hmac` + `sha2` for HMAC-SHA256 and SHA-256 key hashing
 - `ml-dsa` for ML-DSA-44 (post-quantum), chosen over `fips204` crate (~1,100 dependents vs ~1)
 - `rand` for key generation
 - `clap` (derive) for CLI, `serde`/`serde_json` for JSON, `humantime`, `base64`, `hex`, `thiserror`
+
+### Key Serialization: Proto3 (decided 2026-02-19)
+All key types use canonical proto3 encoding (same as token format). Ed25519 uses raw 32-byte
+seeds (not PKCS#8 DER). SigningKey includes the public key for asymmetric algorithms so
+`extract_verifying_key()` can derive the VerifyingKey without re-deriving from secret material.
+CLI stores keys as hex-encoded proto bytes. See `src/keys.rs`.
 
 ## Implementation Status
 
@@ -88,11 +105,12 @@ All TODO items 1-8 are implemented, plus ML-DSA-44 post-quantum support:
 - `src/types.rs` - Core types (Version, Algorithm incl. MlDsa44, KeyIdentifier, Payload, SignedToken, Claims)
 - `src/proto3.rs` - Canonical proto3 wire encoder/decoder
 - `src/serialize.rs` - Deterministic serialization/deserialization for Payload and SignedToken
-- `src/sign.rs` - HMAC-SHA256, Ed25519, and ML-DSA-44 signing (RustCrypto)
+- `src/keys.rs` - Proto3 key serialization (SigningKey, VerifyingKey) with validation
+- `src/sign.rs` - HMAC-SHA256, Ed25519, and ML-DSA-44 signing (raw seeds, RustCrypto)
 - `src/verify.rs` - Verification with key hash matching, expiry and not_before checking
-- `src/main.rs` - CLI tool with `inspect`, `sign`, `verify`, `generate-key` commands (supports all 3 algorithms)
+- `src/main.rs` - CLI tool with `inspect`, `sign`, `verify`, `generate-key` commands (all 3 algorithms, proto key format)
 - `src/error.rs` - Error types
-- 86 tests (73 unit + 13 integration) including byte-level corruption tests for all algorithms
+- 97 tests (84 unit + 13 integration) including byte-level corruption tests for all algorithms
 
 ## Research Prior Art
 

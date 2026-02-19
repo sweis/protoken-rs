@@ -231,11 +231,10 @@ fn check_temporal_claims(claims: &Claims, now: u64) -> Result<(), ProtokenError>
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-    use ed25519_dalek::pkcs8::DecodePrivateKey;
 
     use crate::sign::{
-        ed25519_key_hash, generate_ed25519_key, generate_mldsa44_key, mldsa44_key_hash,
-        sign_ed25519, sign_hmac, sign_mldsa44,
+        generate_ed25519_key, generate_mldsa44_key, mldsa44_key_hash, sign_ed25519, sign_hmac,
+        sign_mldsa44,
     };
 
     #[test]
@@ -312,54 +311,45 @@ mod tests {
 
     #[test]
     fn test_verify_ed25519_valid() {
-        let pkcs8 = generate_ed25519_key().unwrap();
-        let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(&pkcs8).unwrap();
-        let public_key_bytes = signing_key.verifying_key().to_bytes();
-
-        let key_id = ed25519_key_hash(&pkcs8).unwrap();
+        let (seed, pk) = generate_ed25519_key().unwrap();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let token_bytes = sign_ed25519(&pkcs8, claims, key_id).unwrap();
+        let token_bytes = sign_ed25519(&seed, claims, key_id).unwrap();
 
-        let result = verify_ed25519(&public_key_bytes, &token_bytes, 1700000000);
+        let result = verify_ed25519(&pk, &token_bytes, 1700000000);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_verify_ed25519_expired() {
-        let pkcs8 = generate_ed25519_key().unwrap();
-        let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(&pkcs8).unwrap();
-        let public_key_bytes = signing_key.verifying_key().to_bytes();
-
-        let key_id = ed25519_key_hash(&pkcs8).unwrap();
+        let (seed, pk) = generate_ed25519_key().unwrap();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: 1000,
             ..Default::default()
         };
-        let token_bytes = sign_ed25519(&pkcs8, claims, key_id).unwrap();
+        let token_bytes = sign_ed25519(&seed, claims, key_id).unwrap();
 
-        let result = verify_ed25519(&public_key_bytes, &token_bytes, 2000);
+        let result = verify_ed25519(&pk, &token_bytes, 2000);
         assert!(matches!(result, Err(ProtokenError::TokenExpired { .. })));
     }
 
     #[test]
     fn test_verify_ed25519_corrupted_signature() {
-        let pkcs8 = generate_ed25519_key().unwrap();
-        let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(&pkcs8).unwrap();
-        let public_key_bytes = signing_key.verifying_key().to_bytes();
-
-        let key_id = ed25519_key_hash(&pkcs8).unwrap();
+        let (seed, pk) = generate_ed25519_key().unwrap();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let mut token_bytes = sign_ed25519(&pkcs8, claims, key_id).unwrap();
+        let mut token_bytes = sign_ed25519(&seed, claims, key_id).unwrap();
         let last = token_bytes.len() - 1;
         token_bytes[last] ^= 0xFF;
 
-        let result = verify_ed25519(&public_key_bytes, &token_bytes, 0);
+        let result = verify_ed25519(&pk, &token_bytes, 0);
         assert!(result.is_err());
     }
 
@@ -412,11 +402,8 @@ mod tests {
 
     #[test]
     fn test_ed25519_corrupt_every_byte() {
-        let pkcs8 = generate_ed25519_key().unwrap();
-        let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(&pkcs8).unwrap();
-        let public_key_bytes = signing_key.verifying_key().to_bytes();
-
-        let key_id = ed25519_key_hash(&pkcs8).unwrap();
+        let (seed, pk) = generate_ed25519_key().unwrap();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: u64::MAX,
             subject: "test".into(),
@@ -424,13 +411,13 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_ed25519(&pkcs8, claims, key_id).unwrap();
+        let token_bytes = sign_ed25519(&seed, claims, key_id).unwrap();
 
         for i in 0..token_bytes.len() {
             let mut corrupted = token_bytes.clone();
             corrupted[i] ^= 0x01;
 
-            let result = verify_ed25519(&public_key_bytes, &corrupted, 1000);
+            let result = verify_ed25519(&pk, &corrupted, 1000);
             assert!(
                 result.is_err(),
                 "corrupting byte {i} should cause verification failure"

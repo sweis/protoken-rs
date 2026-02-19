@@ -1,6 +1,5 @@
 //! Token signing: HMAC-SHA256, Ed25519, and ML-DSA-44.
 
-use ed25519_dalek::pkcs8::DecodePrivateKey;
 use hmac::{Hmac, Mac};
 use ml_dsa::signature::Signer as _;
 use ml_dsa::{KeyGen, MlDsa44};
@@ -52,15 +51,21 @@ pub fn sign_hmac(key: &[u8], claims: Claims) -> Result<Vec<u8>, ProtokenError> {
 /// Sign a token with Ed25519.
 /// Returns the serialized SignedToken wire bytes.
 ///
-/// `pkcs8_private_key` is the PKCS#8 DER-encoded Ed25519 private key.
+/// `seed` is the raw 32-byte Ed25519 private key seed.
 pub fn sign_ed25519(
-    pkcs8_private_key: &[u8],
+    seed: &[u8],
     claims: Claims,
     key_id: KeyIdentifier,
 ) -> Result<Vec<u8>, ProtokenError> {
     claims.validate()?;
-    let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(pkcs8_private_key)
-        .map_err(|e| ProtokenError::SigningFailed(format!("invalid Ed25519 key: {e}")))?;
+    let seed_array: [u8; ED25519_PUBLIC_KEY_LEN] = seed.try_into().map_err(|_| {
+        ProtokenError::SigningFailed(format!(
+            "invalid Ed25519 seed: expected {} bytes, got {}",
+            ED25519_PUBLIC_KEY_LEN,
+            seed.len()
+        ))
+    })?;
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_array);
 
     let payload = Payload {
         metadata: Metadata {
@@ -123,16 +128,6 @@ pub fn sign_mldsa44(
     Ok(serialize_signed_token(&token))
 }
 
-/// Compute the KeyIdentifier::KeyHash for an Ed25519 key pair's public key.
-pub fn ed25519_key_hash(pkcs8_private_key: &[u8]) -> Result<KeyIdentifier, ProtokenError> {
-    let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(pkcs8_private_key)
-        .map_err(|e| ProtokenError::SigningFailed(format!("invalid Ed25519 key: {e}")))?;
-
-    let public_key_bytes = signing_key.verifying_key().to_bytes();
-    let hash = compute_key_hash(&public_key_bytes);
-    Ok(KeyIdentifier::KeyHash(hash))
-}
-
 /// Compute the KeyIdentifier::KeyHash for an ML-DSA-44 public key.
 pub fn mldsa44_key_hash(public_key_bytes: &[u8]) -> Result<KeyIdentifier, ProtokenError> {
     if public_key_bytes.len() != MLDSA44_PUBLIC_KEY_LEN {
@@ -146,34 +141,13 @@ pub fn mldsa44_key_hash(public_key_bytes: &[u8]) -> Result<KeyIdentifier, Protok
     Ok(KeyIdentifier::KeyHash(hash))
 }
 
-/// Split a combined ML-DSA-44 key file (SK || PK) into signing key and public key bytes.
-///
-/// ML-DSA-44 key files are stored as `signing_key_bytes || public_key_bytes`
-/// (2,560 + 1,312 = 3,872 bytes total).
-pub fn split_mldsa44_key(combined: &[u8]) -> Result<(&[u8], &[u8]), ProtokenError> {
-    let expected = MLDSA44_SIGNING_KEY_LEN + MLDSA44_PUBLIC_KEY_LEN;
-    if combined.len() != expected {
-        return Err(ProtokenError::SigningFailed(format!(
-            "invalid ML-DSA-44 combined key: expected {} bytes (SK {} + PK {}), got {}",
-            expected,
-            MLDSA44_SIGNING_KEY_LEN,
-            MLDSA44_PUBLIC_KEY_LEN,
-            combined.len()
-        )));
-    }
-    #[allow(clippy::indexing_slicing)] // length checked above
-    Ok(combined.split_at(MLDSA44_SIGNING_KEY_LEN))
-}
-
-/// Generate a new Ed25519 key pair, returning the PKCS#8 DER bytes.
-pub fn generate_ed25519_key() -> Result<Vec<u8>, ProtokenError> {
-    use ed25519_dalek::pkcs8::EncodePrivateKey;
+/// Generate a new Ed25519 key pair, returning (seed, public_key) as raw bytes.
+pub fn generate_ed25519_key() -> Result<(Vec<u8>, Vec<u8>), ProtokenError> {
     let mut rng = rand::rngs::OsRng;
     let signing_key = ed25519_dalek::SigningKey::generate(&mut rng);
-    let pkcs8 = signing_key
-        .to_pkcs8_der()
-        .map_err(|e| ProtokenError::SigningFailed(format!("PKCS#8 encoding failed: {e}")))?;
-    Ok(pkcs8.as_bytes().to_vec())
+    let seed = signing_key.to_bytes().to_vec();
+    let pk = signing_key.verifying_key().to_bytes().to_vec();
+    Ok((seed, pk))
 }
 
 /// Generate a new ML-DSA-44 key pair, returning (signing_key_bytes, public_key_bytes).
@@ -183,6 +157,13 @@ pub fn generate_mldsa44_key() -> Result<(Vec<u8>, Vec<u8>), ProtokenError> {
     let sk_bytes = kp.signing_key().encode().to_vec();
     let pk_bytes = kp.verifying_key().encode().to_vec();
     Ok((sk_bytes, pk_bytes))
+}
+
+/// Generate a new HMAC key (32 bytes of cryptographically random data).
+pub fn generate_hmac_key() -> Vec<u8> {
+    let mut key = vec![0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
+    key
 }
 
 #[cfg(test)]
@@ -231,14 +212,14 @@ mod tests {
 
     #[test]
     fn test_sign_ed25519_produces_valid_token() {
-        let pkcs8 = generate_ed25519_key().unwrap();
-        let key_id = ed25519_key_hash(&pkcs8).unwrap();
+        let (seed, pk) = generate_ed25519_key().unwrap();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: 1800000000,
             ..Default::default()
         };
 
-        let token_bytes = sign_ed25519(&pkcs8, claims, key_id).unwrap();
+        let token_bytes = sign_ed25519(&seed, claims, key_id).unwrap();
         let token = deserialize_signed_token(&token_bytes).unwrap();
         let payload = deserialize_payload(&token.payload_bytes).unwrap();
 
@@ -248,8 +229,8 @@ mod tests {
 
     #[test]
     fn test_ed25519_signing_deterministic() {
-        let pkcs8 = generate_ed25519_key().unwrap();
-        let key_id = ed25519_key_hash(&pkcs8).unwrap();
+        let (seed, pk) = generate_ed25519_key().unwrap();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: 1800000000,
             not_before: 1799990000,
@@ -258,8 +239,8 @@ mod tests {
             ..Default::default()
         };
 
-        let t1 = sign_ed25519(&pkcs8, claims.clone(), key_id.clone()).unwrap();
-        let t2 = sign_ed25519(&pkcs8, claims, key_id).unwrap();
+        let t1 = sign_ed25519(&seed, claims.clone(), key_id.clone()).unwrap();
+        let t2 = sign_ed25519(&seed, claims, key_id).unwrap();
         assert_eq!(t1, t2);
     }
 
@@ -284,8 +265,8 @@ mod tests {
 
     #[test]
     fn test_sign_ed25519_with_claims() {
-        let pkcs8 = generate_ed25519_key().unwrap();
-        let key_id = ed25519_key_hash(&pkcs8).unwrap();
+        let (seed, pk) = generate_ed25519_key().unwrap();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: 1800000000,
             subject: "user:alice".into(),
@@ -293,7 +274,7 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_ed25519(&pkcs8, claims.clone(), key_id).unwrap();
+        let token_bytes = sign_ed25519(&seed, claims.clone(), key_id).unwrap();
         let token = deserialize_signed_token(&token_bytes).unwrap();
         let payload = deserialize_payload(&token.payload_bytes).unwrap();
 
@@ -353,15 +334,5 @@ mod tests {
         let (sk, pk) = generate_mldsa44_key().unwrap();
         assert_eq!(sk.len(), MLDSA44_SIGNING_KEY_LEN);
         assert_eq!(pk.len(), MLDSA44_PUBLIC_KEY_LEN);
-    }
-
-    #[test]
-    fn test_split_mldsa44_key() {
-        let (sk, pk) = generate_mldsa44_key().unwrap();
-        let mut combined = sk.clone();
-        combined.extend_from_slice(&pk);
-        let (split_sk, split_pk) = split_mldsa44_key(&combined).unwrap();
-        assert_eq!(split_sk, sk.as_slice());
-        assert_eq!(split_pk, pk.as_slice());
     }
 }

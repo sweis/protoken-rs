@@ -103,8 +103,8 @@
         "expires_at": 1800000000,
         "key_hash_hex": "61ba51c9d9c3b0f7",
         "key_id_type": "key_hash",
-        "private_key_pkcs8_hex": "3051020101300506032b6570042204203cc4bec961d0bf428a58a323812992ea8cd803814871ee8b2477dc3362ac4619812100b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e8",
-        "public_key_hex": "b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e8"
+        "public_key_hex": "b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e8",
+        "seed_hex": "3cc4bec961d0bf428a58a323812992ea8cd803814871ee8b2477dc3362ac4619"
       },
       "name": "signed_ed25519_keyhash",
       "type": "signed_token"
@@ -116,8 +116,8 @@
         "algorithm": "ed25519",
         "expires_at": 1800000000,
         "key_id_type": "public_key",
-        "private_key_pkcs8_hex": "3051020101300506032b6570042204203cc4bec961d0bf428a58a323812992ea8cd803814871ee8b2477dc3362ac4619812100b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e8",
-        "public_key_hex": "b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e8"
+        "public_key_hex": "b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e8",
+        "seed_hex": "3cc4bec961d0bf428a58a323812992ea8cd803814871ee8b2477dc3362ac4619"
       },
       "name": "signed_ed25519_pubkey",
       "type": "signed_token"

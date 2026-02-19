@@ -3,14 +3,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use clap::{Parser, Subcommand};
-use ed25519_dalek::pkcs8::DecodePrivateKey;
 
+use protoken::keys::{
+    deserialize_signing_key, deserialize_verifying_key, extract_verifying_key,
+    serialize_signing_key, serialize_verifying_key, SigningKey as ProtoSigningKey,
+};
 use protoken::serialize::{deserialize_payload, deserialize_signed_token};
 use protoken::sign::{
-    compute_key_hash, ed25519_key_hash, generate_ed25519_key, generate_mldsa44_key,
-    mldsa44_key_hash, sign_ed25519, sign_hmac, sign_mldsa44, split_mldsa44_key,
+    compute_key_hash, generate_ed25519_key, generate_hmac_key, generate_mldsa44_key,
+    mldsa44_key_hash, sign_ed25519, sign_hmac, sign_mldsa44,
 };
-use protoken::types::Claims;
+use protoken::types::{Algorithm, Claims, KeyIdentifier};
 use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
 
 #[derive(Parser)]
@@ -30,20 +33,11 @@ enum Command {
         token: Option<String>,
     },
 
-    /// Sign a new token with the given key and duration.
+    /// Sign a new token. Key is a hex-encoded SigningKey proto.
     Sign {
-        /// Algorithm: "hmac", "ed25519", or "ml-dsa-44"
-        #[arg(short, long)]
-        algorithm: String,
-
-        /// Key file path. For HMAC: raw key bytes (or hex with --hex-key).
-        /// For Ed25519: PKCS#8 DER file. For ML-DSA-44: raw signing key file.
+        /// Key file path (hex-encoded SigningKey proto).
         #[arg(short, long)]
         key: String,
-
-        /// Interpret the key file as hex-encoded.
-        #[arg(long, default_value_t = false)]
-        hex_key: bool,
 
         /// Token validity duration (e.g. "4d", "1h", "30m").
         #[arg(short, long)]
@@ -67,20 +61,11 @@ enum Command {
     },
 
     /// Verify a signed token against a key and current time.
+    /// Algorithm is detected from the token.
     Verify {
-        /// Algorithm: "hmac", "ed25519", or "ml-dsa-44"
-        #[arg(short, long)]
-        algorithm: String,
-
-        /// Key file path. For HMAC: raw key bytes.
-        /// For Ed25519: raw 32-byte public key.
-        /// For ML-DSA-44: raw 1,312-byte public key.
+        /// Key file path (hex-encoded VerifyingKey or SigningKey proto for HMAC).
         #[arg(short, long)]
         key: String,
-
-        /// Interpret the key file as hex-encoded.
-        #[arg(long, default_value_t = false)]
-        hex_key: bool,
 
         /// Token as hex or base64 string. If omitted, reads from stdin.
         #[arg(short, long)]
@@ -88,10 +73,9 @@ enum Command {
     },
 
     /// Generate a new key pair.
-    /// For Ed25519: outputs PKCS#8 private key and public key as hex.
-    /// For ML-DSA-44: outputs signing key, public key, and key hash as hex.
+    /// Outputs JSON with hex-encoded SigningKey and VerifyingKey protos.
     GenerateKey {
-        /// Algorithm: "ed25519" (default) or "ml-dsa-44"
+        /// Algorithm: "hmac", "ed25519" (default), or "ml-dsa-44"
         #[arg(short, long, default_value = "ed25519")]
         algorithm: String,
     },
@@ -103,23 +87,14 @@ fn main() {
     let result = match cli.command {
         Command::Inspect { token } => cmd_inspect(token),
         Command::Sign {
-            algorithm,
             key,
-            hex_key,
             duration,
             output,
             subject,
             audience,
             scope,
-        } => cmd_sign(
-            &algorithm, &key, hex_key, &duration, &output, subject, audience, scope,
-        ),
-        Command::Verify {
-            algorithm,
-            key,
-            hex_key,
-            token,
-        } => cmd_verify(&algorithm, &key, hex_key, token),
+        } => cmd_sign(&key, &duration, &output, subject, audience, scope),
+        Command::Verify { key, token } => cmd_verify(&key, token),
         Command::GenerateKey { algorithm } => cmd_generate_key(&algorithm),
     };
 
@@ -162,18 +137,16 @@ fn cmd_inspect(token_arg: Option<String>) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn cmd_sign(
-    algorithm: &str,
     key_path: &str,
-    hex_key: bool,
     duration_str: &str,
     output_format: &str,
     subject: Option<String>,
     audience: Option<String>,
     scopes: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let key_bytes = read_key_file(key_path, hex_key)?;
+    let key_bytes = read_hex_key_file(key_path)?;
+    let sk = deserialize_signing_key(&key_bytes)?;
 
     let duration: std::time::Duration = duration_str
         .parse::<humantime::Duration>()
@@ -198,18 +171,16 @@ fn cmd_sign(
         scopes,
     };
 
-    let token_bytes = match algorithm {
-        "hmac" => sign_hmac(&key_bytes, claims)?,
-        "ed25519" => {
-            let key_id = ed25519_key_hash(&key_bytes)?;
-            sign_ed25519(&key_bytes, claims, key_id)?
+    let token_bytes = match sk.algorithm {
+        Algorithm::HmacSha256 => sign_hmac(&sk.secret_key, claims)?,
+        Algorithm::Ed25519 => {
+            let key_id = KeyIdentifier::KeyHash(compute_key_hash(&sk.public_key));
+            sign_ed25519(&sk.secret_key, claims, key_id)?
         }
-        "ml-dsa-44" => {
-            let (sk, pk) = split_mldsa44_key(&key_bytes)?;
-            let key_id = mldsa44_key_hash(pk)?;
-            sign_mldsa44(sk, claims, key_id)?
+        Algorithm::MlDsa44 => {
+            let key_id = mldsa44_key_hash(&sk.public_key)?;
+            sign_mldsa44(&sk.secret_key, claims, key_id)?
         }
-        _ => return Err(format!("unknown algorithm: {algorithm}").into()),
     };
 
     match output_format {
@@ -226,13 +197,8 @@ fn cmd_sign(
     Ok(())
 }
 
-fn cmd_verify(
-    algorithm: &str,
-    key_path: &str,
-    hex_key: bool,
-    token_arg: Option<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let key_bytes = read_key_file(key_path, hex_key)?;
+fn cmd_verify(key_path: &str, token_arg: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let key_bytes = read_hex_key_file(key_path)?;
     let token_bytes = read_token_bytes(token_arg)?;
 
     let now = SystemTime::now()
@@ -240,15 +206,22 @@ fn cmd_verify(
         .map_err(|_| "system clock is set before Unix epoch (1970-01-01)")?
         .as_secs();
 
-    let verified = match algorithm {
-        "hmac" => verify_hmac(&key_bytes, &token_bytes, now)?,
-        "ed25519" => verify_ed25519(&key_bytes, &token_bytes, now)?,
-        "ml-dsa-44" => verify_mldsa44(&key_bytes, &token_bytes, now)?,
-        _ => {
-            return Err(format!(
-                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', or 'ml-dsa-44')"
-            )
-            .into())
+    // Detect algorithm from the token's payload
+    let token = deserialize_signed_token(&token_bytes)?;
+    let payload = deserialize_payload(&token.payload_bytes)?;
+
+    let verified = match payload.metadata.algorithm {
+        Algorithm::HmacSha256 => {
+            let sk = deserialize_signing_key(&key_bytes)?;
+            verify_hmac(&sk.secret_key, &token_bytes, now)?
+        }
+        Algorithm::Ed25519 => {
+            let vk = deserialize_verifying_key(&key_bytes)?;
+            verify_ed25519(&vk.public_key, &token_bytes, now)?
+        }
+        Algorithm::MlDsa44 => {
+            let vk = deserialize_verifying_key(&key_bytes)?;
+            verify_mldsa44(&vk.public_key, &token_bytes, now)?
         }
     };
 
@@ -258,46 +231,73 @@ fn cmd_verify(
 
 fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
     match algorithm {
-        "ed25519" => {
-            let pkcs8 = generate_ed25519_key()?;
-            let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(&pkcs8)
-                .map_err(|e| format!("key parse failed: {e}"))?;
+        "hmac" => {
+            let secret_key = generate_hmac_key();
+            let key_hash = compute_key_hash(&secret_key);
 
-            let public_key_bytes = signing_key.verifying_key().to_bytes();
-            let key_hash = compute_key_hash(&public_key_bytes);
+            let sk = ProtoSigningKey {
+                algorithm: Algorithm::HmacSha256,
+                secret_key,
+                public_key: Vec::new(),
+            };
+            let sk_bytes = serialize_signing_key(&sk);
+
+            let output = serde_json::json!({
+                "algorithm": "hmac-sha256",
+                "signing_key_hex": hex::encode(&sk_bytes),
+                "key_hash_hex": hex::encode(key_hash),
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        "ed25519" => {
+            let (seed, pk) = generate_ed25519_key()?;
+            let key_hash = compute_key_hash(&pk);
+
+            let sk = ProtoSigningKey {
+                algorithm: Algorithm::Ed25519,
+                secret_key: seed,
+                public_key: pk,
+            };
+            let sk_bytes = serialize_signing_key(&sk);
+
+            let vk = extract_verifying_key(&sk)?;
+            let vk_bytes = serialize_verifying_key(&vk);
 
             let output = serde_json::json!({
                 "algorithm": "ed25519",
-                "private_key_pkcs8_hex": hex::encode(&pkcs8),
-                "public_key_hex": hex::encode(public_key_bytes),
+                "signing_key_hex": hex::encode(&sk_bytes),
+                "verifying_key_hex": hex::encode(&vk_bytes),
                 "key_hash_hex": hex::encode(key_hash),
             });
-
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         "ml-dsa-44" => {
-            let (sk, pk) = generate_mldsa44_key()?;
+            let (sk_raw, pk) = generate_mldsa44_key()?;
             let key_hash = compute_key_hash(&pk);
 
-            // Combined key (SK || PK) for use with --key flag in sign command
-            let mut combined = sk.clone();
-            combined.extend_from_slice(&pk);
+            let sk = ProtoSigningKey {
+                algorithm: Algorithm::MlDsa44,
+                secret_key: sk_raw,
+                public_key: pk,
+            };
+            let sk_bytes = serialize_signing_key(&sk);
+
+            let vk = extract_verifying_key(&sk)?;
+            let vk_bytes = serialize_verifying_key(&vk);
 
             let output = serde_json::json!({
                 "algorithm": "ml-dsa-44",
-                "combined_key_hex": hex::encode(&combined),
-                "public_key_hex": hex::encode(&pk),
+                "signing_key_hex": hex::encode(&sk_bytes),
+                "verifying_key_hex": hex::encode(&vk_bytes),
                 "key_hash_hex": hex::encode(key_hash),
-                "signing_key_bytes": sk.len(),
-                "public_key_bytes": pk.len(),
             });
-
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         _ => {
-            return Err(
-                format!("unknown algorithm: {algorithm} (use 'ed25519' or 'ml-dsa-44')").into(),
+            return Err(format!(
+                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', or 'ml-dsa-44')"
             )
+            .into())
         }
     }
 
@@ -331,13 +331,8 @@ fn read_token_bytes(token_arg: Option<String>) -> Result<Vec<u8>, Box<dyn std::e
     Err("could not decode token as hex or base64".into())
 }
 
-/// Read key bytes from a file, optionally hex-decoding.
-fn read_key_file(path: &str, hex_encoded: bool) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let raw = std::fs::read(path)?;
-    if hex_encoded {
-        let hex_str = String::from_utf8(raw).map_err(|_| "hex key file is not valid UTF-8")?;
-        Ok(hex::decode(hex_str.trim())?)
-    } else {
-        Ok(raw)
-    }
+/// Read a hex-encoded key file and decode it.
+fn read_hex_key_file(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let raw = std::fs::read_to_string(path)?;
+    Ok(hex::decode(raw.trim())?)
 }
