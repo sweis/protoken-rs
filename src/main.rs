@@ -31,25 +31,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Generate a new signing key.
+    /// Generate a new signing key (base64-encoded SigningKey proto).
     GenerateKey {
         /// Algorithm: "hmac", "ed25519" (default), or "ml-dsa-44".
         #[arg(short, long, default_value = "ed25519")]
         algorithm: String,
-
-        /// Output format: "hex" or "base64".
-        #[arg(short, long, default_value = "base64")]
-        output: String,
     },
 
     /// Get the verifying key from a signing key.
     GetVerifyingKey {
         /// Signing key file, or "-" for stdin.
         keyfile: String,
-
-        /// Output format: "hex" or "base64".
-        #[arg(short, long, default_value = "base64")]
-        output: String,
     },
 
     /// Sign a new token.
@@ -71,10 +63,6 @@ enum Command {
         /// Scope entries (repeatable, e.g. --scope read --scope write).
         #[arg(long)]
         scope: Vec<String>,
-
-        /// Output format: "hex" or "base64".
-        #[arg(short, long, default_value = "base64")]
-        output: String,
     },
 
     /// Verify a signed token against a key and current time.
@@ -83,13 +71,13 @@ enum Command {
         /// Use "-" for stdin, but then token must be given explicitly.
         keyfile: String,
 
-        /// Token as hex or base64 string. If omitted, reads from stdin.
+        /// Token (base64). If omitted, reads from stdin.
         token: Option<String>,
     },
 
     /// Inspect a token without verifying (no key needed).
     Inspect {
-        /// Token as hex or base64 string. If omitted, reads from stdin.
+        /// Token (base64). If omitted, reads from stdin.
         token: Option<String>,
     },
 }
@@ -98,16 +86,15 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Command::GenerateKey { algorithm, output } => cmd_generate_key(&algorithm, &output),
-        Command::GetVerifyingKey { keyfile, output } => cmd_get_verifying_key(&keyfile, &output),
+        Command::GenerateKey { algorithm } => cmd_generate_key(&algorithm),
+        Command::GetVerifyingKey { keyfile } => cmd_get_verifying_key(&keyfile),
         Command::Sign {
             keyfile,
             duration,
             subject,
             audience,
             scope,
-            output,
-        } => cmd_sign(&keyfile, &duration, &output, subject, audience, scope),
+        } => cmd_sign(&keyfile, &duration, subject, audience, scope),
         Command::Verify { keyfile, token } => cmd_verify(&keyfile, token),
         Command::Inspect { token } => cmd_inspect(token),
     };
@@ -118,10 +105,7 @@ fn main() {
     }
 }
 
-fn cmd_generate_key(
-    algorithm: &str,
-    output_format: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
     let sk = match algorithm {
         "hmac" => {
             let secret_key = generate_hmac_key();
@@ -155,25 +139,21 @@ fn cmd_generate_key(
         }
     };
 
-    let sk_bytes = serialize_signing_key(&sk);
-    print_encoded(&sk_bytes, output_format)
+    println!("{}", B64.encode(serialize_signing_key(&sk)));
+    Ok(())
 }
 
-fn cmd_get_verifying_key(
-    keyfile: &str,
-    output_format: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_get_verifying_key(keyfile: &str) -> Result<(), Box<dyn std::error::Error>> {
     let key_bytes = read_keyfile(keyfile)?;
     let sk = deserialize_signing_key(&key_bytes)?;
     let vk = extract_verifying_key(&sk)?;
-    let vk_bytes = serialize_verifying_key(&vk);
-    print_encoded(&vk_bytes, output_format)
+    println!("{}", B64.encode(serialize_verifying_key(&vk)));
+    Ok(())
 }
 
 fn cmd_sign(
     keyfile: &str,
     duration_str: &str,
-    output_format: &str,
     subject: Option<String>,
     audience: Option<String>,
     scopes: Vec<String>,
@@ -216,11 +196,11 @@ fn cmd_sign(
         }
     };
 
-    print_encoded(&token_bytes, output_format)
+    println!("{}", B64.encode(&token_bytes));
+    Ok(())
 }
 
 fn cmd_verify(keyfile: &str, token_arg: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
-    // If keyfile is stdin, token must be provided explicitly
     if keyfile == "-" && token_arg.is_none() {
         return Err("when keyfile is \"-\" (stdin), token must be provided as an argument".into());
     }
@@ -233,7 +213,6 @@ fn cmd_verify(keyfile: &str, token_arg: Option<String>) -> Result<(), Box<dyn st
         .map_err(|_| "system clock is set before Unix epoch (1970-01-01)")?
         .as_secs();
 
-    // Detect algorithm from the token's payload
     let token = deserialize_signed_token(&token_bytes)?;
     let payload = deserialize_payload(&token.payload_bytes)?;
 
@@ -259,14 +238,13 @@ fn cmd_verify(keyfile: &str, token_arg: Option<String>) -> Result<(), Box<dyn st
 fn cmd_inspect(token_arg: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let token_bytes = read_token_input(token_arg)?;
 
-    // Try as SignedToken first, fall back to Payload
     match deserialize_signed_token(&token_bytes) {
         Ok(token) => {
             let payload = deserialize_payload(&token.payload_bytes)?;
             let output = serde_json::json!({
                 "type": "SignedToken",
                 "payload": payload,
-                "signature_hex": hex::encode(&token.signature),
+                "signature_base64": B64.encode(&token.signature),
                 "total_bytes": token_bytes.len(),
             });
             println!("{}", serde_json::to_string_pretty(&output)?);
@@ -291,17 +269,7 @@ fn cmd_inspect(token_arg: Option<String>) -> Result<(), Box<dyn std::error::Erro
 
 // --- I/O helpers ---
 
-/// Print bytes in the requested encoding (hex or base64).
-fn print_encoded(data: &[u8], format: &str) -> Result<(), Box<dyn std::error::Error>> {
-    match format {
-        "hex" => println!("{}", hex::encode(data)),
-        "base64" => println!("{}", B64.encode(data)),
-        _ => return Err(format!("unknown output format: {format}").into()),
-    }
-    Ok(())
-}
-
-/// Read a key from a file path or "-" for stdin. Decodes hex or base64.
+/// Read a key from a file path or "-" for stdin. Decodes base64.
 fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let raw = if path == "-" {
         let mut buf = String::new();
@@ -316,10 +284,10 @@ fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         }
         std::fs::read_to_string(path)?
     };
-    decode_hex_or_base64(raw.trim())
+    decode_base64(raw.trim())
 }
 
-/// Read token bytes from an explicit argument or stdin, decoding hex or base64.
+/// Read token bytes from an explicit argument or stdin, decoding base64.
 fn read_token_input(token_arg: Option<String>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let input = match token_arg {
         Some(s) => s,
@@ -329,19 +297,16 @@ fn read_token_input(token_arg: Option<String>) -> Result<Vec<u8>, Box<dyn std::e
             buf
         }
     };
-    decode_hex_or_base64(input.trim())
+    decode_base64(input.trim())
 }
 
-/// Try to decode a string as hex, then URL-safe base64, then standard base64.
-fn decode_hex_or_base64(input: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    if let Ok(bytes) = hex::decode(input) {
-        return Ok(bytes);
-    }
+/// Decode a base64 string (URL-safe no-pad or standard).
+fn decode_base64(input: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     if let Ok(bytes) = B64.decode(input) {
         return Ok(bytes);
     }
     if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(input) {
         return Ok(bytes);
     }
-    Err("could not decode as hex or base64".into())
+    Err("could not decode base64".into())
 }
