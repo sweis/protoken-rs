@@ -2,8 +2,6 @@
 //! Generates test vectors for protoken wire format regression testing.
 //! Run with: cargo run --bin gen_test_vectors
 
-use ed25519_dalek::pkcs8::DecodePrivateKey;
-
 use protoken::serialize::serialize_payload;
 use protoken::sign::{compute_key_hash, sign_ed25519, sign_hmac};
 use protoken::types::*;
@@ -203,10 +201,9 @@ fn main() {
 
     // === Ed25519 signed token vectors ===
 
-    let pkcs8_hex = generate_fixed_ed25519_key();
-    let pkcs8_bytes = hex::decode(&pkcs8_hex).unwrap();
-    let signing_key = ed25519_dalek::SigningKey::from_pkcs8_der(&pkcs8_bytes).unwrap();
-    let public_key = signing_key.verifying_key().to_bytes();
+    let (seed_hex, public_key_hex) = fixed_ed25519_key();
+    let seed = hex::decode(&seed_hex).unwrap();
+    let public_key = hex::decode(&public_key_hex).unwrap();
     let ed25519_key_hash_val = compute_key_hash(&public_key);
 
     // Vector 8: Ed25519 signed token with key_hash
@@ -216,14 +213,14 @@ fn main() {
         expires_at: ed25519_expires,
         ..Default::default()
     };
-    let ed25519_token = sign_ed25519(&pkcs8_bytes, ed25519_claims, ed25519_key_id).unwrap();
+    let ed25519_token = sign_ed25519(&seed, ed25519_claims, ed25519_key_id).unwrap();
     vectors.push(serde_json::json!({
         "name": "signed_ed25519_keyhash",
         "type": "signed_token",
         "input": {
             "algorithm": "ed25519",
-            "private_key_pkcs8_hex": pkcs8_hex,
-            "public_key_hex": hex::encode(public_key),
+            "seed_hex": seed_hex,
+            "public_key_hex": public_key_hex,
             "key_hash_hex": hex::encode(ed25519_key_hash_val),
             "key_id_type": "key_hash",
             "expires_at": ed25519_expires
@@ -238,15 +235,14 @@ fn main() {
         expires_at: ed25519_expires,
         ..Default::default()
     };
-    let ed25519_token_pk =
-        sign_ed25519(&pkcs8_bytes, ed25519_claims_pk, ed25519_key_id_pk).unwrap();
+    let ed25519_token_pk = sign_ed25519(&seed, ed25519_claims_pk, ed25519_key_id_pk).unwrap();
     vectors.push(serde_json::json!({
         "name": "signed_ed25519_pubkey",
         "type": "signed_token",
         "input": {
             "algorithm": "ed25519",
-            "private_key_pkcs8_hex": pkcs8_hex,
-            "public_key_hex": hex::encode(public_key),
+            "seed_hex": seed_hex,
+            "public_key_hex": public_key_hex,
             "key_id_type": "public_key",
             "expires_at": ed25519_expires
         },
@@ -265,7 +261,7 @@ fn main() {
     vectors.push(serde_json::json!({
         "name": "key_hash_ed25519_pubkey",
         "type": "key_hash",
-        "input_hex": hex::encode(public_key),
+        "input_hex": public_key_hex,
         "expected_hex": hex::encode(ed25519_key_hash_val)
     }));
 
@@ -278,11 +274,11 @@ fn main() {
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
 }
 
-/// Returns a hardcoded Ed25519 PKCS#8 key for reproducible test vectors.
-fn generate_fixed_ed25519_key() -> String {
-    // Generated once; frozen for test vector stability.
-    "3051020101300506032b6570042204203cc4bec961d0bf428a58a323812992ea\
-     8cd803814871ee8b2477dc3362ac4619812100b5409fbc174d2372837326a221\
-     74a912eb5a2410d344d44139cf953bd7db99e8"
-        .to_string()
+/// Returns a hardcoded Ed25519 key (seed, public_key) as hex for reproducible test vectors.
+/// The seed was extracted from the original PKCS#8 test key; Ed25519 is deterministic
+/// so signatures are identical.
+fn fixed_ed25519_key() -> (String, String) {
+    let seed_hex = "3cc4bec961d0bf428a58a323812992ea8cd803814871ee8b2477dc3362ac4619";
+    let public_key_hex = "b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e8";
+    (seed_hex.to_string(), public_key_hex.to_string())
 }

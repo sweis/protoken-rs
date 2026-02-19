@@ -6,7 +6,7 @@ description = "Protobuf-inspired signed tokens — a minimal, fast alternative t
 
 [dependencies]
 # Crypto (RustCrypto ecosystem)
-ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 hmac = "0.12"
 sha2 = "0.10"
 ml-dsa = { version = "0.0", features = ["rand_core"] }
