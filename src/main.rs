@@ -2,6 +2,7 @@ use std::io::{self, Read as _};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 
@@ -19,11 +20,19 @@ use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+const STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
+    .literal(AnsiColor::Green.on_default())
+    .placeholder(AnsiColor::Cyan.on_default())
+    .usage(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
+    .valid(AnsiColor::Green.on_default());
+
 #[derive(Parser)]
 #[command(
     name = "protoken",
     about = "Protobuf-inspired signed tokens",
-    flatten_help = true
+    flatten_help = true,
+    styles = STYLES
 )]
 struct Cli {
     #[command(subcommand)]
