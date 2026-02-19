@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 protoken = { path = ".." }
+serde_json = "1"
 
 [[bin]]
 name = "parse_payload"
@@ -28,6 +29,20 @@ bench = false
 [[bin]]
 name = "roundtrip"
 path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_keys"
+path = "fuzz_targets/parse_keys.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "exercise_token"
+path = "fuzz_targets/exercise_token.rs"
 test = false
 doc = false
 bench = false
