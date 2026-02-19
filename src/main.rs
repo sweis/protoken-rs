@@ -10,7 +10,7 @@ use protoken::sign::{
     compute_key_hash, ed25519_key_hash, generate_ed25519_key, generate_mldsa44_key,
     mldsa44_key_hash, sign_ed25519, sign_hmac, sign_mldsa44, split_mldsa44_key,
 };
-use protoken::types::Claims;
+use protoken::types::{Algorithm, Claims, MLDSA44_PUBLIC_KEY_LEN, MLDSA44_SIGNING_KEY_LEN};
 use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
 
 #[derive(Parser)]
@@ -30,14 +30,10 @@ enum Command {
         token: Option<String>,
     },
 
-    /// Sign a new token with the given key and duration.
+    /// Sign a new token. Algorithm is detected from the key format:
+    /// PKCS#8 DER → Ed25519, 3872-byte combined key → ML-DSA-44, otherwise → HMAC.
     Sign {
-        /// Algorithm: "hmac", "ed25519", or "ml-dsa-44"
-        #[arg(short, long)]
-        algorithm: String,
-
-        /// Key file path. For HMAC: raw key bytes (or hex with --hex-key).
-        /// For Ed25519: PKCS#8 DER file. For ML-DSA-44: raw signing key file.
+        /// Key file path. HMAC: raw bytes; Ed25519: PKCS#8 DER; ML-DSA-44: combined key (3872 B).
         #[arg(short, long)]
         key: String,
 
@@ -67,14 +63,9 @@ enum Command {
     },
 
     /// Verify a signed token against a key and current time.
+    /// Algorithm is detected from the token.
     Verify {
-        /// Algorithm: "hmac", "ed25519", or "ml-dsa-44"
-        #[arg(short, long)]
-        algorithm: String,
-
-        /// Key file path. For HMAC: raw key bytes.
-        /// For Ed25519: raw 32-byte public key.
-        /// For ML-DSA-44: raw 1,312-byte public key.
+        /// Key file path. HMAC: raw bytes; Ed25519: 32-byte public key; ML-DSA-44: 1312-byte public key.
         #[arg(short, long)]
         key: String,
 
@@ -103,7 +94,6 @@ fn main() {
     let result = match cli.command {
         Command::Inspect { token } => cmd_inspect(token),
         Command::Sign {
-            algorithm,
             key,
             hex_key,
             duration,
@@ -111,15 +101,12 @@ fn main() {
             subject,
             audience,
             scope,
-        } => cmd_sign(
-            &algorithm, &key, hex_key, &duration, &output, subject, audience, scope,
-        ),
+        } => cmd_sign(&key, hex_key, &duration, &output, subject, audience, scope),
         Command::Verify {
-            algorithm,
             key,
             hex_key,
             token,
-        } => cmd_verify(&algorithm, &key, hex_key, token),
+        } => cmd_verify(&key, hex_key, token),
         Command::GenerateKey { algorithm } => cmd_generate_key(&algorithm),
     };
 
@@ -162,9 +149,24 @@ fn cmd_inspect(token_arg: Option<String>) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// ML-DSA-44 combined key length: signing key (2560) + public key (1312).
+const MLDSA44_COMBINED_KEY_LEN: usize = MLDSA44_SIGNING_KEY_LEN + MLDSA44_PUBLIC_KEY_LEN;
+
+/// Detect the signing algorithm from key bytes.
+/// - Valid PKCS#8 DER for Ed25519 → Ed25519
+/// - Exactly 3872 bytes → ML-DSA-44
+/// - Otherwise → HMAC-SHA256
+fn detect_signing_algorithm(key_bytes: &[u8]) -> Algorithm {
+    if key_bytes.len() == MLDSA44_COMBINED_KEY_LEN {
+        return Algorithm::MlDsa44;
+    }
+    if ed25519_dalek::SigningKey::from_pkcs8_der(key_bytes).is_ok() {
+        return Algorithm::Ed25519;
+    }
+    Algorithm::HmacSha256
+}
+
 fn cmd_sign(
-    algorithm: &str,
     key_path: &str,
     hex_key: bool,
     duration_str: &str,
@@ -174,6 +176,7 @@ fn cmd_sign(
     scopes: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let key_bytes = read_key_file(key_path, hex_key)?;
+    let algorithm = detect_signing_algorithm(&key_bytes);
 
     let duration: std::time::Duration = duration_str
         .parse::<humantime::Duration>()
@@ -199,17 +202,16 @@ fn cmd_sign(
     };
 
     let token_bytes = match algorithm {
-        "hmac" => sign_hmac(&key_bytes, claims)?,
-        "ed25519" => {
+        Algorithm::HmacSha256 => sign_hmac(&key_bytes, claims)?,
+        Algorithm::Ed25519 => {
             let key_id = ed25519_key_hash(&key_bytes)?;
             sign_ed25519(&key_bytes, claims, key_id)?
         }
-        "ml-dsa-44" => {
+        Algorithm::MlDsa44 => {
             let (sk, pk) = split_mldsa44_key(&key_bytes)?;
             let key_id = mldsa44_key_hash(pk)?;
             sign_mldsa44(sk, claims, key_id)?
         }
-        _ => return Err(format!("unknown algorithm: {algorithm}").into()),
     };
 
     match output_format {
@@ -227,7 +229,6 @@ fn cmd_sign(
 }
 
 fn cmd_verify(
-    algorithm: &str,
     key_path: &str,
     hex_key: bool,
     token_arg: Option<String>,
@@ -240,16 +241,14 @@ fn cmd_verify(
         .map_err(|_| "system clock is set before Unix epoch (1970-01-01)")?
         .as_secs();
 
-    let verified = match algorithm {
-        "hmac" => verify_hmac(&key_bytes, &token_bytes, now)?,
-        "ed25519" => verify_ed25519(&key_bytes, &token_bytes, now)?,
-        "ml-dsa-44" => verify_mldsa44(&key_bytes, &token_bytes, now)?,
-        _ => {
-            return Err(format!(
-                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', or 'ml-dsa-44')"
-            )
-            .into())
-        }
+    // Detect algorithm from the token's payload
+    let token = deserialize_signed_token(&token_bytes)?;
+    let payload = deserialize_payload(&token.payload_bytes)?;
+
+    let verified = match payload.metadata.algorithm {
+        Algorithm::HmacSha256 => verify_hmac(&key_bytes, &token_bytes, now)?,
+        Algorithm::Ed25519 => verify_ed25519(&key_bytes, &token_bytes, now)?,
+        Algorithm::MlDsa44 => verify_mldsa44(&key_bytes, &token_bytes, now)?,
     };
 
     println!("{}", serde_json::to_string_pretty(&verified)?);
