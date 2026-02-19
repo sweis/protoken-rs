@@ -20,7 +20,7 @@ cargo install --path .
 
 ## Usage
 
-All keys are canonical proto3 messages, stored as base64 (or hex). Use `-` as the keyfile to read from stdin.
+All keys and tokens are base64-encoded canonical proto3 messages. Use `-` as the keyfile to read from stdin.
 
 ### Generate a key and sign a token
 
@@ -72,15 +72,6 @@ protoken sign my.key 4d --subject "user:alice" --audience "api" --scope read --s
 ```sh
 protoken inspect <token>
 echo "<token>" | protoken inspect
-```
-
-### Output formats
-
-All commands that produce binary output default to base64. Use `-o hex` for hex:
-
-```sh
-protoken generate-key -o hex > my.key
-protoken sign my.key 1h -o hex
 ```
 
 ### Verify stdin rules
