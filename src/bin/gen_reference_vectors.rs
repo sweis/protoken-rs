@@ -47,7 +47,7 @@ fn main() {
         "name": "hmac_reference",
         "algorithm": "hmac-sha256",
         "signing_key_base64": B64.encode(serialize_signing_key(&hmac_sk)),
-        "key_hash_hex": hex::encode(compute_key_hash(&hmac_key)),
+        "key_hash_base64": B64.encode(compute_key_hash(&hmac_key)),
         "token_base64": B64.encode(&hmac_token),
         "claims": {
             "expires_at": EXPIRES_AT,
@@ -83,7 +83,7 @@ fn main() {
         "algorithm": "ed25519",
         "signing_key_base64": B64.encode(serialize_signing_key(&ed25519_sk)),
         "verifying_key_base64": B64.encode(serialize_verifying_key(&ed25519_vk)),
-        "key_hash_hex": hex::encode(ed25519_key_hash),
+        "key_hash_base64": B64.encode(ed25519_key_hash),
         "token_base64": B64.encode(&ed25519_token),
         "claims": {
             "expires_at": EXPIRES_AT,
@@ -112,7 +112,7 @@ fn main() {
         "algorithm": "ml-dsa-44",
         "signing_key_base64": B64.encode(serialize_signing_key(&mldsa_sk)),
         "verifying_key_base64": B64.encode(serialize_verifying_key(&mldsa_vk)),
-        "key_hash_hex": hex::encode(compute_key_hash(&mldsa_pk_bytes)),
+        "key_hash_base64": B64.encode(compute_key_hash(&mldsa_pk_bytes)),
         "token_base64": B64.encode(&mldsa_token),
         "claims": {
             "expires_at": EXPIRES_AT,

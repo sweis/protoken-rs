@@ -7,10 +7,15 @@
 //! Regression tests that verify serialization against stored test vectors.
 //! If any test here fails, it means the wire format has changed.
 
+use base64::Engine;
+
+use protoken::keys::deserialize_signing_key;
 use protoken::serialize::{deserialize_payload, deserialize_signed_token, serialize_payload};
 use protoken::sign::{compute_key_hash, sign_ed25519, sign_hmac};
 use protoken::types::*;
 use protoken::verify::{verify_ed25519, verify_hmac};
+
+const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 /// Load test vectors from testdata/vectors.json.
 fn load_vectors() -> serde_json::Value {
@@ -53,8 +58,8 @@ fn test_vector_payload_hmac_keyhash() {
 
     let bytes = serialize_payload(&payload);
     assert_eq!(
-        hex::encode(&bytes),
-        v["expected_hex"].as_str().unwrap(),
+        B64.encode(&bytes),
+        v["expected_base64"].as_str().unwrap(),
         "payload_hmac_keyhash wire format mismatch"
     );
     assert_eq!(bytes.len(), v["expected_len"].as_u64().unwrap() as usize);
@@ -83,8 +88,8 @@ fn test_vector_payload_ed25519_keyhash() {
 
     let bytes = serialize_payload(&payload);
     assert_eq!(
-        hex::encode(&bytes),
-        v["expected_hex"].as_str().unwrap(),
+        B64.encode(&bytes),
+        v["expected_base64"].as_str().unwrap(),
         "payload_ed25519_keyhash wire format mismatch"
     );
 }
@@ -108,8 +113,8 @@ fn test_vector_payload_ed25519_pubkey() {
 
     let bytes = serialize_payload(&payload);
     assert_eq!(
-        hex::encode(&bytes),
-        v["expected_hex"].as_str().unwrap(),
+        B64.encode(&bytes),
+        v["expected_base64"].as_str().unwrap(),
         "payload_ed25519_pubkey wire format mismatch"
     );
     assert_eq!(bytes.len(), v["expected_len"].as_u64().unwrap() as usize);
@@ -138,8 +143,8 @@ fn test_vector_payload_full_claims() {
 
     let bytes = serialize_payload(&payload);
     assert_eq!(
-        hex::encode(&bytes),
-        v["expected_hex"].as_str().unwrap(),
+        B64.encode(&bytes),
+        v["expected_base64"].as_str().unwrap(),
         "payload_hmac_full_claims wire format mismatch"
     );
     assert_eq!(bytes.len(), v["expected_len"].as_u64().unwrap() as usize);
@@ -167,8 +172,8 @@ fn test_vector_payload_max() {
 
     let bytes = serialize_payload(&payload);
     assert_eq!(
-        hex::encode(&bytes),
-        v["expected_hex"].as_str().unwrap(),
+        B64.encode(&bytes),
+        v["expected_base64"].as_str().unwrap(),
         "payload_hmac_max wire format mismatch"
     );
 }
@@ -193,8 +198,8 @@ fn test_vector_payload_scopes() {
 
     let bytes = serialize_payload(&payload);
     assert_eq!(
-        hex::encode(&bytes),
-        v["expected_hex"].as_str().unwrap(),
+        B64.encode(&bytes),
+        v["expected_base64"].as_str().unwrap(),
         "payload_hmac_scopes wire format mismatch"
     );
     assert_eq!(bytes.len(), v["expected_len"].as_u64().unwrap() as usize);
@@ -210,17 +215,22 @@ fn test_vector_signed_hmac() {
     let vectors = load_vectors();
     let v = find_vector(&vectors, "signed_hmac");
 
-    let key = b"protoken-test-vector-key-do-not-use-in-production!!";
+    // Extract key material from stored proto SigningKey
+    let sk_bytes = B64
+        .decode(v["input"]["signing_key_base64"].as_str().unwrap())
+        .unwrap();
+    let sk = deserialize_signing_key(&sk_bytes).unwrap();
+
     let expires_at = 1700000000u64;
     let claims = Claims {
         expires_at,
         ..Default::default()
     };
-    let token_bytes = sign_hmac(key, claims).unwrap();
+    let token_bytes = sign_hmac(&sk.secret_key, claims).unwrap();
 
     assert_eq!(
-        hex::encode(&token_bytes),
-        v["expected_hex"].as_str().unwrap(),
+        B64.encode(&token_bytes),
+        v["expected_base64"].as_str().unwrap(),
         "signed_hmac wire format mismatch"
     );
     assert_eq!(
@@ -229,7 +239,7 @@ fn test_vector_signed_hmac() {
     );
 
     // Verify the token is valid
-    let verified = verify_hmac(key, &token_bytes, expires_at).unwrap();
+    let verified = verify_hmac(&sk.secret_key, &token_bytes, expires_at).unwrap();
     assert_eq!(verified.claims.expires_at, expires_at);
 }
 
@@ -238,27 +248,29 @@ fn test_vector_signed_ed25519_keyhash() {
     let vectors = load_vectors();
     let v = find_vector(&vectors, "signed_ed25519_keyhash");
 
-    let seed = hex::decode(v["input"]["seed_hex"].as_str().unwrap()).unwrap();
-    let public_key_hex = v["input"]["public_key_hex"].as_str().unwrap();
-    let public_key = hex::decode(public_key_hex).unwrap();
+    // Extract key material from stored proto SigningKey
+    let sk_bytes = B64
+        .decode(v["input"]["signing_key_base64"].as_str().unwrap())
+        .unwrap();
+    let sk = deserialize_signing_key(&sk_bytes).unwrap();
 
     let expires_at = 1800000000u64;
-    let key_hash = compute_key_hash(&public_key);
+    let key_hash = compute_key_hash(&sk.public_key);
     let key_id = KeyIdentifier::KeyHash(key_hash);
     let claims = Claims {
         expires_at,
         ..Default::default()
     };
-    let token_bytes = sign_ed25519(&seed, claims, key_id).unwrap();
+    let token_bytes = sign_ed25519(&sk.secret_key, claims, key_id).unwrap();
 
     assert_eq!(
-        hex::encode(&token_bytes),
-        v["expected_hex"].as_str().unwrap(),
+        B64.encode(&token_bytes),
+        v["expected_base64"].as_str().unwrap(),
         "signed_ed25519_keyhash wire format mismatch"
     );
 
     // Verify the token
-    let verified = verify_ed25519(&public_key, &token_bytes, expires_at).unwrap();
+    let verified = verify_ed25519(&sk.public_key, &token_bytes, expires_at).unwrap();
     assert_eq!(verified.claims.expires_at, expires_at);
 }
 
@@ -267,26 +279,28 @@ fn test_vector_signed_ed25519_pubkey() {
     let vectors = load_vectors();
     let v = find_vector(&vectors, "signed_ed25519_pubkey");
 
-    let seed = hex::decode(v["input"]["seed_hex"].as_str().unwrap()).unwrap();
-    let public_key_hex = v["input"]["public_key_hex"].as_str().unwrap();
-    let public_key = hex::decode(public_key_hex).unwrap();
+    // Extract key material from stored proto SigningKey
+    let sk_bytes = B64
+        .decode(v["input"]["signing_key_base64"].as_str().unwrap())
+        .unwrap();
+    let sk = deserialize_signing_key(&sk_bytes).unwrap();
 
     let expires_at = 1800000000u64;
-    let key_id = KeyIdentifier::PublicKey(public_key.to_vec());
+    let key_id = KeyIdentifier::PublicKey(sk.public_key.clone());
     let claims = Claims {
         expires_at,
         ..Default::default()
     };
-    let token_bytes = sign_ed25519(&seed, claims, key_id).unwrap();
+    let token_bytes = sign_ed25519(&sk.secret_key, claims, key_id).unwrap();
 
     assert_eq!(
-        hex::encode(&token_bytes),
-        v["expected_hex"].as_str().unwrap(),
+        B64.encode(&token_bytes),
+        v["expected_base64"].as_str().unwrap(),
         "signed_ed25519_pubkey wire format mismatch"
     );
 
     // Verify the token
-    let verified = verify_ed25519(&public_key, &token_bytes, expires_at).unwrap();
+    let verified = verify_ed25519(&sk.public_key, &token_bytes, expires_at).unwrap();
     assert_eq!(verified.claims.expires_at, expires_at);
 }
 
@@ -297,12 +311,12 @@ fn test_vector_key_hash_hmac() {
     let vectors = load_vectors();
     let v = find_vector(&vectors, "key_hash_hmac");
 
-    let input = hex::decode(v["input_hex"].as_str().unwrap()).unwrap();
+    let input = B64.decode(v["input_base64"].as_str().unwrap()).unwrap();
     let hash = compute_key_hash(&input);
 
     assert_eq!(
-        hex::encode(hash),
-        v["expected_hex"].as_str().unwrap(),
+        B64.encode(hash),
+        v["expected_base64"].as_str().unwrap(),
         "key_hash_hmac mismatch"
     );
 }
@@ -312,23 +326,23 @@ fn test_vector_key_hash_ed25519() {
     let vectors = load_vectors();
     let v = find_vector(&vectors, "key_hash_ed25519_pubkey");
 
-    let input = hex::decode(v["input_hex"].as_str().unwrap()).unwrap();
+    let input = B64.decode(v["input_base64"].as_str().unwrap()).unwrap();
     let hash = compute_key_hash(&input);
 
     assert_eq!(
-        hex::encode(hash),
-        v["expected_hex"].as_str().unwrap(),
+        B64.encode(hash),
+        v["expected_base64"].as_str().unwrap(),
         "key_hash_ed25519_pubkey mismatch"
     );
 }
 
-// === Cross-language interop: verify from raw hex ===
+// === Cross-language interop: verify from raw base64 ===
 
 #[test]
-fn test_vector_deserialize_from_stored_hex() {
+fn test_vector_deserialize_from_stored_base64() {
     let vectors = load_vectors();
 
-    // Verify every payload vector can be deserialized from stored hex
+    // Verify every payload vector can be deserialized from stored base64
     for name in &[
         "payload_hmac_keyhash",
         "payload_ed25519_keyhash",
@@ -338,7 +352,7 @@ fn test_vector_deserialize_from_stored_hex() {
         "payload_hmac_scopes",
     ] {
         let v = find_vector(&vectors, name);
-        let bytes = hex::decode(v["expected_hex"].as_str().unwrap()).unwrap();
+        let bytes = B64.decode(v["expected_base64"].as_str().unwrap()).unwrap();
         let payload = deserialize_payload(&bytes)
             .unwrap_or_else(|e| panic!("failed to deserialize {name}: {e}"));
 
@@ -352,7 +366,7 @@ fn test_vector_deserialize_from_stored_hex() {
 }
 
 #[test]
-fn test_vector_deserialize_signed_from_stored_hex() {
+fn test_vector_deserialize_signed_from_stored_base64() {
     let vectors = load_vectors();
 
     for name in &[
@@ -361,7 +375,7 @@ fn test_vector_deserialize_signed_from_stored_hex() {
         "signed_ed25519_pubkey",
     ] {
         let v = find_vector(&vectors, name);
-        let bytes = hex::decode(v["expected_hex"].as_str().unwrap()).unwrap();
+        let bytes = B64.decode(v["expected_base64"].as_str().unwrap()).unwrap();
         let _token = deserialize_signed_token(&bytes)
             .unwrap_or_else(|e| panic!("failed to deserialize {name}: {e}"));
     }
