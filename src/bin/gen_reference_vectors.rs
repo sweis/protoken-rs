@@ -34,7 +34,8 @@ fn main() {
     let mut vectors: Vec<serde_json::Value> = Vec::new();
 
     // === HMAC-SHA256 ===
-    let hmac_key: Vec<u8> = (0x00..=0x1f).collect();
+    let hmac_key =
+        hex::decode("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f").unwrap();
     let claims = reference_claims();
     let hmac_token = sign_hmac(&hmac_key, claims.clone()).unwrap();
     let hmac_sk = SigningKey {
@@ -59,16 +60,10 @@ fn main() {
     }));
 
     // === Ed25519 ===
-    let ed25519_seed = vec![
-        0x3c, 0xc4, 0xbe, 0xc9, 0x61, 0xd0, 0xbf, 0x42, 0x8a, 0x58, 0xa3, 0x23, 0x81, 0x29, 0x92,
-        0xea, 0x8c, 0xd8, 0x03, 0x81, 0x48, 0x71, 0xee, 0x8b, 0x24, 0x77, 0xdc, 0x33, 0x62, 0xac,
-        0x46, 0x19,
-    ];
-    let ed25519_pk = vec![
-        0xb5, 0x40, 0x9f, 0xbc, 0x17, 0x4d, 0x23, 0x72, 0x83, 0x73, 0x26, 0xa2, 0x21, 0x74, 0xa9,
-        0x12, 0xeb, 0x5a, 0x24, 0x10, 0xd3, 0x44, 0xd4, 0x41, 0x39, 0xcf, 0x95, 0x3b, 0xd7, 0xdb,
-        0x99, 0xe8,
-    ];
+    let ed25519_seed =
+        hex::decode("3cc4bec961d0bf428a58a323812992ea8cd803814871ee8b2477dc3362ac4619").unwrap();
+    let ed25519_pk =
+        hex::decode("b5409fbc174d2372837326a22174a912eb5a2410d344d44139cf953bd7db99e8").unwrap();
     let ed25519_key_hash = compute_key_hash(&ed25519_pk);
     let claims = reference_claims();
     let ed25519_token = sign_ed25519(
