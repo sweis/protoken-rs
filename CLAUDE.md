@@ -70,20 +70,20 @@ Chose Ed25519 over P-256 after researching performance, token size, FIPS complia
 security properties, Rust ecosystem, and adoption. Key factors: deterministic nonces
 (eliminates nonce-reuse key compromise), FIPS 186-5 approval (Feb 2023), equivalent
 performance and size, alignment with modern token designs (PASETO, Biscuit).
-See [research-p256-vs-ed25519.md](research-p256-vs-ed25519.md) for full analysis.
+See [notes/research-p256-vs-ed25519.md](notes/research-p256-vs-ed25519.md) for full analysis.
 
 ### Canonical Proto3 Serialization (decided 2026-02-11)
 Using canonical proto3 wire encoding with a custom ~200-line encoder/decoder (`src/proto3.rs`).
 This produces valid proto3 that any library can decode, while guaranteeing deterministic output.
 Rules: ascending field order, minimal varints, default values omitted, no unknown fields.
-See [design-serialization.md](design-serialization.md) and [research-protobuf-determinism.md](research-protobuf-determinism.md).
+See [notes/research-protobuf-determinism.md](notes/research-protobuf-determinism.md).
 
 ### Post-Quantum Signature: ML-DSA-44 (decided 2026-02-18)
 Added ML-DSA-44 (FIPS 204) as a third algorithm option. Chose over SLH-DSA (huge signatures),
 XMSS, and LMS (both stateful — incompatible with distributed token issuance).
 ML-DSA-44: stateless, ~200μs sign, 2,420 B signatures, 1,312 B public keys.
 Token sizes: ~2,500 B (KeyHash) or ~3,800 B (PublicKey).
-See [research-pq-signatures.md](research-pq-signatures.md) for full analysis.
+See [notes/research-pq-signatures.md](notes/research-pq-signatures.md) for full analysis.
 
 ### Dependencies: RustCrypto (migrated 2026-02-18, originally ring 2026-02-10)
 Migrated from `ring` to RustCrypto ecosystem to unify with `ml-dsa` crate:
@@ -91,13 +91,13 @@ Migrated from `ring` to RustCrypto ecosystem to unify with `ml-dsa` crate:
 - `hmac` + `sha2` for HMAC-SHA256 and SHA-256 key hashing
 - `ml-dsa` for ML-DSA-44 (post-quantum), chosen over `fips204` crate (~1,100 dependents vs ~1)
 - `rand` for key generation
-- `clap` (derive) for CLI, `serde`/`serde_json` for JSON, `humantime`, `base64`, `hex`, `thiserror`
+- `clap` (derive) for CLI, `serde`/`serde_json` for JSON, `humantime`, `base64`, `thiserror`
 
 ### Key Serialization: Proto3 (decided 2026-02-19)
 All key types use canonical proto3 encoding (same as token format). Ed25519 uses raw 32-byte
 seeds (not PKCS#8 DER). SigningKey includes the public key for asymmetric algorithms so
 `extract_verifying_key()` can derive the VerifyingKey without re-deriving from secret material.
-CLI stores keys as hex-encoded proto bytes. See `src/keys.rs`.
+CLI stores keys as base64-encoded proto bytes. See `src/keys.rs`.
 
 ## Implementation Status
 
@@ -110,11 +110,12 @@ All TODO items 1-8 are implemented, plus ML-DSA-44 post-quantum support:
 - `src/verify.rs` - Verification with key hash matching, expiry and not_before checking
 - `src/main.rs` - CLI tool with `generate-key`, `get-verifying-key`, `sign`, `verify`, `inspect` commands (all 3 algorithms, proto key format)
 - `src/error.rs` - Error types
-- 97 tests (84 unit + 13 integration) including byte-level corruption tests for all algorithms
+- 101 tests (84 unit + 4 reference + 13 integration) including byte-level corruption tests for all algorithms
+- `notes/` - Research documents (prior art, Ed25519 vs P-256, protobuf determinism, post-quantum, ML-DSA key formats, subject identifiers)
 
 ## Research Prior Art
 
-Completed. See [research-prior-art.md](research-prior-art.md) for full comparison of
+Completed. See [notes/research-prior-art.md](notes/research-prior-art.md) for full comparison of
 JWT, x509, Macaroons, Biscuit, and CWT. Key takeaways:
 - `exp`, `nbf`, `iat` are universal temporal claims
 - `iss`, `sub`, `aud` are the core identity triple (future additions)
