@@ -9,6 +9,7 @@ description = "Protobuf-inspired signed tokens — a minimal, fast alternative t
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hmac = "0.12"
 sha2 = "0.10"
+subtle = "2"
 ml-dsa = { version = "0.0", features = ["rand_core"] }
 rand = "0.8"
 

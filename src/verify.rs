@@ -4,26 +4,19 @@ use hmac::{Hmac, Mac};
 use ml_dsa::signature::Verifier as _;
 use ml_dsa::MlDsa44;
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
 use crate::error::ProtokenError;
 use crate::serialize::{deserialize_payload, deserialize_signed_token};
 use crate::sign::compute_key_hash;
 use crate::types::*;
 
-/// Constant-time byte slice comparison to prevent timing side-channels.
-/// Returns Ok(()) if slices are equal, Err(()) otherwise.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> Result<(), ()> {
-    if a.len() != b.len() {
-        return Err(());
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    if diff == 0 {
+/// Constant-time key comparison. Returns KeyHashMismatch if slices differ.
+fn verify_key_match(a: &[u8], b: &[u8]) -> Result<(), ProtokenError> {
+    if bool::from(a.ct_eq(b)) {
         Ok(())
     } else {
-        Err(())
+        Err(ProtokenError::KeyHashMismatch)
     }
 }
 
@@ -58,7 +51,7 @@ pub fn verify_hmac(
     let expected_hash = compute_key_hash(key);
     match &payload.metadata.key_identifier {
         KeyIdentifier::KeyHash(hash) => {
-            constant_time_eq(hash, &expected_hash).map_err(|_| ProtokenError::KeyHashMismatch)?;
+            verify_key_match(hash, &expected_hash)?;
         }
         KeyIdentifier::PublicKey(_) => {
             return Err(ProtokenError::VerificationFailed(
@@ -106,10 +99,10 @@ pub fn verify_ed25519(
     let expected_hash = compute_key_hash(public_key_bytes);
     match &payload.metadata.key_identifier {
         KeyIdentifier::KeyHash(hash) => {
-            constant_time_eq(hash, &expected_hash).map_err(|_| ProtokenError::KeyHashMismatch)?;
+            verify_key_match(hash, &expected_hash)?;
         }
         KeyIdentifier::PublicKey(pk) => {
-            constant_time_eq(pk, public_key_bytes).map_err(|_| ProtokenError::KeyHashMismatch)?;
+            verify_key_match(pk, public_key_bytes)?;
         }
     }
 
@@ -172,10 +165,10 @@ pub fn verify_mldsa44(
     let expected_hash = compute_key_hash(public_key_bytes);
     match &payload.metadata.key_identifier {
         KeyIdentifier::KeyHash(hash) => {
-            constant_time_eq(hash, &expected_hash).map_err(|_| ProtokenError::KeyHashMismatch)?;
+            verify_key_match(hash, &expected_hash)?;
         }
         KeyIdentifier::PublicKey(pk) => {
-            constant_time_eq(pk, public_key_bytes).map_err(|_| ProtokenError::KeyHashMismatch)?;
+            verify_key_match(pk, public_key_bytes)?;
         }
     }
 

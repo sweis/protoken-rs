@@ -332,7 +332,12 @@ fn read_token_bytes(token_arg: Option<String>) -> Result<Vec<u8>, Box<dyn std::e
 }
 
 /// Read a hex-encoded key file and decode it.
+/// Rejects files larger than 100 KB to prevent accidental misuse.
 fn read_hex_key_file(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > 100_000 {
+        return Err(format!("key file too large: {} bytes (max 100,000)", metadata.len()).into());
+    }
     let raw = std::fs::read_to_string(path)?;
     Ok(hex::decode(raw.trim())?)
 }

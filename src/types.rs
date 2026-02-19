@@ -81,7 +81,7 @@ impl KeyIdType {
 pub enum KeyIdentifier {
     /// 8-byte truncated SHA-256 hash of the key material.
     KeyHash([u8; 8]),
-    /// Raw public key bytes (32 bytes for Ed25519).
+    /// Raw public key bytes (Ed25519: 32 B, ML-DSA-44: 1312 B).
     PublicKey(Vec<u8>),
 }
 
@@ -90,14 +90,6 @@ impl KeyIdentifier {
         match self {
             KeyIdentifier::KeyHash(_) => KeyIdType::KeyHash,
             KeyIdentifier::PublicKey(_) => KeyIdType::PublicKey,
-        }
-    }
-
-    /// Returns the byte length of the key identifier value.
-    pub fn value_len(&self) -> usize {
-        match self {
-            KeyIdentifier::KeyHash(_) => 8,
-            KeyIdentifier::PublicKey(pk) => pk.len(),
         }
     }
 }
@@ -193,30 +185,14 @@ pub struct SignedToken {
     pub signature: Vec<u8>,
 }
 
-/// Maximum size of serialized payload bytes in a SignedToken.
 pub const MAX_PAYLOAD_BYTES: usize = 4096;
-
-/// Maximum size of signature bytes in a SignedToken.
 /// Must accommodate ML-DSA-44 signatures (2,420 bytes).
 pub const MAX_SIGNATURE_BYTES: usize = 2560;
 
-/// Constant: key hash length in bytes.
 pub const KEY_HASH_LEN: usize = 8;
-
-/// Constant: Ed25519 public key length.
 pub const ED25519_PUBLIC_KEY_LEN: usize = 32;
-
-/// Constant: HMAC-SHA256 signature length.
 pub const HMAC_SHA256_SIG_LEN: usize = 32;
-
-/// Constant: Ed25519 signature length.
 pub const ED25519_SIG_LEN: usize = 64;
-
-/// Constant: ML-DSA-44 public key length.
 pub const MLDSA44_PUBLIC_KEY_LEN: usize = 1312;
-
-/// Constant: ML-DSA-44 signing key length.
 pub const MLDSA44_SIGNING_KEY_LEN: usize = 2560;
-
-/// Constant: ML-DSA-44 signature length.
 pub const MLDSA44_SIG_LEN: usize = 2420;
