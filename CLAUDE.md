@@ -108,7 +108,7 @@ All TODO items 1-8 are implemented, plus ML-DSA-44 post-quantum support:
 - `src/keys.rs` - Proto3 key serialization (SigningKey, VerifyingKey) with validation
 - `src/sign.rs` - HMAC-SHA256, Ed25519, and ML-DSA-44 signing (raw seeds, RustCrypto)
 - `src/verify.rs` - Verification with key hash matching, expiry and not_before checking
-- `src/main.rs` - CLI tool with `inspect`, `sign`, `verify`, `generate-key` commands (all 3 algorithms, proto key format)
+- `src/main.rs` - CLI tool with `generate-key`, `get-verifying-key`, `sign`, `verify`, `inspect` commands (all 3 algorithms, proto key format)
 - `src/error.rs` - Error types
 - 97 tests (84 unit + 13 integration) including byte-level corruption tests for all algorithms
 

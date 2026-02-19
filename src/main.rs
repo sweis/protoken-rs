@@ -19,7 +19,11 @@ use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 #[derive(Parser)]
-#[command(name = "protoken", about = "Protobuf-inspired signed tokens")]
+#[command(
+    name = "protoken",
+    about = "Protobuf-inspired signed tokens",
+    flatten_help = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -38,8 +42,8 @@ enum Command {
         output: String,
     },
 
-    /// Extract a verifying key from a signing key.
-    ExtractVerifyingKey {
+    /// Get the verifying key from a signing key.
+    GetVerifyingKey {
         /// Signing key file, or "-" for stdin.
         keyfile: String,
 
@@ -76,18 +80,16 @@ enum Command {
     /// Verify a signed token against a key and current time.
     Verify {
         /// Key file (SigningKey for HMAC, VerifyingKey for asymmetric).
-        /// Use "-" for stdin, but then --token must be given explicitly.
+        /// Use "-" for stdin, but then token must be given explicitly.
         keyfile: String,
 
         /// Token as hex or base64 string. If omitted, reads from stdin.
-        #[arg(short, long)]
         token: Option<String>,
     },
 
     /// Inspect a token without verifying (no key needed).
     Inspect {
         /// Token as hex or base64 string. If omitted, reads from stdin.
-        #[arg(short, long)]
         token: Option<String>,
     },
 }
@@ -97,9 +99,7 @@ fn main() {
 
     let result = match cli.command {
         Command::GenerateKey { algorithm, output } => cmd_generate_key(&algorithm, &output),
-        Command::ExtractVerifyingKey { keyfile, output } => {
-            cmd_extract_verifying_key(&keyfile, &output)
-        }
+        Command::GetVerifyingKey { keyfile, output } => cmd_get_verifying_key(&keyfile, &output),
         Command::Sign {
             keyfile,
             duration,
@@ -159,7 +159,7 @@ fn cmd_generate_key(
     print_encoded(&sk_bytes, output_format)
 }
 
-fn cmd_extract_verifying_key(
+fn cmd_get_verifying_key(
     keyfile: &str,
     output_format: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -222,7 +222,7 @@ fn cmd_sign(
 fn cmd_verify(keyfile: &str, token_arg: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     // If keyfile is stdin, token must be provided explicitly
     if keyfile == "-" && token_arg.is_none() {
-        return Err("when keyfile is \"-\" (stdin), --token must be provided explicitly".into());
+        return Err("when keyfile is \"-\" (stdin), token must be provided as an argument".into());
     }
 
     let key_bytes = read_keyfile(keyfile)?;

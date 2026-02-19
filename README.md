@@ -39,13 +39,13 @@ protoken generate-key | protoken sign - 1h
 
 ```sh
 # Extract the verifying (public) key
-protoken extract-verifying-key my.key > my.pub
+protoken get-verifying-key my.key > my.pub
 
 # Verify a token (reads token from stdin)
 protoken sign my.key 1h | protoken verify my.pub
 
 # Or pass the token explicitly
-protoken verify my.pub -t <token>
+protoken verify my.pub <token>
 ```
 
 ### Other algorithms
@@ -57,7 +57,7 @@ protoken sign hmac.key 4d | protoken verify hmac.key
 
 # ML-DSA-44 (post-quantum)
 protoken generate-key -a ml-dsa-44 > pq.key
-protoken extract-verifying-key pq.key > pq.pub
+protoken get-verifying-key pq.key > pq.pub
 protoken sign pq.key 1h | protoken verify pq.pub
 ```
 
@@ -70,7 +70,7 @@ protoken sign my.key 4d --subject "user:alice" --audience "api" --scope read --s
 ### Inspect a token (no key needed)
 
 ```sh
-protoken inspect -t <token>
+protoken inspect <token>
 echo "<token>" | protoken inspect
 ```
 
@@ -85,10 +85,10 @@ protoken sign my.key 1h -o hex
 
 ### Verify stdin rules
 
-`verify` reads the token from stdin by default. If keyfile is `-` (stdin), pass the token explicitly with `--token`:
+`verify` reads the token from stdin by default. If keyfile is `-` (stdin), the token must be given as a positional argument:
 
 ```sh
-protoken verify - -t <token> < my.pub
+protoken verify - <token> < my.pub
 ```
 
 ## Wire Format
