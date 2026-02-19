@@ -20,65 +20,75 @@ cargo install --path .
 
 ## Usage
 
-All keys are encoded as canonical proto3 messages (`SigningKey` / `VerifyingKey`). The CLI accepts hex or base64-encoded proto bytes for key files and token inputs. Output from `generate-key` and `extract-verifying-key` is a base64-encoded proto that any protobuf decoder can parse.
+All keys are canonical proto3 messages, stored as base64 (or hex). Use `-` as the keyfile to read from stdin.
 
-### Generate keys
+### Generate a key and sign a token
 
 ```sh
-# Ed25519 (default) — outputs base64-encoded SigningKey proto
+# Generate an Ed25519 signing key
 protoken generate-key > my.key
 
-# HMAC-SHA256
-protoken generate-key -a hmac > my.key
+# Sign a token valid for 1 hour
+protoken sign my.key 1h
+
+# Pipe directly: generate and sign in one step
+protoken generate-key | protoken sign - 1h
+```
+
+### Extract verifying key and verify
+
+```sh
+# Extract the verifying (public) key
+protoken get-verifying-key my.key > my.pub
+
+# Verify a token (reads token from stdin)
+protoken sign my.key 1h | protoken verify my.pub
+
+# Or pass the token explicitly
+protoken verify my.pub <token>
+```
+
+### Other algorithms
+
+```sh
+# HMAC-SHA256 (symmetric — use signing key to verify)
+protoken generate-key -a hmac > hmac.key
+protoken sign hmac.key 4d | protoken verify hmac.key
 
 # ML-DSA-44 (post-quantum)
-protoken generate-key -a ml-dsa-44 > my.key
-
-# Output as hex instead of base64
-protoken generate-key -o hex > my.key
+protoken generate-key -a ml-dsa-44 > pq.key
+protoken get-verifying-key pq.key > pq.pub
+protoken sign pq.key 1h | protoken verify pq.pub
 ```
 
-### Extract verifying key
-
-For asymmetric algorithms (Ed25519, ML-DSA-44), extract the verifying key to share with verifiers:
+### Sign with claims
 
 ```sh
-protoken extract-verifying-key -k my.key > my.pub
+protoken sign my.key 4d --subject "user:alice" --audience "api" --scope read --scope write
 ```
 
-### Sign a token
+### Inspect a token (no key needed)
 
 ```sh
-# Sign with a 1-hour expiry
-protoken sign -k my.key -d 1h
-
-# With claims
-protoken sign -k my.key -d 4d --subject "user:alice" --audience "api" --scope read --scope write
-
-# Output as hex instead of base64
-protoken sign -k my.key -d 30m -o hex
-```
-
-### Verify a token
-
-```sh
-# HMAC (uses signing key)
-protoken verify -k my.key -t <token>
-
-# Ed25519 / ML-DSA-44 (uses verifying key)
-protoken verify -k my.pub -t <token>
-```
-
-On success, prints the verified claims as JSON. On failure, exits with a non-zero status.
-
-### Inspect a token
-
-```sh
-# Decode without verifying (no key needed)
-protoken inspect -t <token>
-
-# Pipe from stdin
+protoken inspect <token>
 echo "<token>" | protoken inspect
+```
+
+### Output formats
+
+All commands that produce binary output default to base64. Use `-o hex` for hex:
+
+```sh
+protoken generate-key -o hex > my.key
+protoken sign my.key 1h -o hex
+```
+
+### Verify stdin rules
+
+`verify` reads the token from stdin by default. If keyfile is `-` (stdin), the token must be given as a positional argument:
+
+```sh
+protoken verify - <token> < my.pub
 ```
 
 ## Wire Format
@@ -130,10 +140,7 @@ message VerifyingKey {
 Stored in `testdata/vectors.json` (wire format regression) and `testdata/reference_vectors.json` (long-lived keys and tokens expiring 2036). All binary data is URL-safe base64 (no padding).
 
 ```sh
-# Regenerate wire format vectors
 cargo run --bin gen_test_vectors > testdata/vectors.json
-
-# Run all tests
 cargo test
 ```
 
@@ -143,18 +150,17 @@ cargo test
 cargo bench
 ```
 
-See [PERFORMANCE.md](PERFORMANCE.md) for benchmark results and automated CSV tracking.
+See [PERFORMANCE.md](PERFORMANCE.md) for benchmark results.
 
 ## Fuzzing
 
 ```sh
 cargo install cargo-fuzz
-cargo fuzz list                    # show targets
-cargo fuzz run parse_payload       # fuzz payload parser
-cargo fuzz run parse_signed_token  # fuzz token parser
-cargo fuzz run roundtrip           # fuzz roundtrip invariant
-cargo fuzz run parse_keys          # fuzz key deserialization
-cargo fuzz run exercise_token      # exercise all fields of parsed tokens
+cargo fuzz run parse_payload
+cargo fuzz run parse_signed_token
+cargo fuzz run roundtrip
+cargo fuzz run parse_keys
+cargo fuzz run exercise_token
 ```
 
 ## License
