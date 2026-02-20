@@ -127,6 +127,17 @@ pub struct Claims {
 impl Claims {
     /// Validate that all claim fields are within allowed limits.
     pub fn validate(&self) -> Result<(), ProtokenError> {
+        if self.expires_at == 0 {
+            return Err(ProtokenError::MalformedEncoding(
+                "expires_at must be set (non-zero)".into(),
+            ));
+        }
+        if self.not_before != 0 && self.not_before > self.expires_at {
+            return Err(ProtokenError::MalformedEncoding(format!(
+                "not_before ({}) is after expires_at ({})",
+                self.not_before, self.expires_at
+            )));
+        }
         if self.subject.len() > MAX_CLAIM_BYTES_LEN {
             return Err(ProtokenError::MalformedEncoding(format!(
                 "subject too long: {} bytes (max {})",
@@ -198,6 +209,7 @@ pub const MAX_PAYLOAD_BYTES: usize = 4096;
 /// Must accommodate ML-DSA-44 signatures (2,420 bytes).
 pub const MAX_SIGNATURE_BYTES: usize = 2560;
 
+pub const HMAC_MIN_KEY_LEN: usize = 32;
 pub const KEY_HASH_LEN: usize = 8;
 pub const ED25519_SEED_LEN: usize = 32;
 pub const ED25519_PUBLIC_KEY_LEN: usize = 32;

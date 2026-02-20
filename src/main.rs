@@ -188,6 +188,10 @@ fn cmd_sign(
         .map_err(|e| format!("invalid duration '{duration_str}': {e}"))?
         .into();
 
+    if duration.as_secs() == 0 {
+        return Err("duration must be at least 1 second".into());
+    }
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "system clock is set before Unix epoch (1970-01-01)")?
@@ -336,18 +340,31 @@ fn print_payload_colored(payload: &Payload) {
             if pk.len() <= 32 {
                 format!("{} (public_key)", B64.encode(pk))
             } else {
-                format!("{}... (public_key, {} B)", B64.encode(&pk[..24]), pk.len())
+                format!(
+                    "{}... (public_key, {} B)",
+                    B64.encode(pk.get(..24).unwrap_or(pk)),
+                    pk.len()
+                )
             }
         }
     };
     print_field("Key ID", &key_id_str.magenta());
 
-    print_field("Expires", &format_timestamp(payload.claims.expires_at).cyan());
+    print_field(
+        "Expires",
+        &format_timestamp(payload.claims.expires_at).cyan(),
+    );
     if payload.claims.not_before != 0 {
-        print_field("Not Before", &format_timestamp(payload.claims.not_before).cyan());
+        print_field(
+            "Not Before",
+            &format_timestamp(payload.claims.not_before).cyan(),
+        );
     }
     if payload.claims.issued_at != 0 {
-        print_field("Issued At", &format_timestamp(payload.claims.issued_at).cyan());
+        print_field(
+            "Issued At",
+            &format_timestamp(payload.claims.issued_at).cyan(),
+        );
     }
     if !payload.claims.subject.is_empty() {
         print_field("Subject", &payload.claims.subject.green());
@@ -384,7 +401,9 @@ const MAX_KEY_INPUT: u64 = 100_000;
 fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let raw = if path == "-" {
         let mut buf = String::new();
-        io::stdin().take(MAX_KEY_INPUT + 1).read_to_string(&mut buf)?;
+        io::stdin()
+            .take(MAX_KEY_INPUT + 1)
+            .read_to_string(&mut buf)?;
         if buf.len() as u64 > MAX_KEY_INPUT {
             return Err(format!("key input too large (max {} bytes)", MAX_KEY_INPUT).into());
         }
@@ -392,10 +411,12 @@ fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     } else {
         let metadata = std::fs::metadata(path)?;
         if metadata.len() > MAX_KEY_INPUT {
-            return Err(
-                format!("key file too large: {} bytes (max {})", metadata.len(), MAX_KEY_INPUT)
-                    .into(),
-            );
+            return Err(format!(
+                "key file too large: {} bytes (max {})",
+                metadata.len(),
+                MAX_KEY_INPUT
+            )
+            .into());
         }
         std::fs::read_to_string(path)?
     };
@@ -411,13 +432,13 @@ fn read_token_input(token_arg: Option<String>) -> Result<Vec<u8>, Box<dyn std::e
         Some(s) => s,
         None => {
             let mut buf = String::new();
-            io::stdin().take(MAX_TOKEN_INPUT + 1).read_to_string(&mut buf)?;
+            io::stdin()
+                .take(MAX_TOKEN_INPUT + 1)
+                .read_to_string(&mut buf)?;
             if buf.len() as u64 > MAX_TOKEN_INPUT {
-                return Err(format!(
-                    "token input too large (max {} bytes)",
-                    MAX_TOKEN_INPUT
-                )
-                .into());
+                return Err(
+                    format!("token input too large (max {} bytes)", MAX_TOKEN_INPUT).into(),
+                );
             }
             buf
         }

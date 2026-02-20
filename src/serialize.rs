@@ -23,12 +23,18 @@ use crate::error::ProtokenError;
 use crate::proto3;
 use crate::types::*;
 
+/// Convert a u32 to u8, rejecting values > 255 to prevent truncation.
+fn to_u8(v: u32, field_name: &str) -> Result<u8, ProtokenError> {
+    u8::try_from(v).map_err(|_| {
+        ProtokenError::MalformedEncoding(format!("{field_name} value {v} exceeds u8 range"))
+    })
+}
+
 /// Read a varint that must fit in a u32. Rejects values > u32::MAX.
 fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32, ProtokenError> {
     let v = proto3::read_varint_value(data, pos)?;
-    u32::try_from(v).map_err(|_| {
-        ProtokenError::MalformedEncoding(format!("varint value {v} exceeds u32::MAX"))
-    })
+    u32::try_from(v)
+        .map_err(|_| ProtokenError::MalformedEncoding(format!("varint value {v} exceeds u32::MAX")))
 }
 
 /// Serialize a Payload into canonical proto3 bytes.
@@ -170,22 +176,23 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
                 scopes.push(s.to_string());
             }
             (_, _) => {
-                // Unknown field — skip it (forward compatibility for inspect),
-                // but note that re-canonicalization will drop it, so signature
-                // verification will naturally fail if unknown fields were signed.
-                proto3::skip_field(wire_type, data, &mut pos)?;
+                return Err(ProtokenError::MalformedEncoding(format!(
+                    "unexpected field {field_number} (wire type {wire_type}) in Payload"
+                )));
             }
         }
     }
 
     // Validate required fields
-    let version =
-        Version::from_byte(version as u8).ok_or(ProtokenError::InvalidVersion(version as u8))?;
+    let version = to_u8(version, "version")?;
+    let version = Version::from_byte(version).ok_or(ProtokenError::InvalidVersion(version))?;
 
-    let algorithm = Algorithm::from_byte(algorithm as u8)
-        .ok_or(ProtokenError::InvalidAlgorithm(algorithm as u8))?;
-    let key_id_type = KeyIdType::from_byte(key_id_type as u8)
-        .ok_or(ProtokenError::InvalidKeyIdType(key_id_type as u8))?;
+    let algorithm = to_u8(algorithm, "algorithm")?;
+    let algorithm =
+        Algorithm::from_byte(algorithm).ok_or(ProtokenError::InvalidAlgorithm(algorithm))?;
+    let key_id_type = to_u8(key_id_type, "key_id_type")?;
+    let key_id_type =
+        KeyIdType::from_byte(key_id_type).ok_or(ProtokenError::InvalidKeyIdType(key_id_type))?;
 
     // Validate key_id length
     let key_identifier = match key_id_type {
@@ -305,7 +312,9 @@ pub fn deserialize_signed_token(data: &[u8]) -> Result<SignedToken, ProtokenErro
                 signature = Some(bytes.to_vec());
             }
             (_, _) => {
-                proto3::skip_field(wire_type, data, &mut pos)?;
+                return Err(ProtokenError::MalformedEncoding(format!(
+                    "unexpected field {field_number} (wire type {wire_type}) in SignedToken"
+                )));
             }
         }
     }

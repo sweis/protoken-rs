@@ -111,14 +111,20 @@ pub fn decode_varint(data: &[u8], pos: &mut usize) -> Result<u64, ProtokenError>
 /// Decode a field tag, returning (field_number, wire_type).
 pub fn decode_tag(data: &[u8], pos: &mut usize) -> Result<(u32, u32), ProtokenError> {
     let tag = decode_varint(data, pos)?;
-    let field_number = (tag >> 3) as u32;
     let wire_type = (tag & 0x07) as u32;
+    let field_number_u64 = tag >> 3;
 
-    if field_number == 0 {
+    if field_number_u64 == 0 {
         return Err(ProtokenError::MalformedEncoding(
             "field number 0 is invalid".into(),
         ));
     }
+
+    let field_number = u32::try_from(field_number_u64).map_err(|_| {
+        ProtokenError::MalformedEncoding(format!(
+            "field number {field_number_u64} exceeds u32::MAX"
+        ))
+    })?;
 
     Ok((field_number, wire_type))
 }
@@ -132,7 +138,12 @@ pub fn read_varint_value(data: &[u8], pos: &mut usize) -> Result<u64, ProtokenEr
 /// Returns the byte slice.
 #[allow(clippy::indexing_slicing)] // bounds checked before access
 pub fn read_bytes_value<'a>(data: &'a [u8], pos: &mut usize) -> Result<&'a [u8], ProtokenError> {
-    let len = decode_varint(data, pos)? as usize;
+    let len_u64 = decode_varint(data, pos)?;
+    let len = usize::try_from(len_u64).map_err(|_| {
+        ProtokenError::MalformedEncoding(format!(
+            "length-delimited field length {len_u64} exceeds platform address space"
+        ))
+    })?;
     let end = pos.checked_add(len).ok_or_else(|| {
         ProtokenError::MalformedEncoding("length-delimited field length overflow".into())
     })?;
@@ -275,6 +286,18 @@ mod tests {
         ];
         let result = crate::serialize::deserialize_signed_token(data);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_tag_rejects_large_field_number() {
+        // Field number 0x1_0000_0002 (exceeds u32::MAX) with wire type 0.
+        // Without the fix, this would truncate to field 2 (algorithm).
+        let tag_value: u64 = 0x1_0000_0002u64 << 3;
+        let mut buf = Vec::new();
+        encode_varint(tag_value, &mut buf);
+        let mut pos = 0;
+        let result = decode_tag(&buf, &mut pos);
+        assert!(result.is_err(), "should reject field number > u32::MAX");
     }
 
     #[test]
