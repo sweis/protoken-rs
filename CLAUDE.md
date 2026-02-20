@@ -110,7 +110,7 @@ All TODO items 1-8 are implemented, plus ML-DSA-44 post-quantum support:
 - `src/verify.rs` - Verification with key hash matching, expiry and not_before checking
 - `src/main.rs` - CLI tool with `generate-key`, `get-verifying-key`, `sign`, `verify`, `inspect` commands (all 3 algorithms, proto key format)
 - `src/error.rs` - Error types
-- 101 tests (84 unit + 4 reference + 13 integration) including byte-level corruption tests for all algorithms
+- 106 tests (89 unit + 4 reference + 13 integration) including byte-level corruption tests for all algorithms
 - `notes/` - Research documents (prior art, Ed25519 vs P-256, protobuf determinism, post-quantum, ML-DSA key formats, subject identifiers)
 
 ## Research Prior Art

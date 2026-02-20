@@ -79,6 +79,13 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
             actual: 0,
         });
     }
+    if data.len() > MAX_PAYLOAD_BYTES {
+        return Err(ProtokenError::MalformedEncoding(format!(
+            "payload too large: {} bytes (max {})",
+            data.len(),
+            MAX_PAYLOAD_BYTES
+        )));
+    }
 
     let mut version: u32 = 0;
     let mut algorithm: u32 = 0;
@@ -665,20 +672,18 @@ mod tests {
 
     #[test]
     fn test_rejects_scope_wrong_wire_type() {
-        // Field 10 with wire type 0 (varint) instead of 2 (LEN)
+        // Field 10 with wire type 0 (varint) instead of 2 (LEN).
+        // Strict canonical parsing rejects unexpected (field, wire_type) pairs.
         let mut bad = Vec::new();
         proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_uint64(5, 1700000000, &mut bad);
         proto3::encode_uint64(10, 42, &mut bad); // varint instead of LEN
-                                                 // Should be skipped as unknown wire_type match, but the ascending
-                                                 // order check for field 10 only allows wire type 2
-        let result = deserialize_payload(&bad);
-        // Either parses (ignoring the mismatched wire type) or errors — both are safe
-        if let Ok(payload) = result {
-            assert!(payload.claims.scopes.is_empty());
-        }
+        assert!(
+            deserialize_payload(&bad).is_err(),
+            "wrong wire type for field 10 should be rejected"
+        );
     }
 
     #[test]
