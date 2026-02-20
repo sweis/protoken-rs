@@ -205,7 +205,12 @@ pub fn verify_mldsa44(
 
 /// Check expires_at and not_before against current time.
 fn check_temporal_claims(claims: &Claims, now: u64) -> Result<(), ProtokenError> {
-    if claims.expires_at != 0 && now > claims.expires_at {
+    if claims.expires_at == 0 {
+        return Err(ProtokenError::VerificationFailed(
+            "token has no expiry (expires_at = 0)".into(),
+        ));
+    }
+    if now > claims.expires_at {
         return Err(ProtokenError::TokenExpired {
             expired_at: claims.expires_at,
             now,

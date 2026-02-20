@@ -239,27 +239,34 @@ fn cmd_verify(
         .map_err(|_| "system clock is set before Unix epoch (1970-01-01)")?
         .as_secs();
 
-    let token = deserialize_signed_token(&token_bytes)?;
-    let payload = deserialize_payload(&token.payload_bytes)?;
-
-    let verified = match payload.metadata.algorithm {
-        Algorithm::HmacSha256 => {
-            let sk = deserialize_signing_key(&key_bytes)?;
-            verify_hmac(&sk.secret_key, &token_bytes, now)?
+    // Determine key type by algorithm. HMAC uses a SigningKey; asymmetric uses a VerifyingKey.
+    // Both key types encode algorithm as field 1, so try VerifyingKey first (2 fields)
+    // and fall back to SigningKey (3 fields, needed for HMAC).
+    let verified = if let Ok(vk) = deserialize_verifying_key(&key_bytes) {
+        match vk.algorithm {
+            Algorithm::Ed25519 => verify_ed25519(&vk.public_key, &token_bytes, now)?,
+            Algorithm::MlDsa44 => verify_mldsa44(&vk.public_key, &token_bytes, now)?,
+            Algorithm::HmacSha256 => unreachable!(),
         }
-        Algorithm::Ed25519 => {
-            let vk = deserialize_verifying_key(&key_bytes)?;
-            verify_ed25519(&vk.public_key, &token_bytes, now)?
+    } else {
+        let sk = deserialize_signing_key(&key_bytes)?;
+        if sk.algorithm != Algorithm::HmacSha256 {
+            return Err(format!(
+                "expected an HMAC signing key or a verifying key, got {:?} signing key",
+                sk.algorithm
+            )
+            .into());
         }
-        Algorithm::MlDsa44 => {
-            let vk = deserialize_verifying_key(&key_bytes)?;
-            verify_mldsa44(&vk.public_key, &token_bytes, now)?
-        }
+        verify_hmac(&sk.secret_key, &token_bytes, now)?
     };
 
     if json {
         println!("{}", serde_json::to_string_pretty(&verified)?);
     } else {
+        let payload = Payload {
+            metadata: verified.metadata.clone(),
+            claims: verified.claims.clone(),
+        };
         println!("{}", "OK".green().bold());
         print_payload_colored(&payload);
     }
@@ -354,8 +361,10 @@ fn print_payload_colored(payload: &Payload) {
 }
 
 fn format_timestamp(unix_secs: u64) -> String {
-    let d = UNIX_EPOCH + std::time::Duration::from_secs(unix_secs);
-    humantime::format_rfc3339_seconds(d).to_string()
+    match UNIX_EPOCH.checked_add(std::time::Duration::from_secs(unix_secs)) {
+        Some(d) => humantime::format_rfc3339_seconds(d).to_string(),
+        None => format!("{unix_secs} (epoch seconds)"),
+    }
 }
 
 fn format_size(bytes: usize) -> String {
@@ -368,17 +377,24 @@ fn format_size(bytes: usize) -> String {
 
 // --- I/O helpers ---
 
+/// Maximum key input size (base64-encoded). ML-DSA-44 SigningKey is ~5.2 KB base64.
+const MAX_KEY_INPUT: u64 = 100_000;
+
 /// Read a key from a file path or "-" for stdin. Decodes base64.
 fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let raw = if path == "-" {
         let mut buf = String::new();
-        io::stdin().read_to_string(&mut buf)?;
+        io::stdin().take(MAX_KEY_INPUT + 1).read_to_string(&mut buf)?;
+        if buf.len() as u64 > MAX_KEY_INPUT {
+            return Err(format!("key input too large (max {} bytes)", MAX_KEY_INPUT).into());
+        }
         buf
     } else {
         let metadata = std::fs::metadata(path)?;
-        if metadata.len() > 100_000 {
+        if metadata.len() > MAX_KEY_INPUT {
             return Err(
-                format!("key file too large: {} bytes (max 100,000)", metadata.len()).into(),
+                format!("key file too large: {} bytes (max {})", metadata.len(), MAX_KEY_INPUT)
+                    .into(),
             );
         }
         std::fs::read_to_string(path)?
@@ -386,13 +402,23 @@ fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     decode_base64(raw.trim())
 }
 
+/// Maximum token input size (base64-encoded). 16 KB covers even ML-DSA-44 tokens with headroom.
+const MAX_TOKEN_INPUT: u64 = 16_384;
+
 /// Read token bytes from an explicit argument or stdin, decoding base64.
 fn read_token_input(token_arg: Option<String>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let input = match token_arg {
         Some(s) => s,
         None => {
             let mut buf = String::new();
-            io::stdin().read_to_string(&mut buf)?;
+            io::stdin().take(MAX_TOKEN_INPUT + 1).read_to_string(&mut buf)?;
+            if buf.len() as u64 > MAX_TOKEN_INPUT {
+                return Err(format!(
+                    "token input too large (max {} bytes)",
+                    MAX_TOKEN_INPUT
+                )
+                .into());
+            }
             buf
         }
     };

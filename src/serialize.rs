@@ -23,6 +23,14 @@ use crate::error::ProtokenError;
 use crate::proto3;
 use crate::types::*;
 
+/// Read a varint that must fit in a u32. Rejects values > u32::MAX.
+fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32, ProtokenError> {
+    let v = proto3::read_varint_value(data, pos)?;
+    u32::try_from(v).map_err(|_| {
+        ProtokenError::MalformedEncoding(format!("varint value {v} exceeds u32::MAX"))
+    })
+}
+
 /// Serialize a Payload into canonical proto3 bytes.
 #[must_use]
 pub fn serialize_payload(payload: &Payload) -> Vec<u8> {
@@ -95,9 +103,9 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
         last_field_number = field_number;
 
         match (field_number, wire_type) {
-            (1, 0) => version = proto3::read_varint_value(data, &mut pos)? as u32,
-            (2, 0) => algorithm = proto3::read_varint_value(data, &mut pos)? as u32,
-            (3, 0) => key_id_type = proto3::read_varint_value(data, &mut pos)? as u32,
+            (1, 0) => version = read_u32(data, &mut pos)?,
+            (2, 0) => algorithm = read_u32(data, &mut pos)?,
+            (3, 0) => key_id_type = read_u32(data, &mut pos)?,
             (4, 2) => key_id = proto3::read_bytes_value(data, &mut pos)?.to_vec(),
             (5, 0) => expires_at = proto3::read_varint_value(data, &mut pos)?,
             (6, 0) => not_before = proto3::read_varint_value(data, &mut pos)?,
@@ -239,12 +247,22 @@ pub fn serialize_signed_token(token: &SignedToken) -> Vec<u8> {
 /// Deserialize a SignedToken from proto3 bytes.
 /// Returns the raw payload bytes (for signature verification) and signature.
 /// Callers should use `deserialize_payload()` on `payload_bytes` to validate and parse the payload.
+/// Maximum total size for a serialized SignedToken (payload + signature + framing).
+const MAX_SIGNED_TOKEN_BYTES: usize = MAX_PAYLOAD_BYTES + MAX_SIGNATURE_BYTES + 32;
+
 pub fn deserialize_signed_token(data: &[u8]) -> Result<SignedToken, ProtokenError> {
     if data.is_empty() {
         return Err(ProtokenError::TokenTooShort {
             expected: 1,
             actual: 0,
         });
+    }
+    if data.len() > MAX_SIGNED_TOKEN_BYTES {
+        return Err(ProtokenError::MalformedEncoding(format!(
+            "signed token too large: {} bytes (max {})",
+            data.len(),
+            MAX_SIGNED_TOKEN_BYTES
+        )));
     }
 
     let mut payload_bytes: Option<Vec<u8>> = None;

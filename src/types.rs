@@ -148,13 +148,22 @@ impl Claims {
                 MAX_SCOPES
             )));
         }
-        for scope in &self.scopes {
-            if scope.len() > MAX_CLAIM_BYTES_LEN {
-                return Err(ProtokenError::MalformedEncoding(format!(
-                    "scope entry too long: {} bytes (max {})",
-                    scope.len(),
-                    MAX_CLAIM_BYTES_LEN
-                )));
+        {
+            let mut seen = std::collections::HashSet::new();
+            for scope in &self.scopes {
+                if scope.len() > MAX_CLAIM_BYTES_LEN {
+                    return Err(ProtokenError::MalformedEncoding(format!(
+                        "scope entry too long: {} bytes (max {})",
+                        scope.len(),
+                        MAX_CLAIM_BYTES_LEN
+                    )));
+                }
+                if !seen.insert(scope.as_str()) {
+                    return Err(ProtokenError::MalformedEncoding(format!(
+                        "duplicate scope: {:?}",
+                        scope
+                    )));
+                }
             }
         }
         Ok(())
@@ -190,6 +199,7 @@ pub const MAX_PAYLOAD_BYTES: usize = 4096;
 pub const MAX_SIGNATURE_BYTES: usize = 2560;
 
 pub const KEY_HASH_LEN: usize = 8;
+pub const ED25519_SEED_LEN: usize = 32;
 pub const ED25519_PUBLIC_KEY_LEN: usize = 32;
 pub const HMAC_SHA256_SIG_LEN: usize = 32;
 pub const ED25519_SIG_LEN: usize = 64;

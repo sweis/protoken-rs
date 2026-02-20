@@ -13,6 +13,14 @@ use crate::error::ProtokenError;
 use crate::proto3;
 use crate::types::*;
 
+/// Read a varint that must fit in a u32. Rejects values > u32::MAX.
+fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32, ProtokenError> {
+    let v = proto3::read_varint_value(data, pos)?;
+    u32::try_from(v).map_err(|_| {
+        ProtokenError::MalformedEncoding(format!("varint value {v} exceeds u32::MAX"))
+    })
+}
+
 /// A serialized signing key (symmetric or asymmetric).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigningKey {
@@ -98,7 +106,7 @@ pub fn deserialize_signing_key(data: &[u8]) -> Result<SigningKey, ProtokenError>
         last_field_number = field_number;
 
         match (field_number, wire_type) {
-            (1, 0) => algorithm = proto3::read_varint_value(data, &mut pos)? as u32,
+            (1, 0) => algorithm = read_u32(data, &mut pos)?,
             (2, 2) => {
                 let bytes = proto3::read_bytes_value(data, &mut pos)?;
                 if bytes.len() > MAX_SECRET_KEY_BYTES {
@@ -162,7 +170,7 @@ pub fn deserialize_verifying_key(data: &[u8]) -> Result<VerifyingKey, ProtokenEr
         last_field_number = field_number;
 
         match (field_number, wire_type) {
-            (1, 0) => algorithm = proto3::read_varint_value(data, &mut pos)? as u32,
+            (1, 0) => algorithm = read_u32(data, &mut pos)?,
             (2, 2) => {
                 let bytes = proto3::read_bytes_value(data, &mut pos)?;
                 if bytes.len() > MAX_PUBLIC_KEY_BYTES {
@@ -209,10 +217,10 @@ fn validate_signing_key_sizes(
             }
         }
         Algorithm::Ed25519 => {
-            if secret_key.len() != ED25519_PUBLIC_KEY_LEN {
+            if secret_key.len() != ED25519_SEED_LEN {
                 return Err(ProtokenError::MalformedEncoding(format!(
                     "Ed25519 seed must be {} bytes, got {}",
-                    ED25519_PUBLIC_KEY_LEN,
+                    ED25519_SEED_LEN,
                     secret_key.len()
                 )));
             }

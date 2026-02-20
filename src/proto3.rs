@@ -79,6 +79,14 @@ pub fn decode_varint(data: &[u8], pos: &mut usize) -> Result<u64, ProtokenError>
         let byte = data[*pos];
         *pos += 1;
 
+        // On the 10th byte (shift=63), only bit 0 is valid for u64.
+        // Reject values that would overflow.
+        if shift == 63 && byte > 1 {
+            return Err(ProtokenError::MalformedEncoding(
+                "varint exceeds 64 bits".into(),
+            ));
+        }
+
         value |= ((byte & 0x7F) as u64) << shift;
 
         if byte & 0x80 == 0 {
@@ -92,9 +100,9 @@ pub fn decode_varint(data: &[u8], pos: &mut usize) -> Result<u64, ProtokenError>
         }
 
         shift += 7;
-        if shift >= 64 {
+        if shift > 63 {
             return Err(ProtokenError::MalformedEncoding(
-                "varint exceeds 64 bits".into(),
+                "varint exceeds 10 bytes".into(),
             ));
         }
     }
@@ -125,7 +133,10 @@ pub fn read_varint_value(data: &[u8], pos: &mut usize) -> Result<u64, ProtokenEr
 #[allow(clippy::indexing_slicing)] // bounds checked before access
 pub fn read_bytes_value<'a>(data: &'a [u8], pos: &mut usize) -> Result<&'a [u8], ProtokenError> {
     let len = decode_varint(data, pos)? as usize;
-    if *pos + len > data.len() {
+    let end = pos.checked_add(len).ok_or_else(|| {
+        ProtokenError::MalformedEncoding("length-delimited field length overflow".into())
+    })?;
+    if end > data.len() {
         return Err(ProtokenError::MalformedEncoding(format!(
             "length-delimited field extends past end: need {} bytes at offset {}, have {}",
             len,
@@ -253,6 +264,17 @@ mod tests {
         let mut buf = Vec::new();
         encode_bytes(4, &[], &mut buf);
         assert!(buf.is_empty(), "empty bytes should be omitted");
+    }
+
+    #[test]
+    fn test_read_bytes_overflow_length() {
+        // Fuzzer crash: length-delimited field with length near u64::MAX causes
+        // addition overflow in pos + len. The varint 0xff..ff 0x01 = u64::MAX.
+        let data: &[u8] = &[
+            0x0a, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 0x0a, 0x01, 0x28,
+        ];
+        let result = crate::serialize::deserialize_signed_token(data);
+        assert!(result.is_err());
     }
 
     #[test]
