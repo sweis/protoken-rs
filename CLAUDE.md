@@ -12,7 +12,7 @@ Protokens are designed to be a simple, fast replacemenmt for JWTs, ad hoc tokens
 1. The wire format uses canonical proto3 encoding. Payloads are valid proto3 messages.
 2. These are signed tokens that support a symmetric MAC and asymmetric signature options.
 3. The symmetric MAC is HMAC-SHA256.
-4. The asymmetric signatures are Ed25519 and ML-DSA-44 (post-quantum, FIPS 204).
+4. The asymmetric signatures are Ed25519 and ML-DSA-44/65/87 (post-quantum, FIPS 204).
 5. The implementation is in Rust.
 6. The goal is a minimal token format. We start simple and add only fields essential to our use cases.
 
@@ -20,9 +20,9 @@ Protokens are designed to be a simple, fast replacemenmt for JWTs, ad hoc tokens
 ```proto
 message Payload {
   uint32 version = 1;      // reserved, always 0 (omitted on wire)
-  uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44
+  uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44, 4 = ML-DSA-65, 5 = ML-DSA-87
   uint32 key_id_type = 3;  // 1 = key_hash, 2 = public_key
-  bytes  key_id = 4;       // 8 bytes (key_hash) or variable (32 B Ed25519, 1312 B ML-DSA-44)
+  bytes  key_id = 4;       // 8 bytes (key_hash) or variable (32 B Ed25519, 1312/1952/2592 B ML-DSA)
   uint64 expires_at = 5;   // Unix seconds
   uint64 not_before = 6;   // optional (0 = omitted)
   uint64 issued_at = 7;    // optional (0 = omitted)
@@ -33,18 +33,18 @@ message Payload {
 
 message SignedToken {
   Payload payload = 1;     // canonical-encoded Payload submessage
-  bytes   signature = 2;   // HMAC-SHA256 (32 B), Ed25519 (64 B), or ML-DSA-44 (2420 B)
+  bytes   signature = 2;   // HMAC-SHA256 (32 B), Ed25519 (64 B), or ML-DSA (2420/3309/4627 B)
 }
 
 message SigningKey {
-  uint32 algorithm = 1;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44
-  bytes secret_key = 2;    // HMAC: raw key (≥32 B); Ed25519: 32 B seed; ML-DSA-44: 2560 B
-  bytes public_key = 3;    // Ed25519: 32 B; ML-DSA-44: 1312 B; empty for HMAC
+  uint32 algorithm = 1;    // 1 = HMAC-SHA256, 2 = Ed25519, 3..5 = ML-DSA-44/65/87
+  bytes secret_key = 2;    // HMAC: raw key (≥32 B); Ed25519: 32 B seed; ML-DSA: 2560/4032/4896 B
+  bytes public_key = 3;    // Ed25519: 32 B; ML-DSA: 1312/1952/2592 B; empty for HMAC
 }
 
 message VerifyingKey {
-  uint32 algorithm = 1;    // 2 = Ed25519, 3 = ML-DSA-44
-  bytes public_key = 2;    // Ed25519: 32 B; ML-DSA-44: 1312 B
+  uint32 algorithm = 1;    // 2 = Ed25519, 3..5 = ML-DSA-44/65/87
+  bytes public_key = 2;    // Ed25519: 32 B; ML-DSA: 1312/1952/2592 B
 }
 ```
 
@@ -89,7 +89,7 @@ See [notes/research-pq-signatures.md](notes/research-pq-signatures.md) for full 
 Migrated from `ring` to RustCrypto ecosystem to unify with `ml-dsa` crate:
 - `ed25519-dalek` for Ed25519 signing/verification (raw 32-byte seeds, no PKCS#8)
 - `hmac` + `sha2` for HMAC-SHA256 and SHA-256 key hashing
-- `ml-dsa` for ML-DSA-44 (post-quantum), chosen over `fips204` crate (~1,100 dependents vs ~1)
+- `ml-dsa` for ML-DSA-44/65/87 (post-quantum), chosen over `fips204` crate (~1,100 dependents vs ~1)
 - `rand` for key generation
 - `clap` (derive) for CLI, `serde`/`serde_json` for JSON, `humantime`, `base64`, `thiserror`
 
@@ -101,16 +101,16 @@ CLI stores keys as base64-encoded proto bytes. See `src/keys.rs`.
 
 ## Implementation Status
 
-All TODO items 1-8 are implemented, plus ML-DSA-44 post-quantum support:
-- `src/types.rs` - Core types (Version, Algorithm incl. MlDsa44, KeyIdentifier, Payload, SignedToken, Claims)
+All TODO items 1-8 are implemented, plus all three ML-DSA parameter sets:
+- `src/types.rs` - Core types (Version, Algorithm incl. MlDsa44/65/87, KeyIdentifier, Payload, SignedToken, Claims)
 - `src/proto3.rs` - Canonical proto3 wire encoder/decoder
 - `src/serialize.rs` - Deterministic serialization/deserialization for Payload and SignedToken
-- `src/keys.rs` - Proto3 key serialization (SigningKey, VerifyingKey) with validation
-- `src/sign.rs` - HMAC-SHA256, Ed25519, and ML-DSA-44 signing (raw seeds, RustCrypto)
-- `src/verify.rs` - Verification with key hash matching, expiry and not_before checking
-- `src/main.rs` - CLI tool with `generate-key`, `get-verifying-key`, `sign`, `verify`, `inspect` commands (all 3 algorithms, proto key format)
+- `src/keys.rs` - Proto3 key serialization (SigningKey, VerifyingKey) with validation for all algorithms
+- `src/sign.rs` - HMAC-SHA256, Ed25519, and ML-DSA-44/65/87 signing (raw seeds, RustCrypto, macro-generated)
+- `src/verify.rs` - Verification with key hash matching, expiry and not_before checking (all 5 algorithms)
+- `src/main.rs` - CLI tool with `generate-key`, `get-verifying-key`, `sign`, `verify`, `inspect` commands (all 5 algorithms, proto key format)
 - `src/error.rs` - Error types
-- 106 tests (89 unit + 4 reference + 13 integration) including byte-level corruption tests for all algorithms
+- 132 tests (115 unit + 4 reference + 13 integration) including byte-level corruption tests for all algorithms
 - `notes/` - Research documents (prior art, Ed25519 vs P-256, protobuf determinism, post-quantum, ML-DSA key formats, subject identifiers)
 
 ## Research Prior Art

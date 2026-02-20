@@ -1,8 +1,7 @@
-//! Token verification: HMAC-SHA256, Ed25519, and ML-DSA-44.
+//! Token verification: HMAC-SHA256, Ed25519, and ML-DSA-44/65/87.
 
 use hmac::{Hmac, Mac};
 use ml_dsa::signature::Verifier as _;
-use ml_dsa::MlDsa44;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
@@ -141,66 +140,104 @@ pub fn verify_ed25519(
     })
 }
 
-/// Verify an ML-DSA-44 signed token.
-///
-/// `public_key_bytes` is the ML-DSA-44 public key (1,312 bytes).
-/// `token_bytes` is the serialized SignedToken wire bytes.
-/// `now` is the current Unix timestamp for expiry checking.
-pub fn verify_mldsa44(
-    public_key_bytes: &[u8],
-    token_bytes: &[u8],
-    now: u64,
-) -> Result<VerifiedClaims, ProtokenError> {
-    let token = deserialize_signed_token(token_bytes)?;
-    let payload = deserialize_payload(&token.payload_bytes)?;
+/// Macro to generate ML-DSA verify functions for each parameter set.
+macro_rules! impl_mldsa_verify {
+    (
+        param_set: $ParamSet:ty,
+        algorithm: $algo:expr,
+        pk_len: $pk_len:expr,
+        name: $name:literal,
+        verify_fn: $verify_fn:ident
+    ) => {
+        #[doc = concat!("Verify an ", $name, " signed token.")]
+        pub fn $verify_fn(
+            public_key_bytes: &[u8],
+            token_bytes: &[u8],
+            now: u64,
+        ) -> Result<VerifiedClaims, ProtokenError> {
+            let token = deserialize_signed_token(token_bytes)?;
+            let payload = deserialize_payload(&token.payload_bytes)?;
 
-    if payload.metadata.algorithm != Algorithm::MlDsa44 {
-        return Err(ProtokenError::VerificationFailed(format!(
-            "expected ML-DSA-44, got {:?}",
-            payload.metadata.algorithm
-        )));
-    }
+            if payload.metadata.algorithm != $algo {
+                return Err(ProtokenError::VerificationFailed(format!(
+                    "expected {}, got {:?}",
+                    $name, payload.metadata.algorithm
+                )));
+            }
 
-    // Check key identity (constant-time comparison)
-    let expected_hash = compute_key_hash(public_key_bytes);
-    match &payload.metadata.key_identifier {
-        KeyIdentifier::KeyHash(hash) => {
-            verify_key_match(hash, &expected_hash)?;
+            // Check key identity (constant-time comparison)
+            let expected_hash = compute_key_hash(public_key_bytes);
+            match &payload.metadata.key_identifier {
+                KeyIdentifier::KeyHash(hash) => {
+                    verify_key_match(hash, &expected_hash)?;
+                }
+                KeyIdentifier::PublicKey(pk) => {
+                    verify_key_match(pk, public_key_bytes)?;
+                }
+            }
+
+            // Parse the public key
+            let vk_encoded: &ml_dsa::EncodedVerifyingKey<$ParamSet> =
+                public_key_bytes.try_into().map_err(|_| {
+                    ProtokenError::VerificationFailed(format!(
+                        "invalid {} public key: expected {} bytes, got {}",
+                        $name,
+                        $pk_len,
+                        public_key_bytes.len()
+                    ))
+                })?;
+            let verifying_key = ml_dsa::VerifyingKey::<$ParamSet>::decode(vk_encoded);
+
+            // Parse the signature
+            let signature = ml_dsa::Signature::<$ParamSet>::try_from(token.signature.as_slice())
+                .map_err(|_| {
+                    ProtokenError::VerificationFailed(format!(
+                        "invalid {} signature encoding",
+                        $name
+                    ))
+                })?;
+
+            verifying_key
+                .verify(&token.payload_bytes, &signature)
+                .map_err(|_| {
+                    ProtokenError::VerificationFailed(format!(
+                        "{} signature verification failed",
+                        $name
+                    ))
+                })?;
+
+            check_temporal_claims(&payload.claims, now)?;
+
+            Ok(VerifiedClaims {
+                claims: payload.claims,
+                metadata: payload.metadata,
+            })
         }
-        KeyIdentifier::PublicKey(pk) => {
-            verify_key_match(pk, public_key_bytes)?;
-        }
-    }
+    };
+}
 
-    // Parse the public key
-    let vk_encoded: &ml_dsa::EncodedVerifyingKey<MlDsa44> =
-        public_key_bytes.try_into().map_err(|_| {
-            ProtokenError::VerificationFailed(format!(
-                "invalid ML-DSA-44 public key: expected {} bytes, got {}",
-                MLDSA44_PUBLIC_KEY_LEN,
-                public_key_bytes.len()
-            ))
-        })?;
-    let verifying_key = ml_dsa::VerifyingKey::<MlDsa44>::decode(vk_encoded);
+impl_mldsa_verify! {
+    param_set: ml_dsa::MlDsa44,
+    algorithm: Algorithm::MlDsa44,
+    pk_len: MLDSA44_PUBLIC_KEY_LEN,
+    name: "ML-DSA-44",
+    verify_fn: verify_mldsa44
+}
 
-    // Parse the signature
-    let signature =
-        ml_dsa::Signature::<MlDsa44>::try_from(token.signature.as_slice()).map_err(|_| {
-            ProtokenError::VerificationFailed("invalid ML-DSA-44 signature encoding".into())
-        })?;
+impl_mldsa_verify! {
+    param_set: ml_dsa::MlDsa65,
+    algorithm: Algorithm::MlDsa65,
+    pk_len: MLDSA65_PUBLIC_KEY_LEN,
+    name: "ML-DSA-65",
+    verify_fn: verify_mldsa65
+}
 
-    verifying_key
-        .verify(&token.payload_bytes, &signature)
-        .map_err(|_| {
-            ProtokenError::VerificationFailed("ML-DSA-44 signature verification failed".into())
-        })?;
-
-    check_temporal_claims(&payload.claims, now)?;
-
-    Ok(VerifiedClaims {
-        claims: payload.claims,
-        metadata: payload.metadata,
-    })
+impl_mldsa_verify! {
+    param_set: ml_dsa::MlDsa87,
+    algorithm: Algorithm::MlDsa87,
+    pk_len: MLDSA87_PUBLIC_KEY_LEN,
+    name: "ML-DSA-87",
+    verify_fn: verify_mldsa87
 }
 
 /// Check expires_at and not_before against current time.
@@ -231,8 +268,9 @@ mod tests {
     use super::*;
 
     use crate::sign::{
-        generate_ed25519_key, generate_mldsa44_key, mldsa44_key_hash, sign_ed25519, sign_hmac,
-        sign_mldsa44,
+        generate_ed25519_key, generate_mldsa44_key, generate_mldsa65_key, generate_mldsa87_key,
+        mldsa44_key_hash, mldsa65_key_hash, mldsa87_key_hash, sign_ed25519, sign_hmac,
+        sign_mldsa44, sign_mldsa65, sign_mldsa87,
     };
 
     const TEST_HMAC_KEY: &[u8; 32] = &[0xAB; 32];
@@ -572,4 +610,141 @@ mod tests {
         assert_eq!(verified.claims, claims);
         assert_eq!(verified.metadata.algorithm, Algorithm::MlDsa44);
     }
+
+    // Macro for ML-DSA verify tests (ML-DSA-65 and ML-DSA-87)
+    macro_rules! mldsa_verify_tests {
+        ($mod_name:ident, $generate_fn:ident, $sign_fn:ident, $verify_fn:ident, $key_hash_fn:ident, $algo:expr) => {
+            mod $mod_name {
+                use super::*;
+
+                #[test]
+                fn test_verify_valid() {
+                    let (sk, pk) = $generate_fn().unwrap();
+                    let key_id = $key_hash_fn(&pk).unwrap();
+                    let claims = Claims {
+                        expires_at: u64::MAX,
+                        ..Default::default()
+                    };
+                    let token_bytes = $sign_fn(&sk, claims, key_id).unwrap();
+                    let result = $verify_fn(&pk, &token_bytes, 1700000000);
+                    assert!(result.is_ok());
+                }
+
+                #[test]
+                fn test_verify_expired() {
+                    let (sk, pk) = $generate_fn().unwrap();
+                    let key_id = $key_hash_fn(&pk).unwrap();
+                    let claims = Claims {
+                        expires_at: 1000,
+                        ..Default::default()
+                    };
+                    let token_bytes = $sign_fn(&sk, claims, key_id).unwrap();
+                    let result = $verify_fn(&pk, &token_bytes, 2000);
+                    assert!(matches!(result, Err(ProtokenError::TokenExpired { .. })));
+                }
+
+                #[test]
+                fn test_verify_wrong_key() {
+                    let (sk1, pk1) = $generate_fn().unwrap();
+                    let (_sk2, pk2) = $generate_fn().unwrap();
+                    let key_id = $key_hash_fn(&pk1).unwrap();
+                    let claims = Claims {
+                        expires_at: u64::MAX,
+                        ..Default::default()
+                    };
+                    let token_bytes = $sign_fn(&sk1, claims, key_id).unwrap();
+                    let result = $verify_fn(&pk2, &token_bytes, 0);
+                    assert!(result.is_err());
+                }
+
+                #[test]
+                fn test_verify_corrupted_signature() {
+                    let (sk, pk) = $generate_fn().unwrap();
+                    let key_id = $key_hash_fn(&pk).unwrap();
+                    let claims = Claims {
+                        expires_at: u64::MAX,
+                        ..Default::default()
+                    };
+                    let mut token_bytes = $sign_fn(&sk, claims, key_id).unwrap();
+                    let last = token_bytes.len() - 1;
+                    token_bytes[last] ^= 0xFF;
+                    let result = $verify_fn(&pk, &token_bytes, 0);
+                    assert!(result.is_err());
+                }
+
+                #[test]
+                fn test_verify_with_public_key_id() {
+                    let (sk, pk) = $generate_fn().unwrap();
+                    let key_id = KeyIdentifier::PublicKey(pk.clone());
+                    let claims = Claims {
+                        expires_at: u64::MAX,
+                        ..Default::default()
+                    };
+                    let token_bytes = $sign_fn(&sk, claims, key_id).unwrap();
+                    let result = $verify_fn(&pk, &token_bytes, 0);
+                    assert!(result.is_ok());
+                }
+
+                #[test]
+                fn test_verify_not_before() {
+                    let (sk, pk) = $generate_fn().unwrap();
+                    let key_id = $key_hash_fn(&pk).unwrap();
+                    let claims = Claims {
+                        expires_at: u64::MAX,
+                        not_before: 5000,
+                        ..Default::default()
+                    };
+                    let token_bytes = $sign_fn(&sk, claims, key_id).unwrap();
+
+                    let result = $verify_fn(&pk, &token_bytes, 3000);
+                    assert!(matches!(
+                        result,
+                        Err(ProtokenError::TokenNotYetValid { .. })
+                    ));
+
+                    let result = $verify_fn(&pk, &token_bytes, 5000);
+                    assert!(result.is_ok());
+                }
+
+                #[test]
+                fn test_sign_verify_with_full_claims() {
+                    let (sk, pk) = $generate_fn().unwrap();
+                    let key_id = $key_hash_fn(&pk).unwrap();
+                    let claims = Claims {
+                        expires_at: u64::MAX,
+                        not_before: 1000,
+                        issued_at: 1000,
+                        subject: "pq-user".into(),
+                        audience: "pq-service".into(),
+                        scopes: vec!["admin".into(), "read".into(), "write".into()],
+                    };
+
+                    let token_bytes = $sign_fn(&sk, claims.clone(), key_id).unwrap();
+                    let result = $verify_fn(&pk, &token_bytes, 2000);
+                    assert!(result.is_ok());
+                    let verified = result.unwrap();
+                    assert_eq!(verified.claims, claims);
+                    assert_eq!(verified.metadata.algorithm, $algo);
+                }
+            }
+        };
+    }
+
+    mldsa_verify_tests!(
+        mldsa65_verify_tests,
+        generate_mldsa65_key,
+        sign_mldsa65,
+        verify_mldsa65,
+        mldsa65_key_hash,
+        Algorithm::MlDsa65
+    );
+
+    mldsa_verify_tests!(
+        mldsa87_verify_tests,
+        generate_mldsa87_key,
+        sign_mldsa87,
+        verify_mldsa87,
+        mldsa87_key_hash,
+        Algorithm::MlDsa87
+    );
 }

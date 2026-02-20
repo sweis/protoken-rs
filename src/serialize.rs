@@ -215,10 +215,9 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
             KeyIdentifier::KeyHash(hash)
         }
         KeyIdType::PublicKey => {
-            let expected_len = match algorithm {
-                Algorithm::Ed25519 => ED25519_PUBLIC_KEY_LEN,
-                Algorithm::MlDsa44 => MLDSA44_PUBLIC_KEY_LEN,
-                Algorithm::HmacSha256 => {
+            let expected_len = match algorithm.public_key_len() {
+                Some(len) => len,
+                None => {
                     return Err(ProtokenError::InvalidKeyIdType(key_id_type.to_byte()));
                 }
             };

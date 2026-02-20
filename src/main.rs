@@ -13,10 +13,13 @@ use protoken::keys::{
 use protoken::serialize::{deserialize_payload, deserialize_signed_token};
 use protoken::sign::{
     compute_key_hash, generate_ed25519_key, generate_hmac_key, generate_mldsa44_key,
-    mldsa44_key_hash, sign_ed25519, sign_hmac, sign_mldsa44,
+    generate_mldsa65_key, generate_mldsa87_key, mldsa44_key_hash, mldsa65_key_hash,
+    mldsa87_key_hash, sign_ed25519, sign_hmac, sign_mldsa44, sign_mldsa65, sign_mldsa87,
 };
 use protoken::types::{Algorithm, Claims, KeyIdentifier, Payload};
-use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
+use protoken::verify::{
+    verify_ed25519, verify_hmac, verify_mldsa44, verify_mldsa65, verify_mldsa87,
+};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -43,7 +46,7 @@ struct Cli {
 enum Command {
     /// Generate a new signing key (base64-encoded SigningKey proto).
     GenerateKey {
-        /// Algorithm: "hmac", "ed25519" (default), or "ml-dsa-44".
+        /// Algorithm: "hmac", "ed25519" (default), "ml-dsa-44", "ml-dsa-65", or "ml-dsa-87".
         #[arg(short, long, default_value = "ed25519")]
         algorithm: String,
     },
@@ -153,9 +156,25 @@ fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
                 public_key: pk,
             }
         }
+        "ml-dsa-65" => {
+            let (sk_raw, pk) = generate_mldsa65_key()?;
+            ProtoSigningKey {
+                algorithm: Algorithm::MlDsa65,
+                secret_key: sk_raw,
+                public_key: pk,
+            }
+        }
+        "ml-dsa-87" => {
+            let (sk_raw, pk) = generate_mldsa87_key()?;
+            ProtoSigningKey {
+                algorithm: Algorithm::MlDsa87,
+                secret_key: sk_raw,
+                public_key: pk,
+            }
+        }
         _ => {
             return Err(format!(
-                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', or 'ml-dsa-44')"
+                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', 'ml-dsa-44', 'ml-dsa-65', or 'ml-dsa-87')"
             )
             .into())
         }
@@ -220,6 +239,14 @@ fn cmd_sign(
             let key_id = mldsa44_key_hash(&sk.public_key)?;
             sign_mldsa44(&sk.secret_key, claims, key_id)?
         }
+        Algorithm::MlDsa65 => {
+            let key_id = mldsa65_key_hash(&sk.public_key)?;
+            sign_mldsa65(&sk.secret_key, claims, key_id)?
+        }
+        Algorithm::MlDsa87 => {
+            let key_id = mldsa87_key_hash(&sk.public_key)?;
+            sign_mldsa87(&sk.secret_key, claims, key_id)?
+        }
     };
 
     println!("{}", B64.encode(&token_bytes));
@@ -250,6 +277,8 @@ fn cmd_verify(
         match vk.algorithm {
             Algorithm::Ed25519 => verify_ed25519(&vk.public_key, &token_bytes, now)?,
             Algorithm::MlDsa44 => verify_mldsa44(&vk.public_key, &token_bytes, now)?,
+            Algorithm::MlDsa65 => verify_mldsa65(&vk.public_key, &token_bytes, now)?,
+            Algorithm::MlDsa87 => verify_mldsa87(&vk.public_key, &token_bytes, now)?,
             Algorithm::HmacSha256 => unreachable!(),
         }
     } else {
@@ -331,6 +360,8 @@ fn print_payload_colored(payload: &Payload) {
         Algorithm::HmacSha256 => "HMAC-SHA256",
         Algorithm::Ed25519 => "Ed25519",
         Algorithm::MlDsa44 => "ML-DSA-44",
+        Algorithm::MlDsa65 => "ML-DSA-65",
+        Algorithm::MlDsa87 => "ML-DSA-87",
     };
     print_field("Algorithm", &algo_name.green());
 
@@ -394,7 +425,7 @@ fn format_size(bytes: usize) -> String {
 
 // --- I/O helpers ---
 
-/// Maximum key input size (base64-encoded). ML-DSA-44 SigningKey is ~5.2 KB base64.
+/// Maximum key input size (base64-encoded). ML-DSA-87 SigningKey is ~10 KB base64.
 const MAX_KEY_INPUT: u64 = 100_000;
 
 /// Read a key from a file path or "-" for stdin. Decodes base64.
@@ -423,8 +454,8 @@ fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     decode_base64(raw.trim())
 }
 
-/// Maximum token input size (base64-encoded). 16 KB covers even ML-DSA-44 tokens with headroom.
-const MAX_TOKEN_INPUT: u64 = 16_384;
+/// Maximum token input size (base64-encoded). 32 KB covers even ML-DSA-87 tokens with headroom.
+const MAX_TOKEN_INPUT: u64 = 32_768;
 
 /// Read token bytes from an explicit argument or stdin, decoding base64.
 fn read_token_input(token_arg: Option<String>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

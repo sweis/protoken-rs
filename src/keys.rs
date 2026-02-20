@@ -1,13 +1,13 @@
 //! Proto3 key serialization for protoken signing and verifying keys.
 //!
 //! SigningKey proto3 fields:
-//!   uint32 algorithm = 1;   tag 0x08  (1=HMAC-SHA256, 2=Ed25519, 3=ML-DSA-44)
-//!   bytes secret_key = 2;   tag 0x12  (HMAC: raw key; Ed25519: 32B seed; ML-DSA-44: 2560B SK)
-//!   bytes public_key = 3;   tag 0x1A  (Ed25519: 32B; ML-DSA-44: 1312B; empty for HMAC)
+//!   uint32 algorithm = 1;   tag 0x08  (1=HMAC-SHA256, 2=Ed25519, 3..5=ML-DSA-44/65/87)
+//!   bytes secret_key = 2;   tag 0x12  (HMAC: raw key; Ed25519: 32B seed; ML-DSA: 2560/4032/4896B)
+//!   bytes public_key = 3;   tag 0x1A  (Ed25519: 32B; ML-DSA: 1312/1952/2592B; empty for HMAC)
 //!
 //! VerifyingKey proto3 fields:
-//!   uint32 algorithm = 1;   tag 0x08  (2=Ed25519, 3=ML-DSA-44)
-//!   bytes public_key = 2;   tag 0x12  (Ed25519: 32B; ML-DSA-44: 1312B)
+//!   uint32 algorithm = 1;   tag 0x08  (2=Ed25519, 3..5=ML-DSA-44/65/87)
+//!   bytes public_key = 2;   tag 0x12  (Ed25519: 32B; ML-DSA: 1312/1952/2592B)
 
 use crate::error::ProtokenError;
 use crate::proto3;
@@ -83,11 +83,11 @@ pub fn serialize_verifying_key(key: &VerifyingKey) -> Vec<u8> {
 
 // --- Deserialization ---
 
-/// Maximum allowed secret key size (ML-DSA-44 SK = 2560 bytes).
-const MAX_SECRET_KEY_BYTES: usize = 4096;
+/// Maximum allowed secret key size (ML-DSA-87 SK = 4896 bytes).
+const MAX_SECRET_KEY_BYTES: usize = 8192;
 
-/// Maximum allowed public key size (ML-DSA-44 PK = 1312 bytes).
-const MAX_PUBLIC_KEY_BYTES: usize = 2048;
+/// Maximum allowed public key size (ML-DSA-87 PK = 2592 bytes).
+const MAX_PUBLIC_KEY_BYTES: usize = 4096;
 
 /// Deserialize a SigningKey from canonical proto3 bytes.
 pub fn deserialize_signing_key(data: &[u8]) -> Result<SigningKey, ProtokenError> {
@@ -250,18 +250,26 @@ fn validate_signing_key_sizes(
                 )));
             }
         }
-        Algorithm::MlDsa44 => {
-            if secret_key.len() != MLDSA44_SIGNING_KEY_LEN {
+        Algorithm::MlDsa44 | Algorithm::MlDsa65 | Algorithm::MlDsa87 => {
+            let expected_sk = algorithm
+                .signing_key_len()
+                .ok_or_else(|| ProtokenError::MalformedEncoding("unexpected algorithm".into()))?;
+            let expected_pk = algorithm
+                .public_key_len()
+                .ok_or_else(|| ProtokenError::MalformedEncoding("unexpected algorithm".into()))?;
+            if secret_key.len() != expected_sk {
                 return Err(ProtokenError::MalformedEncoding(format!(
-                    "ML-DSA-44 signing key must be {} bytes, got {}",
-                    MLDSA44_SIGNING_KEY_LEN,
+                    "{:?} signing key must be {} bytes, got {}",
+                    algorithm,
+                    expected_sk,
                     secret_key.len()
                 )));
             }
-            if public_key.len() != MLDSA44_PUBLIC_KEY_LEN {
+            if public_key.len() != expected_pk {
                 return Err(ProtokenError::MalformedEncoding(format!(
-                    "ML-DSA-44 public key must be {} bytes, got {}",
-                    MLDSA44_PUBLIC_KEY_LEN,
+                    "{:?} public key must be {} bytes, got {}",
+                    algorithm,
+                    expected_pk,
                     public_key.len()
                 )));
             }
@@ -271,10 +279,9 @@ fn validate_signing_key_sizes(
 }
 
 fn validate_public_key_size(algorithm: Algorithm, public_key: &[u8]) -> Result<(), ProtokenError> {
-    let expected = match algorithm {
-        Algorithm::Ed25519 => ED25519_PUBLIC_KEY_LEN,
-        Algorithm::MlDsa44 => MLDSA44_PUBLIC_KEY_LEN,
-        Algorithm::HmacSha256 => {
+    let expected = match algorithm.public_key_len() {
+        Some(len) => len,
+        None => {
             return Err(ProtokenError::MalformedEncoding(
                 "HMAC-SHA256 has no public key".into(),
             ));
@@ -348,6 +355,52 @@ mod tests {
         let key = VerifyingKey {
             algorithm: Algorithm::MlDsa44,
             public_key: vec![0x04; MLDSA44_PUBLIC_KEY_LEN],
+        };
+        let bytes = serialize_verifying_key(&key);
+        let decoded = deserialize_verifying_key(&bytes).unwrap();
+        assert_eq!(key, decoded);
+    }
+
+    #[test]
+    fn test_signing_key_mldsa65_roundtrip() {
+        let key = SigningKey {
+            algorithm: Algorithm::MlDsa65,
+            secret_key: vec![0x05; MLDSA65_SIGNING_KEY_LEN],
+            public_key: vec![0x06; MLDSA65_PUBLIC_KEY_LEN],
+        };
+        let bytes = serialize_signing_key(&key);
+        let decoded = deserialize_signing_key(&bytes).unwrap();
+        assert_eq!(key, decoded);
+    }
+
+    #[test]
+    fn test_verifying_key_mldsa65_roundtrip() {
+        let key = VerifyingKey {
+            algorithm: Algorithm::MlDsa65,
+            public_key: vec![0x06; MLDSA65_PUBLIC_KEY_LEN],
+        };
+        let bytes = serialize_verifying_key(&key);
+        let decoded = deserialize_verifying_key(&bytes).unwrap();
+        assert_eq!(key, decoded);
+    }
+
+    #[test]
+    fn test_signing_key_mldsa87_roundtrip() {
+        let key = SigningKey {
+            algorithm: Algorithm::MlDsa87,
+            secret_key: vec![0x07; MLDSA87_SIGNING_KEY_LEN],
+            public_key: vec![0x08; MLDSA87_PUBLIC_KEY_LEN],
+        };
+        let bytes = serialize_signing_key(&key);
+        let decoded = deserialize_signing_key(&bytes).unwrap();
+        assert_eq!(key, decoded);
+    }
+
+    #[test]
+    fn test_verifying_key_mldsa87_roundtrip() {
+        let key = VerifyingKey {
+            algorithm: Algorithm::MlDsa87,
+            public_key: vec![0x08; MLDSA87_PUBLIC_KEY_LEN],
         };
         let bytes = serialize_verifying_key(&key);
         let decoded = deserialize_verifying_key(&bytes).unwrap();
