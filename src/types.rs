@@ -127,6 +127,17 @@ pub struct Claims {
 impl Claims {
     /// Validate that all claim fields are within allowed limits.
     pub fn validate(&self) -> Result<(), ProtokenError> {
+        if self.expires_at == 0 {
+            return Err(ProtokenError::MalformedEncoding(
+                "expires_at must be set (non-zero)".into(),
+            ));
+        }
+        if self.not_before != 0 && self.not_before > self.expires_at {
+            return Err(ProtokenError::MalformedEncoding(format!(
+                "not_before ({}) is after expires_at ({})",
+                self.not_before, self.expires_at
+            )));
+        }
         if self.subject.len() > MAX_CLAIM_BYTES_LEN {
             return Err(ProtokenError::MalformedEncoding(format!(
                 "subject too long: {} bytes (max {})",

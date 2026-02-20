@@ -264,6 +264,27 @@ mod tests {
     }
 
     #[test]
+    fn test_sign_rejects_zero_expires_at() {
+        let key: &[u8] = TEST_HMAC_KEY;
+        let claims = Claims {
+            expires_at: 0,
+            ..Default::default()
+        };
+        assert!(sign_hmac(key, claims).is_err());
+    }
+
+    #[test]
+    fn test_sign_rejects_not_before_after_expires_at() {
+        let key: &[u8] = TEST_HMAC_KEY;
+        let claims = Claims {
+            expires_at: 1000,
+            not_before: 2000,
+            ..Default::default()
+        };
+        assert!(sign_hmac(key, claims).is_err());
+    }
+
+    #[test]
     fn test_sign_hmac_with_claims() {
         let key: &[u8] = TEST_HMAC_KEY;
         let claims = Claims {
