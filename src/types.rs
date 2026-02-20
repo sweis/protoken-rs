@@ -148,13 +148,22 @@ impl Claims {
                 MAX_SCOPES
             )));
         }
-        for scope in &self.scopes {
-            if scope.len() > MAX_CLAIM_BYTES_LEN {
-                return Err(ProtokenError::MalformedEncoding(format!(
-                    "scope entry too long: {} bytes (max {})",
-                    scope.len(),
-                    MAX_CLAIM_BYTES_LEN
-                )));
+        {
+            let mut seen = std::collections::HashSet::new();
+            for scope in &self.scopes {
+                if scope.len() > MAX_CLAIM_BYTES_LEN {
+                    return Err(ProtokenError::MalformedEncoding(format!(
+                        "scope entry too long: {} bytes (max {})",
+                        scope.len(),
+                        MAX_CLAIM_BYTES_LEN
+                    )));
+                }
+                if !seen.insert(scope.as_str()) {
+                    return Err(ProtokenError::MalformedEncoding(format!(
+                        "duplicate scope: {:?}",
+                        scope
+                    )));
+                }
             }
         }
         Ok(())

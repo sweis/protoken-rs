@@ -23,6 +23,14 @@ use crate::error::ProtokenError;
 use crate::proto3;
 use crate::types::*;
 
+/// Read a varint that must fit in a u32. Rejects values > u32::MAX.
+fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32, ProtokenError> {
+    let v = proto3::read_varint_value(data, pos)?;
+    u32::try_from(v).map_err(|_| {
+        ProtokenError::MalformedEncoding(format!("varint value {v} exceeds u32::MAX"))
+    })
+}
+
 /// Serialize a Payload into canonical proto3 bytes.
 #[must_use]
 pub fn serialize_payload(payload: &Payload) -> Vec<u8> {
@@ -95,9 +103,9 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
         last_field_number = field_number;
 
         match (field_number, wire_type) {
-            (1, 0) => version = proto3::read_varint_value(data, &mut pos)? as u32,
-            (2, 0) => algorithm = proto3::read_varint_value(data, &mut pos)? as u32,
-            (3, 0) => key_id_type = proto3::read_varint_value(data, &mut pos)? as u32,
+            (1, 0) => version = read_u32(data, &mut pos)?,
+            (2, 0) => algorithm = read_u32(data, &mut pos)?,
+            (3, 0) => key_id_type = read_u32(data, &mut pos)?,
             (4, 2) => key_id = proto3::read_bytes_value(data, &mut pos)?.to_vec(),
             (5, 0) => expires_at = proto3::read_varint_value(data, &mut pos)?,
             (6, 0) => not_before = proto3::read_varint_value(data, &mut pos)?,

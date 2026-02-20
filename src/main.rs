@@ -239,17 +239,25 @@ fn cmd_verify(
         .map_err(|_| "system clock is set before Unix epoch (1970-01-01)")?
         .as_secs();
 
-    // Try each key type; the verify functions validate the algorithm internally.
-    // Try as signing key (HMAC) first, then as verifying key (Ed25519/ML-DSA-44).
-    let verified = if let Ok(sk) = deserialize_signing_key(&key_bytes) {
-        verify_hmac(&sk.secret_key, &token_bytes, now)?
-    } else {
-        let vk = deserialize_verifying_key(&key_bytes)?;
+    // Determine key type by algorithm. HMAC uses a SigningKey; asymmetric uses a VerifyingKey.
+    // Both key types encode algorithm as field 1, so try VerifyingKey first (2 fields)
+    // and fall back to SigningKey (3 fields, needed for HMAC).
+    let verified = if let Ok(vk) = deserialize_verifying_key(&key_bytes) {
         match vk.algorithm {
             Algorithm::Ed25519 => verify_ed25519(&vk.public_key, &token_bytes, now)?,
             Algorithm::MlDsa44 => verify_mldsa44(&vk.public_key, &token_bytes, now)?,
             Algorithm::HmacSha256 => unreachable!(),
         }
+    } else {
+        let sk = deserialize_signing_key(&key_bytes)?;
+        if sk.algorithm != Algorithm::HmacSha256 {
+            return Err(format!(
+                "expected an HMAC signing key or a verifying key, got {:?} signing key",
+                sk.algorithm
+            )
+            .into());
+        }
+        verify_hmac(&sk.secret_key, &token_bytes, now)?
     };
 
     if json {
@@ -369,17 +377,24 @@ fn format_size(bytes: usize) -> String {
 
 // --- I/O helpers ---
 
+/// Maximum key input size (base64-encoded). ML-DSA-44 SigningKey is ~5.2 KB base64.
+const MAX_KEY_INPUT: u64 = 100_000;
+
 /// Read a key from a file path or "-" for stdin. Decodes base64.
 fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let raw = if path == "-" {
         let mut buf = String::new();
-        io::stdin().read_to_string(&mut buf)?;
+        io::stdin().take(MAX_KEY_INPUT + 1).read_to_string(&mut buf)?;
+        if buf.len() as u64 > MAX_KEY_INPUT {
+            return Err(format!("key input too large (max {} bytes)", MAX_KEY_INPUT).into());
+        }
         buf
     } else {
         let metadata = std::fs::metadata(path)?;
-        if metadata.len() > 100_000 {
+        if metadata.len() > MAX_KEY_INPUT {
             return Err(
-                format!("key file too large: {} bytes (max 100,000)", metadata.len()).into(),
+                format!("key file too large: {} bytes (max {})", metadata.len(), MAX_KEY_INPUT)
+                    .into(),
             );
         }
         std::fs::read_to_string(path)?
