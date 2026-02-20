@@ -58,10 +58,10 @@ pub fn sign_ed25519(
     key_id: KeyIdentifier,
 ) -> Result<Vec<u8>, ProtokenError> {
     claims.validate()?;
-    let seed_array: [u8; ED25519_PUBLIC_KEY_LEN] = seed.try_into().map_err(|_| {
+    let seed_array: [u8; ED25519_SEED_LEN] = seed.try_into().map_err(|_| {
         ProtokenError::SigningFailed(format!(
             "invalid Ed25519 seed: expected {} bytes, got {}",
-            ED25519_PUBLIC_KEY_LEN,
+            ED25519_SEED_LEN,
             seed.len()
         ))
     })?;

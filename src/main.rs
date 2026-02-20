@@ -239,27 +239,26 @@ fn cmd_verify(
         .map_err(|_| "system clock is set before Unix epoch (1970-01-01)")?
         .as_secs();
 
-    let token = deserialize_signed_token(&token_bytes)?;
-    let payload = deserialize_payload(&token.payload_bytes)?;
-
-    let verified = match payload.metadata.algorithm {
-        Algorithm::HmacSha256 => {
-            let sk = deserialize_signing_key(&key_bytes)?;
-            verify_hmac(&sk.secret_key, &token_bytes, now)?
-        }
-        Algorithm::Ed25519 => {
-            let vk = deserialize_verifying_key(&key_bytes)?;
-            verify_ed25519(&vk.public_key, &token_bytes, now)?
-        }
-        Algorithm::MlDsa44 => {
-            let vk = deserialize_verifying_key(&key_bytes)?;
-            verify_mldsa44(&vk.public_key, &token_bytes, now)?
+    // Try each key type; the verify functions validate the algorithm internally.
+    // Try as signing key (HMAC) first, then as verifying key (Ed25519/ML-DSA-44).
+    let verified = if let Ok(sk) = deserialize_signing_key(&key_bytes) {
+        verify_hmac(&sk.secret_key, &token_bytes, now)?
+    } else {
+        let vk = deserialize_verifying_key(&key_bytes)?;
+        match vk.algorithm {
+            Algorithm::Ed25519 => verify_ed25519(&vk.public_key, &token_bytes, now)?,
+            Algorithm::MlDsa44 => verify_mldsa44(&vk.public_key, &token_bytes, now)?,
+            Algorithm::HmacSha256 => unreachable!(),
         }
     };
 
     if json {
         println!("{}", serde_json::to_string_pretty(&verified)?);
     } else {
+        let payload = Payload {
+            metadata: verified.metadata.clone(),
+            claims: verified.claims.clone(),
+        };
         println!("{}", "OK".green().bold());
         print_payload_colored(&payload);
     }
@@ -354,8 +353,10 @@ fn print_payload_colored(payload: &Payload) {
 }
 
 fn format_timestamp(unix_secs: u64) -> String {
-    let d = UNIX_EPOCH + std::time::Duration::from_secs(unix_secs);
-    humantime::format_rfc3339_seconds(d).to_string()
+    match UNIX_EPOCH.checked_add(std::time::Duration::from_secs(unix_secs)) {
+        Some(d) => humantime::format_rfc3339_seconds(d).to_string(),
+        None => format!("{unix_secs} (epoch seconds)"),
+    }
 }
 
 fn format_size(bytes: usize) -> String {
@@ -386,13 +387,23 @@ fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     decode_base64(raw.trim())
 }
 
+/// Maximum token input size (base64-encoded). 16 KB covers even ML-DSA-44 tokens with headroom.
+const MAX_TOKEN_INPUT: u64 = 16_384;
+
 /// Read token bytes from an explicit argument or stdin, decoding base64.
 fn read_token_input(token_arg: Option<String>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let input = match token_arg {
         Some(s) => s,
         None => {
             let mut buf = String::new();
-            io::stdin().read_to_string(&mut buf)?;
+            io::stdin().take(MAX_TOKEN_INPUT + 1).read_to_string(&mut buf)?;
+            if buf.len() as u64 > MAX_TOKEN_INPUT {
+                return Err(format!(
+                    "token input too large (max {} bytes)",
+                    MAX_TOKEN_INPUT
+                )
+                .into());
+            }
             buf
         }
     };

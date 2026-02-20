@@ -190,6 +190,7 @@ pub const MAX_PAYLOAD_BYTES: usize = 4096;
 pub const MAX_SIGNATURE_BYTES: usize = 2560;
 
 pub const KEY_HASH_LEN: usize = 8;
+pub const ED25519_SEED_LEN: usize = 32;
 pub const ED25519_PUBLIC_KEY_LEN: usize = 32;
 pub const HMAC_SHA256_SIG_LEN: usize = 32;
 pub const ED25519_SIG_LEN: usize = 64;

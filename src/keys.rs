@@ -209,10 +209,10 @@ fn validate_signing_key_sizes(
             }
         }
         Algorithm::Ed25519 => {
-            if secret_key.len() != ED25519_PUBLIC_KEY_LEN {
+            if secret_key.len() != ED25519_SEED_LEN {
                 return Err(ProtokenError::MalformedEncoding(format!(
                     "Ed25519 seed must be {} bytes, got {}",
-                    ED25519_PUBLIC_KEY_LEN,
+                    ED25519_SEED_LEN,
                     secret_key.len()
                 )));
             }
