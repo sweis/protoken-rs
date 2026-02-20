@@ -24,6 +24,13 @@ pub fn compute_key_hash(key_material: &[u8]) -> [u8; KEY_HASH_LEN] {
 ///
 /// For HMAC-SHA256, use at least 32 bytes of cryptographically random key material.
 pub fn sign_hmac(key: &[u8], claims: Claims) -> Result<Vec<u8>, ProtokenError> {
+    if key.len() < HMAC_MIN_KEY_LEN {
+        return Err(ProtokenError::SigningFailed(format!(
+            "HMAC key too short: {} bytes (minimum {})",
+            key.len(),
+            HMAC_MIN_KEY_LEN
+        )));
+    }
     claims.validate()?;
     let key_hash = compute_key_hash(key);
     let payload = Payload {
@@ -172,9 +179,11 @@ mod tests {
     use super::*;
     use crate::serialize::{deserialize_payload, deserialize_signed_token};
 
+    const TEST_HMAC_KEY: &[u8; 32] = &[0xAB; 32];
+
     #[test]
     fn test_sign_hmac_produces_valid_token() {
-        let key = b"test-secret-key-for-hmac";
+        let key: &[u8] = TEST_HMAC_KEY;
         let claims = Claims {
             expires_at: 1700000000,
             ..Default::default()
@@ -245,8 +254,18 @@ mod tests {
     }
 
     #[test]
+    fn test_sign_hmac_rejects_short_key() {
+        let short_key = b"too-short";
+        let claims = Claims {
+            expires_at: 1700000000,
+            ..Default::default()
+        };
+        assert!(sign_hmac(short_key, claims).is_err());
+    }
+
+    #[test]
     fn test_sign_hmac_with_claims() {
-        let key = b"test-secret-key-for-hmac";
+        let key: &[u8] = TEST_HMAC_KEY;
         let claims = Claims {
             expires_at: 1700000000,
             not_before: 1699990000,

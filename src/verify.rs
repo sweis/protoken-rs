@@ -235,9 +235,12 @@ mod tests {
         sign_mldsa44,
     };
 
+    const TEST_HMAC_KEY: &[u8; 32] = &[0xAB; 32];
+    const WRONG_HMAC_KEY: &[u8; 32] = &[0xCD; 32];
+
     #[test]
     fn test_verify_hmac_valid() {
-        let key = b"test-hmac-key-123";
+        let key: &[u8] = TEST_HMAC_KEY;
         let claims = Claims {
             expires_at: u64::MAX,
             ..Default::default()
@@ -252,8 +255,8 @@ mod tests {
 
     #[test]
     fn test_verify_hmac_wrong_key() {
-        let key = b"correct-key";
-        let wrong_key = b"wrong-key";
+        let key: &[u8] = TEST_HMAC_KEY;
+        let wrong_key: &[u8] = WRONG_HMAC_KEY;
         let claims = Claims {
             expires_at: u64::MAX,
             ..Default::default()
@@ -266,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_verify_hmac_expired() {
-        let key = b"test-key";
+        let key: &[u8] = TEST_HMAC_KEY;
         let claims = Claims {
             expires_at: 1000,
             ..Default::default()
@@ -279,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_verify_hmac_corrupted_payload() {
-        let key = b"test-key";
+        let key: &[u8] = TEST_HMAC_KEY;
         let claims = Claims {
             expires_at: u64::MAX,
             ..Default::default()
@@ -294,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_verify_hmac_corrupted_signature() {
-        let key = b"test-key";
+        let key: &[u8] = TEST_HMAC_KEY;
         let claims = Claims {
             expires_at: u64::MAX,
             ..Default::default()
@@ -353,7 +356,7 @@ mod tests {
 
     #[test]
     fn test_hmac_corrupt_every_byte_with_scopes() {
-        let key = b"scope-corruption-key";
+        let key: &[u8] = TEST_HMAC_KEY;
         let claims = Claims {
             expires_at: u64::MAX,
             scopes: vec!["admin".into(), "read".into(), "write".into()],
@@ -376,7 +379,7 @@ mod tests {
 
     #[test]
     fn test_hmac_corrupt_every_byte() {
-        let key = b"corruption-test-key";
+        let key: &[u8] = TEST_HMAC_KEY;
         let claims = Claims {
             expires_at: u64::MAX,
             not_before: 1000,
@@ -425,7 +428,7 @@ mod tests {
 
     #[test]
     fn test_verify_not_before() {
-        let key = b"test-nbf-key";
+        let key: &[u8] = TEST_HMAC_KEY;
         let claims = Claims {
             expires_at: u64::MAX,
             not_before: 5000,

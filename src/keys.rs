@@ -13,12 +13,18 @@ use crate::error::ProtokenError;
 use crate::proto3;
 use crate::types::*;
 
+/// Convert a u32 to u8, rejecting values > 255 to prevent truncation.
+fn to_u8(v: u32, field_name: &str) -> Result<u8, ProtokenError> {
+    u8::try_from(v).map_err(|_| {
+        ProtokenError::MalformedEncoding(format!("{field_name} value {v} exceeds u8 range"))
+    })
+}
+
 /// Read a varint that must fit in a u32. Rejects values > u32::MAX.
 fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32, ProtokenError> {
     let v = proto3::read_varint_value(data, pos)?;
-    u32::try_from(v).map_err(|_| {
-        ProtokenError::MalformedEncoding(format!("varint value {v} exceeds u32::MAX"))
-    })
+    u32::try_from(v)
+        .map_err(|_| ProtokenError::MalformedEncoding(format!("varint value {v} exceeds u32::MAX")))
 }
 
 /// A serialized signing key (symmetric or asymmetric).
@@ -129,12 +135,17 @@ pub fn deserialize_signing_key(data: &[u8]) -> Result<SigningKey, ProtokenError>
                 }
                 public_key = bytes.to_vec();
             }
-            (_, _) => proto3::skip_field(wire_type, data, &mut pos)?,
+            (_, _) => {
+                return Err(ProtokenError::MalformedEncoding(format!(
+                    "unexpected field {field_number} (wire type {wire_type}) in SigningKey"
+                )));
+            }
         }
     }
 
-    let algorithm = Algorithm::from_byte(algorithm as u8)
-        .ok_or(ProtokenError::InvalidAlgorithm(algorithm as u8))?;
+    let algo_byte = to_u8(algorithm, "algorithm")?;
+    let algorithm =
+        Algorithm::from_byte(algo_byte).ok_or(ProtokenError::InvalidAlgorithm(algo_byte))?;
 
     // Validate key sizes
     validate_signing_key_sizes(algorithm, &secret_key, &public_key)?;
@@ -182,12 +193,17 @@ pub fn deserialize_verifying_key(data: &[u8]) -> Result<VerifyingKey, ProtokenEr
                 }
                 public_key = bytes.to_vec();
             }
-            (_, _) => proto3::skip_field(wire_type, data, &mut pos)?,
+            (_, _) => {
+                return Err(ProtokenError::MalformedEncoding(format!(
+                    "unexpected field {field_number} (wire type {wire_type}) in VerifyingKey"
+                )));
+            }
         }
     }
 
-    let algorithm = Algorithm::from_byte(algorithm as u8)
-        .ok_or(ProtokenError::InvalidAlgorithm(algorithm as u8))?;
+    let algo_byte = to_u8(algorithm, "algorithm")?;
+    let algorithm =
+        Algorithm::from_byte(algo_byte).ok_or(ProtokenError::InvalidAlgorithm(algo_byte))?;
 
     // Validate
     if algorithm == Algorithm::HmacSha256 {
@@ -210,10 +226,12 @@ fn validate_signing_key_sizes(
 ) -> Result<(), ProtokenError> {
     match algorithm {
         Algorithm::HmacSha256 => {
-            if secret_key.is_empty() {
-                return Err(ProtokenError::MalformedEncoding(
-                    "HMAC signing key has empty secret_key".into(),
-                ));
+            if secret_key.len() < HMAC_MIN_KEY_LEN {
+                return Err(ProtokenError::MalformedEncoding(format!(
+                    "HMAC key too short: {} bytes (minimum {})",
+                    secret_key.len(),
+                    HMAC_MIN_KEY_LEN
+                )));
             }
         }
         Algorithm::Ed25519 => {
