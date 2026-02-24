@@ -1,8 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Generates test vectors for protoken wire format regression testing.
-//! Run with: cargo run --bin gen_test_vectors
+//! Run with: cargo run --example gen_test_vectors
 
 use base64::Engine;
+use zeroize::Zeroizing;
 
 use protoken::keys::{serialize_signing_key, SigningKey};
 use protoken::serialize::serialize_payload;
@@ -186,7 +187,7 @@ fn main() {
 
     let hmac_sk = SigningKey {
         algorithm: Algorithm::HmacSha256,
-        secret_key: hmac_key.to_vec(),
+        secret_key: Zeroizing::new(hmac_key.to_vec()),
         public_key: Vec::new(),
     };
 
@@ -217,7 +218,7 @@ fn main() {
 
     let ed25519_sk = SigningKey {
         algorithm: Algorithm::Ed25519,
-        secret_key: seed.clone(),
+        secret_key: Zeroizing::new(seed.clone()),
         public_key: public_key.clone(),
     };
 

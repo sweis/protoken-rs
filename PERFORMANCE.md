@@ -26,7 +26,7 @@ Benchmarks for protoken sign and verify operations across all three algorithms.
 - **CPU**: Intel (Granite Rapids family, model 207), 16 cores
 - **OS**: Linux x86_64
 - **Rust**: edition 2021, optimized release build
-- **Tooling**: [Criterion.rs](https://github.com/bheisler/criterion.rs) 0.5
+- **Tooling**: [Criterion.rs](https://github.com/bheisler/criterion.rs) 0.8
 
 ## Running Benchmarks
 

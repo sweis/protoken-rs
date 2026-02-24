@@ -1,8 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Generates long-lived reference keys and tokens for regression testing.
-//! Tokens expire in 2036. Run with: cargo run --bin gen_reference_vectors
+//! Tokens expire in 2036. Run with: cargo run --example gen_reference_vectors
 
 use base64::Engine;
+use zeroize::Zeroizing;
 
 use protoken::keys::{
     extract_verifying_key, serialize_signing_key, serialize_verifying_key, SigningKey,
@@ -40,7 +41,7 @@ fn main() {
     let hmac_token = sign_hmac(&hmac_key, claims.clone()).unwrap();
     let hmac_sk = SigningKey {
         algorithm: Algorithm::HmacSha256,
-        secret_key: hmac_key.clone(),
+        secret_key: Zeroizing::new(hmac_key.clone()),
         public_key: Vec::new(),
     };
     vectors.push(serde_json::json!({
@@ -74,7 +75,7 @@ fn main() {
     .unwrap();
     let ed25519_sk = SigningKey {
         algorithm: Algorithm::Ed25519,
-        secret_key: ed25519_seed,
+        secret_key: Zeroizing::new(ed25519_seed),
         public_key: ed25519_pk.clone(),
     };
     let ed25519_vk = extract_verifying_key(&ed25519_sk).unwrap();
@@ -103,7 +104,7 @@ fn main() {
     let mldsa_token = sign_mldsa44(&mldsa_sk_bytes, claims, mldsa_key_hash).unwrap();
     let mldsa_sk = SigningKey {
         algorithm: Algorithm::MlDsa44,
-        secret_key: mldsa_sk_bytes,
+        secret_key: Zeroizing::new(mldsa_sk_bytes),
         public_key: mldsa_pk_bytes.clone(),
     };
     let mldsa_vk = extract_verifying_key(&mldsa_sk).unwrap();

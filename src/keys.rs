@@ -9,29 +9,19 @@
 //!   uint32 algorithm = 1;   tag 0x08  (2=Ed25519, 3=ML-DSA-44)
 //!   bytes public_key = 2;   tag 0x12  (Ed25519: 32B; ML-DSA-44: 1312B)
 
+use zeroize::Zeroizing;
+
 use crate::error::ProtokenError;
 use crate::proto3;
 use crate::types::*;
 
-/// Convert a u32 to u8, rejecting values > 255 to prevent truncation.
-fn to_u8(v: u32, field_name: &str) -> Result<u8, ProtokenError> {
-    u8::try_from(v).map_err(|_| {
-        ProtokenError::MalformedEncoding(format!("{field_name} value {v} exceeds u8 range"))
-    })
-}
-
-/// Read a varint that must fit in a u32. Rejects values > u32::MAX.
-fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32, ProtokenError> {
-    let v = proto3::read_varint_value(data, pos)?;
-    u32::try_from(v)
-        .map_err(|_| ProtokenError::MalformedEncoding(format!("varint value {v} exceeds u32::MAX")))
-}
-
 /// A serialized signing key (symmetric or asymmetric).
+/// The `secret_key` field is wrapped in `Zeroizing` so it is automatically
+/// zeroed from memory when dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigningKey {
     pub algorithm: Algorithm,
-    pub secret_key: Vec<u8>,
+    pub secret_key: Zeroizing<Vec<u8>>,
     pub public_key: Vec<u8>,
 }
 
@@ -112,7 +102,7 @@ pub fn deserialize_signing_key(data: &[u8]) -> Result<SigningKey, ProtokenError>
         last_field_number = field_number;
 
         match (field_number, wire_type) {
-            (1, 0) => algorithm = read_u32(data, &mut pos)?,
+            (1, 0) => algorithm = proto3::read_u32(data, &mut pos)?,
             (2, 2) => {
                 let bytes = proto3::read_bytes_value(data, &mut pos)?;
                 if bytes.len() > MAX_SECRET_KEY_BYTES {
@@ -143,7 +133,7 @@ pub fn deserialize_signing_key(data: &[u8]) -> Result<SigningKey, ProtokenError>
         }
     }
 
-    let algo_byte = to_u8(algorithm, "algorithm")?;
+    let algo_byte = proto3::to_u8(algorithm, "algorithm")?;
     let algorithm =
         Algorithm::from_byte(algo_byte).ok_or(ProtokenError::InvalidAlgorithm(algo_byte))?;
 
@@ -152,7 +142,7 @@ pub fn deserialize_signing_key(data: &[u8]) -> Result<SigningKey, ProtokenError>
 
     Ok(SigningKey {
         algorithm,
-        secret_key,
+        secret_key: Zeroizing::new(secret_key),
         public_key,
     })
 }
@@ -181,7 +171,7 @@ pub fn deserialize_verifying_key(data: &[u8]) -> Result<VerifyingKey, ProtokenEr
         last_field_number = field_number;
 
         match (field_number, wire_type) {
-            (1, 0) => algorithm = read_u32(data, &mut pos)?,
+            (1, 0) => algorithm = proto3::read_u32(data, &mut pos)?,
             (2, 2) => {
                 let bytes = proto3::read_bytes_value(data, &mut pos)?;
                 if bytes.len() > MAX_PUBLIC_KEY_BYTES {
@@ -201,7 +191,7 @@ pub fn deserialize_verifying_key(data: &[u8]) -> Result<VerifyingKey, ProtokenEr
         }
     }
 
-    let algo_byte = to_u8(algorithm, "algorithm")?;
+    let algo_byte = proto3::to_u8(algorithm, "algorithm")?;
     let algorithm =
         Algorithm::from_byte(algo_byte).ok_or(ProtokenError::InvalidAlgorithm(algo_byte))?;
 
@@ -300,7 +290,7 @@ mod tests {
     fn test_signing_key_hmac_roundtrip() {
         let key = SigningKey {
             algorithm: Algorithm::HmacSha256,
-            secret_key: vec![0xAB; 32],
+            secret_key: Zeroizing::new(vec![0xAB; 32]),
             public_key: Vec::new(),
         };
         let bytes = serialize_signing_key(&key);
@@ -312,7 +302,7 @@ mod tests {
     fn test_signing_key_ed25519_roundtrip() {
         let key = SigningKey {
             algorithm: Algorithm::Ed25519,
-            secret_key: vec![0x01; 32],
+            secret_key: Zeroizing::new(vec![0x01; 32]),
             public_key: vec![0x02; 32],
         };
         let bytes = serialize_signing_key(&key);
@@ -324,7 +314,7 @@ mod tests {
     fn test_signing_key_mldsa44_roundtrip() {
         let key = SigningKey {
             algorithm: Algorithm::MlDsa44,
-            secret_key: vec![0x03; MLDSA44_SIGNING_KEY_LEN],
+            secret_key: Zeroizing::new(vec![0x03; MLDSA44_SIGNING_KEY_LEN]),
             public_key: vec![0x04; MLDSA44_PUBLIC_KEY_LEN],
         };
         let bytes = serialize_signing_key(&key);
@@ -358,7 +348,7 @@ mod tests {
     fn test_extract_verifying_key() {
         let sk = SigningKey {
             algorithm: Algorithm::Ed25519,
-            secret_key: vec![0x01; 32],
+            secret_key: Zeroizing::new(vec![0x01; 32]),
             public_key: vec![0x02; 32],
         };
         let vk = extract_verifying_key(&sk).unwrap();
@@ -370,7 +360,7 @@ mod tests {
     fn test_extract_verifying_key_hmac_fails() {
         let sk = SigningKey {
             algorithm: Algorithm::HmacSha256,
-            secret_key: vec![0xAB; 32],
+            secret_key: Zeroizing::new(vec![0xAB; 32]),
             public_key: Vec::new(),
         };
         assert!(extract_verifying_key(&sk).is_err());
@@ -380,7 +370,7 @@ mod tests {
     fn test_signing_key_deterministic() {
         let key = SigningKey {
             algorithm: Algorithm::Ed25519,
-            secret_key: vec![0x01; 32],
+            secret_key: Zeroizing::new(vec![0x01; 32]),
             public_key: vec![0x02; 32],
         };
         let b1 = serialize_signing_key(&key);

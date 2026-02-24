@@ -10,6 +10,22 @@
 
 use crate::error::ProtokenError;
 
+// --- Shared helpers ---
+
+/// Convert a u32 to u8, rejecting values > 255 to prevent truncation.
+pub fn to_u8(v: u32, field_name: &str) -> Result<u8, ProtokenError> {
+    u8::try_from(v).map_err(|_| {
+        ProtokenError::MalformedEncoding(format!("{field_name} value {v} exceeds u8 range"))
+    })
+}
+
+/// Read a varint that must fit in a u32. Rejects values > u32::MAX.
+pub fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32, ProtokenError> {
+    let v = read_varint_value(data, pos)?;
+    u32::try_from(v)
+        .map_err(|_| ProtokenError::MalformedEncoding(format!("varint value {v} exceeds u32::MAX")))
+}
+
 // Wire types
 const WIRE_VARINT: u32 = 0;
 const WIRE_LEN: u32 = 2;

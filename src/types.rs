@@ -80,6 +80,7 @@ impl KeyIdType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum KeyIdentifier {
     /// 8-byte truncated SHA-256 hash of the key material.
+    /// Used for key selection, not as a security binding (~2^32 collision resistance).
     KeyHash([u8; 8]),
     /// Raw public key bytes (Ed25519: 32 B, ML-DSA-44: 1312 B).
     PublicKey(Vec<u8>),
@@ -159,20 +160,26 @@ impl Claims {
                 MAX_SCOPES
             )));
         }
+        for scope in &self.scopes {
+            if scope.len() > MAX_CLAIM_BYTES_LEN {
+                return Err(ProtokenError::MalformedEncoding(format!(
+                    "scope entry too long: {} bytes (max {})",
+                    scope.len(),
+                    MAX_CLAIM_BYTES_LEN
+                )));
+            }
+        }
+        // Check for duplicates via sorted adjacent comparison (avoids HashSet allocation).
+        // Scopes are sorted during serialization, but validate() runs before that.
         {
-            let mut seen = std::collections::HashSet::new();
-            for scope in &self.scopes {
-                if scope.len() > MAX_CLAIM_BYTES_LEN {
-                    return Err(ProtokenError::MalformedEncoding(format!(
-                        "scope entry too long: {} bytes (max {})",
-                        scope.len(),
-                        MAX_CLAIM_BYTES_LEN
-                    )));
-                }
-                if !seen.insert(scope.as_str()) {
+            let mut sorted: Vec<&str> = self.scopes.iter().map(|s| s.as_str()).collect();
+            sorted.sort();
+            for pair in sorted.windows(2) {
+                #[allow(clippy::indexing_slicing)] // windows(2) guarantees exactly 2 elements
+                if pair[0] == pair[1] {
                     return Err(ProtokenError::MalformedEncoding(format!(
                         "duplicate scope: {:?}",
-                        scope
+                        pair[0]
                     )));
                 }
             }

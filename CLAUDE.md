@@ -1,11 +1,11 @@
 # protoken-rs: Protobuf based Tokens in Rust
 
-Protokens are designed to be a simple, fast replacemenmt for JWTs, ad hoc tokens, or in some cases x509 certificates.
+Protokens are designed to be a simple, fast replacement for JWTs, ad hoc tokens, or in some cases x509 certificates.
 
 ## Notes for Claude
 * Use this file, CLAUDE.md, to record decisions or lessons along the way. Create new .md files if necessary to record research findings. Take good notes and include links to references, but do not be overly wordy.
-* Try to be concicse and clear in all documentation and comments.
-* Use care chosing dependencies and try to use the most widely used, common tools for the job. Do not reinvent new code if it is not necessary.
+* Try to be concise and clear in all documentation and comments.
+* Use care choosing dependencies and try to use the most widely used, common tools for the job. Do not reinvent new code if it is not necessary.
 * Since this is security-focused software, be especially cognizant and aware of security decisions. This software will consume untrusted input and needs to be designed to be able to handle any malformed or malicious input given to it.
 
 ## Design Guidelines
@@ -91,6 +91,7 @@ Migrated from `ring` to RustCrypto ecosystem to unify with `ml-dsa` crate:
 - `hmac` + `sha2` for HMAC-SHA256 and SHA-256 key hashing
 - `ml-dsa` for ML-DSA-44 (post-quantum), chosen over `fips204` crate (~1,100 dependents vs ~1)
 - `rand` for key generation
+- `zeroize` for secret key memory wiping
 - `clap` (derive) for CLI, `serde`/`serde_json` for JSON, `humantime`, `base64`, `thiserror`
 
 ### Key Serialization: Proto3 (decided 2026-02-19)
@@ -98,6 +99,15 @@ All key types use canonical proto3 encoding (same as token format). Ed25519 uses
 seeds (not PKCS#8 DER). SigningKey includes the public key for asymmetric algorithms so
 `extract_verifying_key()` can derive the VerifyingKey without re-deriving from secret material.
 CLI stores keys as base64-encoded proto bytes. See `src/keys.rs`.
+
+### Secret Key Zeroization (added 2026-02-24)
+`SigningKey.secret_key` uses `Zeroizing<Vec<u8>>` (from the `zeroize` crate, already a transitive
+dependency) so secret key material is automatically zeroed from memory when dropped.
+
+### Key Hash Collision Resistance (documented 2026-02-24)
+The 8-byte key hash (SHA-256[0..8]) gives ~2^32 collision resistance at the birthday bound.
+It is a key *identifier* for key selection, not a security binding. Security relies on full
+signature verification. This is documented in the code and README.
 
 ## Implementation Status
 

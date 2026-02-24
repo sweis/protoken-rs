@@ -10,3 +10,6 @@ pub mod serialize;
 pub mod sign;
 pub mod types;
 pub mod verify;
+
+// Re-export Zeroizing so callers can construct SigningKey without depending on zeroize directly.
+pub use zeroize::Zeroizing;

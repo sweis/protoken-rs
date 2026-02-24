@@ -10,6 +10,10 @@ use crate::serialize::{serialize_payload, serialize_signed_token};
 use crate::types::*;
 
 /// Compute the 8-byte key hash: SHA-256(key_material)[0..8].
+///
+/// This is a key *identifier*, not a security binding. The 8-byte truncation
+/// gives ~2^32 collision resistance at the birthday bound. Security relies on
+/// full signature verification, not on the key hash being unique.
 #[must_use]
 #[allow(clippy::indexing_slicing)] // SHA-256 always produces 32 bytes >= KEY_HASH_LEN
 pub fn compute_key_hash(key_material: &[u8]) -> [u8; KEY_HASH_LEN] {

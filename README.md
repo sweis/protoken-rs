@@ -1,10 +1,12 @@
 # protoken-rs
 
-Minimal signed tokens using canonical proto3 wire encoding. Supports three signature algorithms:
+Compact, signed binary tokens using canonical proto3 wire encoding. An HMAC-SHA256 protoken is ~56 bytes versus ~300-400 bytes for a typical JWT. The format avoids algorithm confusion attacks by design: the algorithm is fixed per key, not per token.
 
-- **HMAC-SHA256** — symmetric, 56-byte tokens
-- **Ed25519** — asymmetric, 88-byte tokens
-- **ML-DSA-44** — post-quantum (FIPS 204), ~2,500-byte tokens
+Supports three signature algorithms:
+
+- **HMAC-SHA256** -- symmetric, ~56-byte tokens
+- **Ed25519** -- asymmetric, ~88-byte tokens
+- **ML-DSA-44** -- post-quantum (FIPS 204), ~2,500-byte tokens
 
 ## Build
 
@@ -18,6 +20,64 @@ cargo build --release
 cargo install --path .
 ```
 
+## Quick start
+
+```sh
+# Generate an Ed25519 signing key
+protoken generate-key > my.key
+
+# Extract the public (verifying) key
+protoken get-verifying-key my.key > my.pub
+
+# Sign a token valid for 1 hour with claims
+protoken sign my.key 1h \
+  --subject "user:alice" \
+  --audience "api.example.com" \
+  --scope read --scope write > token.txt
+
+# Verify the token
+protoken verify my.pub < token.txt
+```
+
+Example output from `verify`:
+
+```
+OK
+     Algorithm  Ed25519
+        Key ID  nsaAwNyxZac (key_hash)
+       Expires  2026-02-24T23:21:39Z
+    Not Before  2026-02-24T22:21:39Z
+     Issued At  2026-02-24T22:21:39Z
+       Subject  user:alice
+      Audience  api.example.com
+        Scopes  read, write
+```
+
+Example output from `inspect --json` (no key needed):
+
+```json
+{
+  "type": "SignedToken",
+  "payload": {
+    "metadata": {
+      "version": "V0",
+      "algorithm": "Ed25519",
+      "key_identifier": { "KeyHash": [158, 198, 128, 192, 220, 177, 101, 167] }
+    },
+    "claims": {
+      "expires_at": 1771975299,
+      "not_before": 1771971699,
+      "issued_at": 1771971699,
+      "subject": "user:alice",
+      "audience": "api.example.com",
+      "scopes": ["read", "write"]
+    }
+  },
+  "signature_base64": "HGsm4IgMB8uDg...",
+  "total_bytes": 142
+}
+```
+
 ## Usage
 
 All keys and tokens are base64-encoded canonical proto3 messages. Use `-` as the keyfile to read from stdin.
@@ -25,7 +85,7 @@ All keys and tokens are base64-encoded canonical proto3 messages. Use `-` as the
 ### Generate a key and sign a token
 
 ```sh
-# Generate an Ed25519 signing key
+# Generate an Ed25519 signing key (default algorithm)
 protoken generate-key > my.key
 
 # Sign a token valid for 1 hour
@@ -51,7 +111,7 @@ protoken verify my.pub <token>
 ### Other algorithms
 
 ```sh
-# HMAC-SHA256 (symmetric — use signing key to verify)
+# HMAC-SHA256 (symmetric -- use signing key to verify)
 protoken generate-key -a hmac > hmac.key
 protoken sign hmac.key 4d | protoken verify hmac.key
 
@@ -72,6 +132,7 @@ protoken sign my.key 4d --subject "user:alice" --audience "api" --scope read --s
 ```sh
 protoken inspect <token>
 echo "<token>" | protoken inspect
+echo "<token>" | protoken inspect --json   # machine-readable JSON
 ```
 
 ### Verify stdin rules
@@ -82,7 +143,14 @@ echo "<token>" | protoken inspect
 protoken verify - <token> < my.pub
 ```
 
-## Wire Format
+## Security considerations
+
+- **Key hash is an identifier, not a security binding.** The 8-byte truncated SHA-256 key hash (~2^32 collision resistance at birthday bound) is used for key selection. Security relies on full signature verification.
+- **Secret keys are zeroized on drop** using the `zeroize` crate, preventing key material from lingering in memory.
+- **Single algorithm per key** avoids the algorithm confusion attacks that affect JWT.
+- **No unknown fields** -- the parser rejects any unexpected protobuf fields, preventing extension-based attacks.
+
+## Wire format
 
 Payloads use canonical proto3 encoding: fields in ascending order, minimal varints, default values omitted. Output is valid proto3 that any protobuf library can decode.
 
@@ -131,7 +199,7 @@ message VerifyingKey {
 Stored in `testdata/vectors.json` (wire format regression) and `testdata/reference_vectors.json` (long-lived keys and tokens expiring 2036). All binary data is URL-safe base64 (no padding).
 
 ```sh
-cargo run --bin gen_test_vectors > testdata/vectors.json
+cargo run --example gen_test_vectors > testdata/vectors.json
 cargo test
 ```
 
