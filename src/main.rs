@@ -2,6 +2,7 @@ use std::io::{self, Read as _};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use zeroize::Zeroizing;
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
@@ -133,7 +134,7 @@ fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
             let secret_key = generate_hmac_key();
             ProtoSigningKey {
                 algorithm: Algorithm::HmacSha256,
-                secret_key,
+                secret_key: Zeroizing::new(secret_key),
                 public_key: Vec::new(),
             }
         }
@@ -141,7 +142,7 @@ fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
             let (seed, pk) = generate_ed25519_key()?;
             ProtoSigningKey {
                 algorithm: Algorithm::Ed25519,
-                secret_key: seed,
+                secret_key: Zeroizing::new(seed),
                 public_key: pk,
             }
         }
@@ -149,7 +150,7 @@ fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
             let (sk_raw, pk) = generate_mldsa44_key()?;
             ProtoSigningKey {
                 algorithm: Algorithm::MlDsa44,
-                secret_key: sk_raw,
+                secret_key: Zeroizing::new(sk_raw),
                 public_key: pk,
             }
         }
@@ -250,7 +251,9 @@ fn cmd_verify(
         match vk.algorithm {
             Algorithm::Ed25519 => verify_ed25519(&vk.public_key, &token_bytes, now)?,
             Algorithm::MlDsa44 => verify_mldsa44(&vk.public_key, &token_bytes, now)?,
-            Algorithm::HmacSha256 => unreachable!(),
+            Algorithm::HmacSha256 => {
+                return Err("HMAC-SHA256 is symmetric; use the signing key to verify".into());
+            }
         }
     } else {
         let sk = deserialize_signing_key(&key_bytes)?;
