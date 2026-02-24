@@ -401,8 +401,10 @@ fn format_size(bytes: usize) -> String {
 const MAX_KEY_INPUT: u64 = 100_000;
 
 /// Read a key from a file path or "-" for stdin. Decodes base64.
+/// The intermediate base64 string is zeroized on drop to avoid leaving
+/// key material in memory.
 fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let raw = if path == "-" {
+    let raw: Zeroizing<String> = if path == "-" {
         let mut buf = String::new();
         io::stdin()
             .take(MAX_KEY_INPUT + 1)
@@ -410,7 +412,7 @@ fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         if buf.len() as u64 > MAX_KEY_INPUT {
             return Err(format!("key input too large (max {} bytes)", MAX_KEY_INPUT).into());
         }
-        buf
+        Zeroizing::new(buf)
     } else {
         let metadata = std::fs::metadata(path)?;
         if metadata.len() > MAX_KEY_INPUT {
@@ -421,7 +423,7 @@ fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
             )
             .into());
         }
-        std::fs::read_to_string(path)?
+        Zeroizing::new(std::fs::read_to_string(path)?)
     };
     decode_base64(raw.trim())
 }

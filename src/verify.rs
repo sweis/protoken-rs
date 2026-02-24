@@ -60,6 +60,15 @@ pub fn verify_hmac(
         }
     }
 
+    // Validate signature length before verification
+    if token.signature.len() != HMAC_SHA256_SIG_LEN {
+        return Err(ProtokenError::VerificationFailed(format!(
+            "invalid HMAC-SHA256 signature: expected {} bytes, got {}",
+            HMAC_SHA256_SIG_LEN,
+            token.signature.len()
+        )));
+    }
+
     // Verify HMAC over the raw payload bytes
     let mut mac = Hmac::<Sha256>::new_from_slice(key)
         .map_err(|e| ProtokenError::VerificationFailed(format!("invalid HMAC key: {e}")))?;
