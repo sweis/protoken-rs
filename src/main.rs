@@ -2,10 +2,10 @@ use std::io::{self, Read as _};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use zeroize::Zeroizing;
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
+use zeroize::Zeroizing;
 
 use protoken::keys::{
     deserialize_signing_key, deserialize_verifying_key, extract_verifying_key,
