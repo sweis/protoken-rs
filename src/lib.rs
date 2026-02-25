@@ -1,6 +1,7 @@
 //! Protoken: minimal signed tokens using canonical proto3 wire encoding.
 //!
-//! Supports HMAC-SHA256, Ed25519, and ML-DSA-44 (post-quantum) signatures
+//! Supports HMAC-SHA256, Ed25519, ML-DSA-44 (post-quantum) signatures,
+//! and ECVRF (RFC 9381) verifiable random function proofs
 //! with compact binary payloads.
 
 pub mod error;

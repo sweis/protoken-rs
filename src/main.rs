@@ -13,11 +13,11 @@ use protoken::keys::{
 };
 use protoken::serialize::{deserialize_payload, deserialize_signed_token};
 use protoken::sign::{
-    compute_key_hash, generate_ed25519_key, generate_hmac_key, generate_mldsa44_key,
-    mldsa44_key_hash, sign_ed25519, sign_hmac, sign_mldsa44,
+    compute_key_hash, generate_ecvrf_key, generate_ed25519_key, generate_hmac_key,
+    generate_mldsa44_key, mldsa44_key_hash, sign_ecvrf, sign_ed25519, sign_hmac, sign_mldsa44,
 };
 use protoken::types::{Algorithm, Claims, KeyIdentifier, Payload};
-use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
+use protoken::verify::{verify_ecvrf, verify_ed25519, verify_hmac, verify_mldsa44};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -44,7 +44,7 @@ struct Cli {
 enum Command {
     /// Generate a new signing key (base64-encoded SigningKey proto).
     GenerateKey {
-        /// Algorithm: "hmac", "ed25519" (default), or "ml-dsa-44".
+        /// Algorithm: "hmac", "ed25519" (default), "ml-dsa-44", or "ecvrf".
         #[arg(short, long, default_value = "ed25519")]
         algorithm: String,
     },
@@ -154,9 +154,17 @@ fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
                 public_key: pk,
             }
         }
+        "ecvrf" => {
+            let (sk_raw, pk) = generate_ecvrf_key()?;
+            ProtoSigningKey {
+                algorithm: Algorithm::EcVrf,
+                secret_key: Zeroizing::new(sk_raw),
+                public_key: pk,
+            }
+        }
         _ => {
             return Err(format!(
-                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', or 'ml-dsa-44')"
+                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', 'ml-dsa-44', or 'ecvrf')"
             )
             .into())
         }
@@ -221,6 +229,7 @@ fn cmd_sign(
             let key_id = mldsa44_key_hash(&sk.public_key)?;
             sign_mldsa44(&sk.secret_key, claims, key_id)?
         }
+        Algorithm::EcVrf => sign_ecvrf(&sk.secret_key, &sk.public_key, claims)?,
     };
 
     println!("{}", B64.encode(&token_bytes));
@@ -251,6 +260,7 @@ fn cmd_verify(
         match vk.algorithm {
             Algorithm::Ed25519 => verify_ed25519(&vk.public_key, &token_bytes, now)?,
             Algorithm::MlDsa44 => verify_mldsa44(&vk.public_key, &token_bytes, now)?,
+            Algorithm::EcVrf => verify_ecvrf(&vk.public_key, &token_bytes, now)?,
             Algorithm::HmacSha256 => {
                 return Err("HMAC-SHA256 is symmetric; use the signing key to verify".into());
             }
@@ -287,16 +297,22 @@ fn cmd_inspect(token_arg: Option<String>, json: bool) -> Result<(), Box<dyn std:
         Ok(token) => {
             let payload = deserialize_payload(&token.payload_bytes)?;
             if json {
-                let output = serde_json::json!({
+                let mut output = serde_json::json!({
                     "type": "SignedToken",
                     "payload": payload,
                     "signature_base64": B64.encode(&token.signature),
                     "total_bytes": token_bytes.len(),
                 });
+                if !token.proof.is_empty() {
+                    output["proof_base64"] = serde_json::Value::String(B64.encode(&token.proof));
+                }
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 print_payload_colored(&payload);
                 print_field("Signature", &B64.encode(&token.signature).magenta());
+                if !token.proof.is_empty() {
+                    print_field("Proof", &B64.encode(&token.proof).magenta());
+                }
                 print_field("Size", &format_size(token_bytes.len()).cyan());
             }
         }
@@ -334,6 +350,7 @@ fn print_payload_colored(payload: &Payload) {
         Algorithm::HmacSha256 => "HMAC-SHA256",
         Algorithm::Ed25519 => "Ed25519",
         Algorithm::MlDsa44 => "ML-DSA-44",
+        Algorithm::EcVrf => "ECVRF",
     };
     print_field("Algorithm", &algo_name.green());
 
@@ -350,6 +367,7 @@ fn print_payload_colored(payload: &Payload) {
                 )
             }
         }
+        KeyIdentifier::FullKeyHash(h) => format!("{} (full_key_hash)", B64.encode(h)),
     };
     print_field("Key ID", &key_id_str.magenta());
 
