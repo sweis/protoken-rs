@@ -4,6 +4,8 @@ Compact, signed binary tokens using canonical proto3 wire encoding. Encoding is 
 
 Warning: This is experimental and largely AI generated. It is not production ready and has not been audited by a human.
 
+**Warning**: This code is experimental and not ready for production. It is mostly AI generated and has not had human review.
+
 Supports three signature algorithms:
 
 - **HMAC-SHA256** -- symmetric, ~56-byte tokens
