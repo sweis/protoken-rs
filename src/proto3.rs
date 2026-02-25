@@ -176,42 +176,6 @@ pub fn read_bytes_value<'a>(data: &'a [u8], pos: &mut usize) -> Result<&'a [u8],
     Ok(&data[start..*pos])
 }
 
-/// Skip a field value based on wire type.
-pub fn skip_field(wire_type: u32, data: &[u8], pos: &mut usize) -> Result<(), ProtokenError> {
-    match wire_type {
-        0 => {
-            decode_varint(data, pos)?;
-        }
-        1 => {
-            // 64-bit fixed
-            if *pos + 8 > data.len() {
-                return Err(ProtokenError::MalformedEncoding(
-                    "unexpected end of input in fixed64".into(),
-                ));
-            }
-            *pos += 8;
-        }
-        2 => {
-            read_bytes_value(data, pos)?;
-        }
-        5 => {
-            // 32-bit fixed
-            if *pos + 4 > data.len() {
-                return Err(ProtokenError::MalformedEncoding(
-                    "unexpected end of input in fixed32".into(),
-                ));
-            }
-            *pos += 4;
-        }
-        _ => {
-            return Err(ProtokenError::MalformedEncoding(format!(
-                "unknown wire type: {wire_type}"
-            )));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {

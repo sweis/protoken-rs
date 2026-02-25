@@ -39,7 +39,7 @@ protoken sign my.key 1h \
 protoken verify my.pub < token.txt
 ```
 
-Example output from `verify`:
+Example output from `verify` (keys and timestamps will differ):
 
 ```
 OK
