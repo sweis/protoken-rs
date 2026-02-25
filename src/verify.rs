@@ -275,12 +275,13 @@ pub fn verify_ecvrf(
             token.proof.len()
         )));
     }
-    let proof_bytes: [u8; ECVRF_PROOF_LEN] = token.proof.as_slice().try_into().map_err(|_| {
-        ProtokenError::VerificationFailed("invalid ECVRF proof length".into())
-    })?;
-    let proof = vrf_r255::Proof::from_bytes(proof_bytes).ok_or_else(|| {
-        ProtokenError::VerificationFailed("invalid ECVRF proof encoding".into())
-    })?;
+    let proof_bytes: [u8; ECVRF_PROOF_LEN] = token
+        .proof
+        .as_slice()
+        .try_into()
+        .map_err(|_| ProtokenError::VerificationFailed("invalid ECVRF proof length".into()))?;
+    let proof = vrf_r255::Proof::from_bytes(proof_bytes)
+        .ok_or_else(|| ProtokenError::VerificationFailed("invalid ECVRF proof encoding".into()))?;
 
     // Verify the VRF proof and get the output
     let computed_output: [u8; ECVRF_OUTPUT_LEN] =

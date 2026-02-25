@@ -304,7 +304,12 @@ fn cmd_inspect(token_arg: Option<String>, json: bool) -> Result<(), Box<dyn std:
                     "total_bytes": token_bytes.len(),
                 });
                 if !token.proof.is_empty() {
-                    output["proof_base64"] = serde_json::Value::String(B64.encode(&token.proof));
+                    if let Some(obj) = output.as_object_mut() {
+                        obj.insert(
+                            "proof_base64".to_string(),
+                            serde_json::Value::String(B64.encode(&token.proof)),
+                        );
+                    }
                 }
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {

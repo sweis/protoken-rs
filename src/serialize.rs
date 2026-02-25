@@ -266,7 +266,8 @@ pub fn serialize_signed_token(token: &SignedToken) -> Vec<u8> {
 /// Returns the raw payload bytes (for signature verification), signature, and optional proof.
 /// Callers should use `deserialize_payload()` on `payload_bytes` to validate and parse the payload.
 /// Maximum total size for a serialized SignedToken (payload + signature + proof + framing).
-const MAX_SIGNED_TOKEN_BYTES: usize = MAX_PAYLOAD_BYTES + MAX_SIGNATURE_BYTES + MAX_PROOF_BYTES + 32;
+const MAX_SIGNED_TOKEN_BYTES: usize =
+    MAX_PAYLOAD_BYTES + MAX_SIGNATURE_BYTES + MAX_PROOF_BYTES + 32;
 
 pub fn deserialize_signed_token(data: &[u8]) -> Result<SignedToken, ProtokenError> {
     if data.is_empty() {

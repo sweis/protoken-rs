@@ -222,9 +222,7 @@ pub fn sign_ecvrf(
         ))
     })?;
     let sk: vrf_r255::SecretKey = Option::from(vrf_r255::SecretKey::from_bytes(sk_array))
-        .ok_or_else(|| {
-            ProtokenError::SigningFailed("invalid ECVRF secret key encoding".into())
-        })?;
+        .ok_or_else(|| ProtokenError::SigningFailed("invalid ECVRF secret key encoding".into()))?;
 
     if public_key_bytes.len() != ECVRF_PUBLIC_KEY_LEN {
         return Err(ProtokenError::SigningFailed(format!(
@@ -246,19 +244,16 @@ pub fn sign_ecvrf(
     };
 
     // Parse the public key for self-verification
-    let pk_array: [u8; ECVRF_PUBLIC_KEY_LEN] = public_key_bytes.try_into().map_err(|_| {
-        ProtokenError::SigningFailed("invalid ECVRF public key length".into())
-    })?;
-    let pk = vrf_r255::PublicKey::from_bytes(pk_array).ok_or_else(|| {
-        ProtokenError::SigningFailed("invalid ECVRF public key encoding".into())
-    })?;
+    let pk_array: [u8; ECVRF_PUBLIC_KEY_LEN] = public_key_bytes
+        .try_into()
+        .map_err(|_| ProtokenError::SigningFailed("invalid ECVRF public key length".into()))?;
+    let pk = vrf_r255::PublicKey::from_bytes(pk_array)
+        .ok_or_else(|| ProtokenError::SigningFailed("invalid ECVRF public key encoding".into()))?;
 
     let payload_bytes = serialize_payload(&payload);
     let proof = sk.prove(&payload_bytes);
     let output: [u8; ECVRF_OUTPUT_LEN] = Option::from(pk.verify(&payload_bytes, &proof))
-        .ok_or_else(|| {
-            ProtokenError::SigningFailed("ECVRF self-verification failed".into())
-        })?;
+        .ok_or_else(|| ProtokenError::SigningFailed("ECVRF self-verification failed".into()))?;
 
     let token = SignedToken {
         payload_bytes,
