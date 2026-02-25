@@ -1,6 +1,8 @@
-# protoken-rs: Expreimental Protobuf signed tokens in Rust
+# protoken-rs: Experimental Protobuf-based tokens in Rust
 
-Compact, signed binary tokens using canonical proto3 wire encoding. An HMAC-SHA256 protoken is ~56 bytes versus ~300-400 bytes for a typical JWT. The format avoids algorithm confusion attacks by design: the algorithm is fixed per key, not per token.
+Compact, signed binary tokens using canonical proto3 wire encoding. Encoding is deterministic with our own serializer, and decoding can use standard protobuf deserialization.
+
+Warning: This is experimental and largely AI generated. It is not production ready and has not been audited by a human.
 
 **Warning**: This code is experimental and not ready for production. It is mostly AI generated and has not had human review.
 
@@ -144,13 +146,6 @@ echo "<token>" | protoken inspect --json   # machine-readable JSON
 ```sh
 protoken verify - <token> < my.pub
 ```
-
-## Security considerations
-
-- **Key hash is an identifier, not a security binding.** The 8-byte truncated SHA-256 key hash (~2^32 collision resistance at birthday bound) is used for key selection. Security relies on full signature verification.
-- **Secret keys are zeroized on drop** using the `zeroize` crate, preventing key material from lingering in memory.
-- **Single algorithm per key** avoids the algorithm confusion attacks that affect JWT.
-- **No unknown fields** -- the parser rejects any unexpected protobuf fields, preventing extension-based attacks.
 
 ## Wire format
 
