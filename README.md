@@ -1,6 +1,8 @@
-# protoken-rs
+# protoken-rs: Expreimental Protobuf signed tokens in Rust
 
 Compact, signed binary tokens using canonical proto3 wire encoding. An HMAC-SHA256 protoken is ~56 bytes versus ~300-400 bytes for a typical JWT. The format avoids algorithm confusion attacks by design: the algorithm is fixed per key, not per token.
+
+**Warning**: This code is experimental and not ready for production. It is mostly AI generated and has not had human review.
 
 Supports three signature algorithms:
 
