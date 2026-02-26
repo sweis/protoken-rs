@@ -179,7 +179,7 @@ fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
         "groth16" => {
             let secret_key = generate_hmac_key(); // same key format: random 32 bytes
             ProtoSigningKey {
-                algorithm: Algorithm::Groth16Sha256,
+                algorithm: Algorithm::Groth16Poseidon,
                 secret_key: Zeroizing::new(secret_key),
                 public_key: Vec::new(),
             }
@@ -278,7 +278,7 @@ fn cmd_sign(
             let key_id = mldsa44_key_hash(&sk.public_key)?;
             sign_mldsa44(&sk.secret_key, claims, key_id)?
         }
-        Algorithm::Groth16Sha256 => {
+        Algorithm::Groth16Poseidon => {
             let pk_file = proving_key_file
                 .ok_or("Groth16 signing requires --proving-key <file> (from snark-setup)")?;
             let pk_bytes = read_snark_keyfile(&pk_file)?;
@@ -319,14 +319,14 @@ fn cmd_verify(
         match vk.algorithm {
             Algorithm::Ed25519 => verify_ed25519(&vk.public_key, &token_bytes, now)?,
             Algorithm::MlDsa44 => verify_mldsa44(&vk.public_key, &token_bytes, now)?,
-            Algorithm::HmacSha256 | Algorithm::Groth16Sha256 => {
+            Algorithm::HmacSha256 | Algorithm::Groth16Poseidon => {
                 return Err("symmetric algorithm; use the signing key to verify".into());
             }
         }
     } else if let Ok(sk) = deserialize_signing_key(&key_bytes) {
         match sk.algorithm {
             Algorithm::HmacSha256 => verify_hmac(&sk.secret_key, &token_bytes, now)?,
-            Algorithm::Groth16Sha256 => {
+            Algorithm::Groth16Poseidon => {
                 return Err(
                     "use the SNARK verifying key (from snark-setup) to verify Groth16 tokens"
                         .into(),
@@ -426,7 +426,7 @@ fn print_payload_colored(payload: &Payload) {
         Algorithm::HmacSha256 => "HMAC-SHA256",
         Algorithm::Ed25519 => "Ed25519",
         Algorithm::MlDsa44 => "ML-DSA-44",
-        Algorithm::Groth16Sha256 => "Groth16-SHA256",
+        Algorithm::Groth16Poseidon => "Groth16-Poseidon",
     };
     print_field("Algorithm", &algo_name.green());
 

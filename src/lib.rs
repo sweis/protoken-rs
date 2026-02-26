@@ -5,6 +5,7 @@
 
 pub mod error;
 pub mod keys;
+pub mod poseidon;
 pub mod proto3;
 pub mod serialize;
 pub mod sign;
