@@ -147,9 +147,9 @@ All TODO items 1-8 are implemented, plus ML-DSA-44 and Groth16-SHA256 support:
 - `src/sign.rs` - HMAC-SHA256, Ed25519, ML-DSA-44, and Groth16-SHA256 signing
 - `src/verify.rs` - Verification with key hash matching, expiry and not_before checking, Groth16 SNARK verification
 - `src/snark.rs` - Groth16 SNARK circuit (HMAC-SHA256 key proof), setup/prove/verify, key serialization
-- `src/main.rs` - CLI tool with `generate-key`, `get-verifying-key`, `sign`, `verify`, `inspect` commands (Groth16 via library API only)
+- `src/main.rs` - CLI tool with `generate-key`, `get-verifying-key`, `snark-setup`, `sign`, `verify`, `inspect` commands (all 4 algorithms)
 - `src/error.rs` - Error types
-- 96 tests (89 unit + 7 SNARK) including byte-level corruption tests for all algorithms
+- 110 tests (89 unit + 11 SNARK + 10 Groth16 e2e) including byte-level corruption tests for all algorithms
 - `notes/` - Research documents (prior art, Ed25519 vs P-256, protobuf determinism, post-quantum, ML-DSA key formats, subject identifiers, symmetric key proofs)
 
 ## Research Prior Art

@@ -11,7 +11,7 @@ Supports four algorithms:
 - **HMAC-SHA256** -- symmetric MAC, ~56-byte tokens
 - **Ed25519** -- asymmetric signature, ~88-byte tokens
 - **ML-DSA-44** -- post-quantum signature (FIPS 204), ~2,500-byte tokens
-- **Groth16-SHA256** -- zero-knowledge SNARK proof of symmetric key knowledge, ~250-byte tokens
+- **Groth16-SHA256** -- zero-knowledge SNARK proof of symmetric key knowledge, ~235-byte tokens
 
 ## Build
 
@@ -125,7 +125,10 @@ protoken generate-key -a ml-dsa-44 > pq.key
 protoken get-verifying-key pq.key > pq.pub
 protoken sign pq.key 1h | protoken verify pq.pub
 
-# Groth16-SHA256 (SNARK, library API only -- see below)
+# Groth16-SHA256 (SNARK -- see below)
+protoken snark-setup
+protoken generate-key -a groth16 > sym.key
+protoken sign sym.key 1h --proving-key snark-pk.b64 | protoken verify snark-vk.b64
 ```
 
 ### Sign with claims
@@ -150,11 +153,33 @@ echo "<token>" | protoken inspect --json   # machine-readable JSON
 protoken verify - <token> < my.pub
 ```
 
-### Groth16-SHA256 (library API)
+### Groth16-SHA256 (zero-knowledge SNARK)
 
 Groth16 tokens prove knowledge of a symmetric key without revealing it, using a zero-knowledge SNARK. The circuit proves: `SHA-256(K) = key_hash` and `HMAC-SHA256(K, SHA-256(payload)) = signature`. Verifiers only need the SNARK verifying key -- no symmetric key required.
 
-Because Groth16 requires a trusted setup (circuit-specific proving/verifying keys), it is only available via the library API, not the CLI.
+Groth16 requires a one-time trusted setup that generates a proving key (~38 MB) and a verifying key (~24 KB).
+
+#### CLI usage
+
+```sh
+# One-time trusted setup (generates snark-pk.b64 and snark-vk.b64)
+protoken snark-setup
+
+# Or specify custom paths:
+protoken snark-setup --proving-key my-pk.b64 --verifying-key my-vk.b64
+
+# Generate a symmetric key
+protoken generate-key -a groth16 > sym.key
+
+# Sign a token (needs both the symmetric key and proving key)
+protoken sign sym.key 1h --proving-key snark-pk.b64 \
+  --subject "user:alice" --scope read --scope write > token.b64
+
+# Verify (needs only the SNARK verifying key, not the symmetric key)
+protoken verify snark-vk.b64 < token.b64
+```
+
+#### Library API
 
 ```rust
 use protoken::snark;
@@ -235,7 +260,7 @@ message VerifyingKey {
 | HMAC + key_hash (minimal) | ~20 B | 32 B | ~56 B |
 | Ed25519 + key_hash (minimal) | ~20 B | 64 B | ~88 B |
 | ML-DSA-44 + key_hash (minimal) | ~20 B | 2420 B | ~2,450 B |
-| Groth16 + full_key_hash (minimal) | ~40 B | 32 B + 128 B proof | ~210 B |
+| Groth16 + full_key_hash (minimal) | ~40 B | 32 B + 128 B proof | ~235 B |
 | Ed25519 + public_key + claims | ~70 B | 64 B | ~138 B |
 
 ## Test vectors

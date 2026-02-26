@@ -51,7 +51,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace -- --skip snark
+      - run: cargo test --lib --tests -- --skip snark
 
   test-snark:
     name: Test (SNARK)

@@ -3,9 +3,9 @@
 # Run all checks (format, clippy, test)
 all: check test
 
-# Run tests (excluding slow SNARK tests)
+# Run tests (excluding slow SNARK tests and bench targets which don't support --skip)
 test:
-	cargo test --all-targets -- --skip snark
+	cargo test --lib --tests -- --skip snark
 
 # Run slow SNARK tests (requires ~4 min, 64MB stack)
 test-snark:
