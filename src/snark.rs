@@ -329,7 +329,7 @@ pub fn deserialize_proving_key(data: &[u8]) -> Result<SnarkProvingKey, ProtokenE
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};

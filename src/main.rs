@@ -14,10 +14,11 @@ use protoken::keys::{
 use protoken::serialize::{deserialize_payload, deserialize_signed_token};
 use protoken::sign::{
     compute_key_hash, generate_ed25519_key, generate_hmac_key, generate_mldsa44_key,
-    mldsa44_key_hash, sign_ed25519, sign_hmac, sign_mldsa44,
+    mldsa44_key_hash, sign_ed25519, sign_groth16, sign_hmac, sign_mldsa44,
 };
+use protoken::snark;
 use protoken::types::{Algorithm, Claims, KeyIdentifier, Payload};
-use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
+use protoken::verify::{verify_ed25519, verify_groth16, verify_hmac, verify_mldsa44};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -44,7 +45,7 @@ struct Cli {
 enum Command {
     /// Generate a new signing key (base64-encoded SigningKey proto).
     GenerateKey {
-        /// Algorithm: "hmac", "ed25519" (default), or "ml-dsa-44".
+        /// Algorithm: "hmac", "ed25519" (default), "ml-dsa-44", or "groth16".
         #[arg(short, long, default_value = "ed25519")]
         algorithm: String,
     },
@@ -53,6 +54,17 @@ enum Command {
     GetVerifyingKey {
         /// Signing key file, or "-" for stdin.
         keyfile: String,
+    },
+
+    /// Run Groth16 trusted setup (one-time, produces proving + verifying keys).
+    SnarkSetup {
+        /// Output file for the proving key (base64-encoded).
+        #[arg(long, default_value = "snark-pk.b64")]
+        proving_key: String,
+
+        /// Output file for the verifying key (base64-encoded).
+        #[arg(long, default_value = "snark-vk.b64")]
+        verifying_key: String,
     },
 
     /// Sign a new token.
@@ -74,11 +86,16 @@ enum Command {
         /// Scope entries (repeatable, e.g. --scope read --scope write).
         #[arg(long)]
         scope: Vec<String>,
+
+        /// Groth16 proving key file (required for groth16 algorithm).
+        #[arg(long)]
+        proving_key: Option<String>,
     },
 
     /// Verify a signed token against a key and current time.
     Verify {
-        /// Key file (SigningKey for HMAC, VerifyingKey for asymmetric).
+        /// Key file (SigningKey for HMAC, VerifyingKey for asymmetric,
+        /// SNARK verifying key for Groth16).
         /// Use "-" for stdin, but then token must be given explicitly.
         keyfile: String,
 
@@ -107,13 +124,18 @@ fn main() {
     let result = match cli.command {
         Command::GenerateKey { algorithm } => cmd_generate_key(&algorithm),
         Command::GetVerifyingKey { keyfile } => cmd_get_verifying_key(&keyfile),
+        Command::SnarkSetup {
+            proving_key,
+            verifying_key,
+        } => cmd_snark_setup(&proving_key, &verifying_key),
         Command::Sign {
             keyfile,
             duration,
             subject,
             audience,
             scope,
-        } => cmd_sign(&keyfile, &duration, subject, audience, scope),
+            proving_key,
+        } => cmd_sign(&keyfile, &duration, subject, audience, scope, proving_key),
         Command::Verify {
             keyfile,
             token,
@@ -154,9 +176,17 @@ fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
                 public_key: pk,
             }
         }
+        "groth16" => {
+            let secret_key = generate_hmac_key(); // same key format: random 32 bytes
+            ProtoSigningKey {
+                algorithm: Algorithm::Groth16Sha256,
+                secret_key: Zeroizing::new(secret_key),
+                public_key: Vec::new(),
+            }
+        }
         _ => {
             return Err(format!(
-                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', or 'ml-dsa-44')"
+                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', 'ml-dsa-44', or 'groth16')"
             )
             .into())
         }
@@ -174,12 +204,42 @@ fn cmd_get_verifying_key(keyfile: &str) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
+/// Maximum SNARK key input size. Proving keys can be tens of MB.
+const MAX_SNARK_KEY_INPUT: u64 = 100_000_000; // 100 MB
+
+fn cmd_snark_setup(
+    pk_path: &str,
+    vk_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("Running Groth16 trusted setup (this may take a minute)...");
+    let (pk, vk) = snark::setup()?;
+
+    let pk_bytes = snark::serialize_proving_key(&pk)?;
+    let vk_bytes = snark::serialize_verifying_key(&vk)?;
+
+    std::fs::write(pk_path, B64.encode(&pk_bytes))?;
+    std::fs::write(vk_path, B64.encode(&vk_bytes))?;
+
+    eprintln!(
+        "Proving key:   {} ({:.1} MB)",
+        pk_path,
+        pk_bytes.len() as f64 / 1_048_576.0
+    );
+    eprintln!(
+        "Verifying key: {} ({:.1} KB)",
+        vk_path,
+        vk_bytes.len() as f64 / 1024.0
+    );
+    Ok(())
+}
+
 fn cmd_sign(
     keyfile: &str,
     duration_str: &str,
     subject: Option<String>,
     audience: Option<String>,
     scopes: Vec<String>,
+    proving_key_file: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let key_bytes = read_keyfile(keyfile)?;
     let sk = deserialize_signing_key(&key_bytes)?;
@@ -222,9 +282,18 @@ fn cmd_sign(
             sign_mldsa44(&sk.secret_key, claims, key_id)?
         }
         Algorithm::Groth16Sha256 => {
-            return Err(
-                "Groth16 signing requires a proving key; use the library API directly".into(),
-            )
+            let pk_file = proving_key_file.ok_or(
+                "Groth16 signing requires --proving-key <file> (from snark-setup)",
+            )?;
+            let pk_bytes = read_snark_keyfile(&pk_file)?;
+            let pk = snark::deserialize_proving_key(&pk_bytes)?;
+            let key: [u8; 32] = sk.secret_key.as_slice().try_into().map_err(|_| {
+                format!(
+                    "Groth16 key must be 32 bytes, got {}",
+                    sk.secret_key.len()
+                )
+            })?;
+            sign_groth16(&pk, &key, claims)?
         }
     };
 
@@ -249,9 +318,10 @@ fn cmd_verify(
         .map_err(|_| "system clock is set before Unix epoch (1970-01-01)")?
         .as_secs();
 
-    // Determine key type by algorithm. HMAC uses a SigningKey; asymmetric uses a VerifyingKey.
-    // Both key types encode algorithm as field 1, so try VerifyingKey first (2 fields)
-    // and fall back to SigningKey (3 fields, needed for HMAC).
+    // Determine key type by trying each format:
+    // 1. Proto VerifyingKey (Ed25519, ML-DSA-44)
+    // 2. Proto SigningKey (HMAC)
+    // 3. SNARK VerifyingKey (Groth16)
     let verified = if let Ok(vk) = deserialize_verifying_key(&key_bytes) {
         match vk.algorithm {
             Algorithm::Ed25519 => verify_ed25519(&vk.public_key, &token_bytes, now)?,
@@ -260,12 +330,14 @@ fn cmd_verify(
                 return Err("symmetric algorithm; use the signing key to verify".into());
             }
         }
-    } else {
-        let sk = deserialize_signing_key(&key_bytes)?;
+    } else if let Ok(sk) = deserialize_signing_key(&key_bytes) {
         match sk.algorithm {
             Algorithm::HmacSha256 => verify_hmac(&sk.secret_key, &token_bytes, now)?,
             Algorithm::Groth16Sha256 => {
-                return Err("Groth16 verification requires a SNARK verifying key; use the library API directly".into());
+                return Err(
+                    "use the SNARK verifying key (from snark-setup) to verify Groth16 tokens"
+                        .into(),
+                );
             }
             _ => {
                 return Err(format!(
@@ -275,6 +347,11 @@ fn cmd_verify(
                 .into());
             }
         }
+    } else if let Ok(snark_vk) = snark::deserialize_verifying_key(&key_bytes) {
+        verify_groth16(&snark_vk, &token_bytes, now)?
+    } else {
+        return Err("could not parse key file as VerifyingKey, SigningKey, or SNARK VerifyingKey"
+            .into());
     };
 
     if json {
@@ -472,6 +549,21 @@ fn read_token_input(token_arg: Option<String>) -> Result<Vec<u8>, Box<dyn std::e
         }
     };
     decode_base64(input.trim())
+}
+
+/// Read a SNARK key file (proving or verifying key). These can be large (~tens of MB).
+fn read_snark_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > MAX_SNARK_KEY_INPUT {
+        return Err(format!(
+            "SNARK key file too large: {} bytes (max {})",
+            metadata.len(),
+            MAX_SNARK_KEY_INPUT
+        )
+        .into());
+    }
+    let raw = std::fs::read_to_string(path)?;
+    decode_base64(raw.trim())
 }
 
 /// Decode a base64 string (URL-safe no-pad or standard).
