@@ -1,11 +1,15 @@
-.PHONY: all test fmt clippy audit check fuzz
+.PHONY: all test test-snark fmt clippy audit check fuzz
 
 # Run all checks (format, clippy, test)
 all: check test
 
-# Run tests
+# Run tests (excluding slow SNARK tests)
 test:
-	cargo test --all-targets
+	cargo test --all-targets -- --skip snark
+
+# Run slow SNARK tests (requires ~4 min, 64MB stack)
+test-snark:
+	RUST_MIN_STACK=67108864 cargo test --lib snark::tests -- --test-threads=1
 
 # Check formatting (dry run)
 fmt:

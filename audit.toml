@@ -1,0 +1,13 @@
+# cargo-audit configuration
+# https://github.com/rustsec/rustsec/blob/main/cargo-audit/audit.toml.example
+
+[advisories]
+ignore = [
+    # derivative 2.2.0 - unmaintained (transitive dep via ark-crypto-primitives)
+    # No replacement available until arkworks upstream migrates.
+    "RUSTSEC-2024-0388",
+
+    # paste 1.0.15 - unmaintained (transitive dep via ark-ff)
+    # No replacement available until arkworks upstream migrates.
+    "RUSTSEC-2024-0436",
+]

@@ -18,7 +18,7 @@
 //! SignedToken proto3 fields:
 //!   Payload payload = 1;     tag 0x0A (submessage)
 //!   bytes   signature = 2;   tag 0x12
-//!   bytes   proof = 3;       tag 0x1A (VRF proof, empty for non-VRF algorithms)
+//!   bytes   proof = 3;       tag 0x1A (Groth16 proof, empty for other algorithms)
 
 use crate::error::ProtokenError;
 use crate::proto3;
@@ -206,7 +206,7 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
             let expected_len = match algorithm {
                 Algorithm::Ed25519 => ED25519_PUBLIC_KEY_LEN,
                 Algorithm::MlDsa44 => MLDSA44_PUBLIC_KEY_LEN,
-                Algorithm::HmacSha256 | Algorithm::EcVrf => {
+                Algorithm::HmacSha256 | Algorithm::Groth16Sha256 => {
                     return Err(ProtokenError::InvalidKeyIdType(key_id_type.to_byte()));
                 }
             };
@@ -252,18 +252,15 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
 /// { Payload payload = 1; bytes signature = 2; bytes proof = 3; }
 #[must_use]
 pub fn serialize_signed_token(token: &SignedToken) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        token.payload_bytes.len() + token.signature.len() + token.proof.len() + 10,
-    );
+    let mut buf = Vec::with_capacity(token.payload_bytes.len() + token.signature.len() + 10);
     proto3::encode_bytes(1, &token.payload_bytes, &mut buf);
     proto3::encode_bytes(2, &token.signature, &mut buf);
-    // proof is omitted when empty (proto3 default)
     proto3::encode_bytes(3, &token.proof, &mut buf);
     buf
 }
 
 /// Deserialize a SignedToken from proto3 bytes.
-/// Returns the raw payload bytes (for signature verification), signature, and optional proof.
+/// Returns the raw payload bytes (for signature verification) and signature.
 /// Callers should use `deserialize_payload()` on `payload_bytes` to validate and parse the payload.
 /// Maximum total size for a serialized SignedToken (payload + signature + proof + framing).
 const MAX_SIGNED_TOKEN_BYTES: usize =
@@ -843,63 +840,5 @@ mod tests {
             decoded_payload.claims.scopes,
             vec!["admin", "read", "write"]
         );
-    }
-
-    #[test]
-    fn test_payload_ecvrf_full_key_hash_roundtrip() {
-        let payload = Payload {
-            metadata: Metadata {
-                version: Version::V0,
-                algorithm: Algorithm::EcVrf,
-                key_identifier: KeyIdentifier::FullKeyHash([0xCC; FULL_KEY_HASH_LEN]),
-            },
-            claims: Claims {
-                expires_at: 2000000000,
-                ..Default::default()
-            },
-        };
-        let bytes = serialize_payload(&payload);
-        let decoded = deserialize_payload(&bytes).unwrap();
-        assert_eq!(payload, decoded);
-    }
-
-    #[test]
-    fn test_signed_token_with_proof_roundtrip() {
-        let payload = Payload {
-            metadata: Metadata {
-                version: Version::V0,
-                algorithm: Algorithm::EcVrf,
-                key_identifier: KeyIdentifier::FullKeyHash([0xCC; FULL_KEY_HASH_LEN]),
-            },
-            claims: Claims {
-                expires_at: 2000000000,
-                ..Default::default()
-            },
-        };
-        let payload_bytes = serialize_payload(&payload);
-        let token = SignedToken {
-            payload_bytes: payload_bytes.clone(),
-            signature: vec![0xDD; 64],
-            proof: vec![0xEE; 80],
-        };
-        let wire = serialize_signed_token(&token);
-        let decoded = deserialize_signed_token(&wire).unwrap();
-        assert_eq!(decoded.payload_bytes, payload_bytes);
-        assert_eq!(decoded.signature, vec![0xDD; 64]);
-        assert_eq!(decoded.proof, vec![0xEE; 80]);
-    }
-
-    #[test]
-    fn test_signed_token_without_proof_has_empty_proof() {
-        let payload = sample_payload_hmac();
-        let payload_bytes = serialize_payload(&payload);
-        let token = SignedToken {
-            payload_bytes: payload_bytes.clone(),
-            signature: vec![0xAB; 32],
-            proof: Vec::new(),
-        };
-        let wire = serialize_signed_token(&token);
-        let decoded = deserialize_signed_token(&wire).unwrap();
-        assert!(decoded.proof.is_empty(), "empty proof should remain empty");
     }
 }

@@ -13,11 +13,11 @@ use protoken::keys::{
 };
 use protoken::serialize::{deserialize_payload, deserialize_signed_token};
 use protoken::sign::{
-    compute_key_hash, generate_ecvrf_key, generate_ed25519_key, generate_hmac_key,
-    generate_mldsa44_key, mldsa44_key_hash, sign_ecvrf, sign_ed25519, sign_hmac, sign_mldsa44,
+    compute_key_hash, generate_ed25519_key, generate_hmac_key, generate_mldsa44_key,
+    mldsa44_key_hash, sign_ed25519, sign_hmac, sign_mldsa44,
 };
 use protoken::types::{Algorithm, Claims, KeyIdentifier, Payload};
-use protoken::verify::{verify_ecvrf, verify_ed25519, verify_hmac, verify_mldsa44};
+use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -44,7 +44,7 @@ struct Cli {
 enum Command {
     /// Generate a new signing key (base64-encoded SigningKey proto).
     GenerateKey {
-        /// Algorithm: "hmac", "ed25519" (default), "ml-dsa-44", or "ecvrf".
+        /// Algorithm: "hmac", "ed25519" (default), or "ml-dsa-44".
         #[arg(short, long, default_value = "ed25519")]
         algorithm: String,
     },
@@ -154,17 +154,9 @@ fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
                 public_key: pk,
             }
         }
-        "ecvrf" => {
-            let (sk_raw, pk) = generate_ecvrf_key()?;
-            ProtoSigningKey {
-                algorithm: Algorithm::EcVrf,
-                secret_key: Zeroizing::new(sk_raw),
-                public_key: pk,
-            }
-        }
         _ => {
             return Err(format!(
-                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', 'ml-dsa-44', or 'ecvrf')"
+                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', or 'ml-dsa-44')"
             )
             .into())
         }
@@ -229,7 +221,11 @@ fn cmd_sign(
             let key_id = mldsa44_key_hash(&sk.public_key)?;
             sign_mldsa44(&sk.secret_key, claims, key_id)?
         }
-        Algorithm::EcVrf => sign_ecvrf(&sk.secret_key, &sk.public_key, claims)?,
+        Algorithm::Groth16Sha256 => {
+            return Err(
+                "Groth16 signing requires a proving key; use the library API directly".into(),
+            )
+        }
     };
 
     println!("{}", B64.encode(&token_bytes));
@@ -260,21 +256,25 @@ fn cmd_verify(
         match vk.algorithm {
             Algorithm::Ed25519 => verify_ed25519(&vk.public_key, &token_bytes, now)?,
             Algorithm::MlDsa44 => verify_mldsa44(&vk.public_key, &token_bytes, now)?,
-            Algorithm::EcVrf => verify_ecvrf(&vk.public_key, &token_bytes, now)?,
-            Algorithm::HmacSha256 => {
-                return Err("HMAC-SHA256 is symmetric; use the signing key to verify".into());
+            Algorithm::HmacSha256 | Algorithm::Groth16Sha256 => {
+                return Err("symmetric algorithm; use the signing key to verify".into());
             }
         }
     } else {
         let sk = deserialize_signing_key(&key_bytes)?;
-        if sk.algorithm != Algorithm::HmacSha256 {
-            return Err(format!(
-                "expected an HMAC signing key or a verifying key, got {:?} signing key",
-                sk.algorithm
-            )
-            .into());
+        match sk.algorithm {
+            Algorithm::HmacSha256 => verify_hmac(&sk.secret_key, &token_bytes, now)?,
+            Algorithm::Groth16Sha256 => {
+                return Err("Groth16 verification requires a SNARK verifying key; use the library API directly".into());
+            }
+            _ => {
+                return Err(format!(
+                    "expected an HMAC signing key or a verifying key, got {:?} signing key",
+                    sk.algorithm
+                )
+                .into());
+            }
         }
-        verify_hmac(&sk.secret_key, &token_bytes, now)?
     };
 
     if json {
@@ -306,7 +306,7 @@ fn cmd_inspect(token_arg: Option<String>, json: bool) -> Result<(), Box<dyn std:
                 if !token.proof.is_empty() {
                     if let Some(obj) = output.as_object_mut() {
                         obj.insert(
-                            "proof_base64".to_string(),
+                            "proof_base64".into(),
                             serde_json::Value::String(B64.encode(&token.proof)),
                         );
                     }
@@ -355,7 +355,7 @@ fn print_payload_colored(payload: &Payload) {
         Algorithm::HmacSha256 => "HMAC-SHA256",
         Algorithm::Ed25519 => "Ed25519",
         Algorithm::MlDsa44 => "ML-DSA-44",
-        Algorithm::EcVrf => "ECVRF",
+        Algorithm::Groth16Sha256 => "Groth16-SHA256",
     };
     print_field("Algorithm", &algo_name.green());
 

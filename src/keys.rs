@@ -33,11 +33,10 @@ pub struct VerifyingKey {
 }
 
 /// Extract the VerifyingKey from a SigningKey (asymmetric keys only).
-/// For ECVRF, the public key is used for proof verification.
 pub fn extract_verifying_key(sk: &SigningKey) -> Result<VerifyingKey, ProtokenError> {
-    if sk.algorithm == Algorithm::HmacSha256 {
+    if sk.algorithm == Algorithm::HmacSha256 || sk.algorithm == Algorithm::Groth16Sha256 {
         return Err(ProtokenError::MalformedEncoding(
-            "HMAC-SHA256 is symmetric; no verifying key to extract".into(),
+            "symmetric algorithm; no verifying key to extract".into(),
         ));
     }
     if sk.public_key.is_empty() {
@@ -197,9 +196,9 @@ pub fn deserialize_verifying_key(data: &[u8]) -> Result<VerifyingKey, ProtokenEr
         Algorithm::from_byte(algo_byte).ok_or(ProtokenError::InvalidAlgorithm(algo_byte))?;
 
     // Validate
-    if algorithm == Algorithm::HmacSha256 {
+    if algorithm == Algorithm::HmacSha256 || algorithm == Algorithm::Groth16Sha256 {
         return Err(ProtokenError::MalformedEncoding(
-            "HMAC-SHA256 is symmetric; cannot be a verifying key".into(),
+            "symmetric algorithm cannot be a verifying key".into(),
         ));
     }
     validate_public_key_size(algorithm, &public_key)?;
@@ -257,19 +256,13 @@ fn validate_signing_key_sizes(
                 )));
             }
         }
-        Algorithm::EcVrf => {
-            if secret_key.len() != ECVRF_SECRET_KEY_LEN {
+        Algorithm::Groth16Sha256 => {
+            // Groth16 uses a symmetric key (same as HMAC): at least 32 bytes.
+            if secret_key.len() < HMAC_MIN_KEY_LEN {
                 return Err(ProtokenError::MalformedEncoding(format!(
-                    "ECVRF secret key must be {} bytes, got {}",
-                    ECVRF_SECRET_KEY_LEN,
-                    secret_key.len()
-                )));
-            }
-            if public_key.len() != ECVRF_PUBLIC_KEY_LEN {
-                return Err(ProtokenError::MalformedEncoding(format!(
-                    "ECVRF public key must be {} bytes, got {}",
-                    ECVRF_PUBLIC_KEY_LEN,
-                    public_key.len()
+                    "Groth16 symmetric key too short: {} bytes (minimum {})",
+                    secret_key.len(),
+                    HMAC_MIN_KEY_LEN
                 )));
             }
         }
@@ -281,10 +274,9 @@ fn validate_public_key_size(algorithm: Algorithm, public_key: &[u8]) -> Result<(
     let expected = match algorithm {
         Algorithm::Ed25519 => ED25519_PUBLIC_KEY_LEN,
         Algorithm::MlDsa44 => MLDSA44_PUBLIC_KEY_LEN,
-        Algorithm::EcVrf => ECVRF_PUBLIC_KEY_LEN,
-        Algorithm::HmacSha256 => {
+        Algorithm::HmacSha256 | Algorithm::Groth16Sha256 => {
             return Err(ProtokenError::MalformedEncoding(
-                "HMAC-SHA256 has no public key".into(),
+                "symmetric algorithm has no public key".into(),
             ));
         }
     };
@@ -421,40 +413,5 @@ mod tests {
     #[test]
     fn test_rejects_empty_verifying_key() {
         assert!(deserialize_verifying_key(&[]).is_err());
-    }
-
-    #[test]
-    fn test_signing_key_ecvrf_roundtrip() {
-        let key = SigningKey {
-            algorithm: Algorithm::EcVrf,
-            secret_key: Zeroizing::new(vec![0x05; ECVRF_SECRET_KEY_LEN]),
-            public_key: vec![0x06; ECVRF_PUBLIC_KEY_LEN],
-        };
-        let bytes = serialize_signing_key(&key);
-        let decoded = deserialize_signing_key(&bytes).unwrap();
-        assert_eq!(key, decoded);
-    }
-
-    #[test]
-    fn test_verifying_key_ecvrf_roundtrip() {
-        let key = VerifyingKey {
-            algorithm: Algorithm::EcVrf,
-            public_key: vec![0x06; ECVRF_PUBLIC_KEY_LEN],
-        };
-        let bytes = serialize_verifying_key(&key);
-        let decoded = deserialize_verifying_key(&bytes).unwrap();
-        assert_eq!(key, decoded);
-    }
-
-    #[test]
-    fn test_extract_verifying_key_ecvrf() {
-        let sk = SigningKey {
-            algorithm: Algorithm::EcVrf,
-            secret_key: Zeroizing::new(vec![0x05; ECVRF_SECRET_KEY_LEN]),
-            public_key: vec![0x06; ECVRF_PUBLIC_KEY_LEN],
-        };
-        let vk = extract_verifying_key(&sk).unwrap();
-        assert_eq!(vk.algorithm, Algorithm::EcVrf);
-        assert_eq!(vk.public_key, vec![0x06; ECVRF_PUBLIC_KEY_LEN]);
     }
 }

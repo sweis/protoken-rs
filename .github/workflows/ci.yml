@@ -18,6 +18,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       deps: ${{ steps.filter.outputs.deps }}
       tests: ${{ steps.filter.outputs.tests }}
+      snark: ${{ steps.filter.outputs.snark }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -39,6 +40,8 @@ jobs:
               - 'Cargo.lock'
               - '**/Cargo.toml'
               - 'testdata/**'
+            snark:
+              - 'src/snark.rs'
 
   test:
     name: Test
@@ -48,7 +51,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace
+      - run: cargo test --workspace -- --skip snark
+
+  test-snark:
+    name: Test (SNARK)
+    needs: changes
+    if: ${{ needs.changes.outputs.snark == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --lib snark::tests -- --test-threads=1
+        env:
+          RUST_MIN_STACK: 67108864
 
   clippy:
     name: Clippy
