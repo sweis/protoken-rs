@@ -835,11 +835,11 @@ mod tests {
         let token = deserialize_signed_token(&token_bytes).unwrap();
         let payload = deserialize_payload(&token.payload_bytes).unwrap();
 
-        match &payload.metadata.key_identifier {
-            KeyIdentifier::FullKeyHash(hash) => {
-                assert_eq!(hash.len(), FULL_KEY_HASH_LEN);
-            }
-            other => panic!("expected FullKeyHash, got {:?}", other),
-        }
+        assert!(
+            matches!(&payload.metadata.key_identifier, KeyIdentifier::FullKeyHash(hash) if hash.len() == FULL_KEY_HASH_LEN),
+            "expected FullKeyHash with length {}, got {:?}",
+            FULL_KEY_HASH_LEN,
+            payload.metadata.key_identifier
+        );
     }
 }
