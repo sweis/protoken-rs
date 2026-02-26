@@ -698,7 +698,10 @@ mod tests {
         // We corrupt byte at offset ~10 which is inside the payload.
         token_bytes[10] ^= 0x01;
         let result = verify_groth16(&vk, &token_bytes, 1700000000);
-        assert!(result.is_err(), "corrupted key hash should fail verification");
+        assert!(
+            result.is_err(),
+            "corrupted key hash should fail verification"
+        );
     }
 
     #[test]

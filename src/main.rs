@@ -207,10 +207,7 @@ fn cmd_get_verifying_key(keyfile: &str) -> Result<(), Box<dyn std::error::Error>
 /// Maximum SNARK key input size. Proving keys can be tens of MB.
 const MAX_SNARK_KEY_INPUT: u64 = 100_000_000; // 100 MB
 
-fn cmd_snark_setup(
-    pk_path: &str,
-    vk_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_snark_setup(pk_path: &str, vk_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Running Groth16 trusted setup (this may take a minute)...");
     let (pk, vk) = snark::setup()?;
 
@@ -282,16 +279,12 @@ fn cmd_sign(
             sign_mldsa44(&sk.secret_key, claims, key_id)?
         }
         Algorithm::Groth16Sha256 => {
-            let pk_file = proving_key_file.ok_or(
-                "Groth16 signing requires --proving-key <file> (from snark-setup)",
-            )?;
+            let pk_file = proving_key_file
+                .ok_or("Groth16 signing requires --proving-key <file> (from snark-setup)")?;
             let pk_bytes = read_snark_keyfile(&pk_file)?;
             let pk = snark::deserialize_proving_key(&pk_bytes)?;
             let key: [u8; 32] = sk.secret_key.as_slice().try_into().map_err(|_| {
-                format!(
-                    "Groth16 key must be 32 bytes, got {}",
-                    sk.secret_key.len()
-                )
+                format!("Groth16 key must be 32 bytes, got {}", sk.secret_key.len())
             })?;
             sign_groth16(&pk, &key, claims)?
         }
@@ -350,8 +343,9 @@ fn cmd_verify(
     } else if let Ok(snark_vk) = snark::deserialize_verifying_key(&key_bytes) {
         verify_groth16(&snark_vk, &token_bytes, now)?
     } else {
-        return Err("could not parse key file as VerifyingKey, SigningKey, or SNARK VerifyingKey"
-            .into());
+        return Err(
+            "could not parse key file as VerifyingKey, SigningKey, or SNARK VerifyingKey".into(),
+        );
     };
 
     if json {

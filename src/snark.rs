@@ -431,10 +431,7 @@ mod tests {
         // Flip a bit in the proof
         proof_bytes[0] ^= 0x01;
         let result = verify(&vk, &key_hash, &signature, &proof_bytes, payload);
-        assert!(
-            result.is_err(),
-            "corrupted proof should fail verification"
-        );
+        assert!(result.is_err(), "corrupted proof should fail verification");
     }
 
     #[test]
