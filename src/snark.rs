@@ -427,4 +427,64 @@ mod tests {
         let bytes2 = serialize_verifying_key(&vk2).unwrap();
         assert_eq!(bytes, bytes2);
     }
+
+    #[test]
+    fn test_split_key_attack_rejected() {
+        // Attack scenario: prover uses K2 for the HMAC but claims key_hash = SHA-256(K1).
+        // This tests that the circuit binds the same witness K to both the key hash and
+        // the HMAC — a prover cannot use two different keys for the two constraints.
+        let k1 = [0x42u8; 32]; // legitimate key whose hash is in the DB
+        let k2 = [0x99u8; 32]; // attacker's different key
+        assert_ne!(k1, k2);
+
+        let payload = b"test payload";
+        let payload_hash: [u8; 32] = Sha256::digest(payload).into();
+
+        // Attacker computes key_hash from K1 (to match DB) but HMAC from K2
+        let key_hash_k1: [u8; 32] = Sha256::digest(k1).into();
+        let hmac_k2 = native_hmac_sha256(&k2, &payload_hash);
+
+        // Sanity: these are genuinely different operations on different keys
+        let key_hash_k2: [u8; 32] = Sha256::digest(k2).into();
+        assert_ne!(key_hash_k1, key_hash_k2);
+
+        // Build circuit with K2 as witness but K1's key_hash — constraints are unsatisfied
+        let bad_circuit = HmacKeyHashCircuit {
+            key: k2,
+            key_hash: key_hash_k1,
+            payload_hash,
+            hmac_output: hmac_k2,
+        };
+
+        let (pk, vk) = setup().unwrap();
+
+        // Arkworks Groth16 asserts constraint satisfaction in debug builds (panics),
+        // while release builds produce an invalid proof that fails verification.
+        // We handle both: catch_unwind for the panic, then verify rejection if it doesn't.
+        let pk_clone = pk.clone();
+        let prove_result = std::panic::catch_unwind(move || {
+            let mut rng = ark_std::rand::rngs::OsRng;
+            Groth16::<Bn254>::prove(&pk_clone, bad_circuit, &mut rng)
+        });
+
+        match prove_result {
+            Err(_) => {
+                // Prover panicked — constraint system detected the unsatisfied assignment
+            }
+            Ok(Err(_)) => {
+                // Prover returned an error — also acceptable
+            }
+            Ok(Ok(proof)) => {
+                // Proof was produced, but verification must reject it
+                let mut proof_bytes = Vec::new();
+                proof.serialize_compressed(&mut proof_bytes).unwrap();
+
+                let result = verify(&vk, &key_hash_k1, &hmac_k2, &proof_bytes, payload);
+                assert!(
+                    result.is_err(),
+                    "split-key attack: proof must not verify when key_hash and HMAC use different keys"
+                );
+            }
+        }
+    }
 }
