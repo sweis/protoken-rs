@@ -1,4 +1,4 @@
-//! Token verification: HMAC-SHA256, Ed25519, ML-DSA-44, and Groth16-SHA256.
+//! Token verification: HMAC-SHA256, Ed25519, ML-DSA-44, and Groth16-Poseidon.
 
 use hmac::{Hmac, Mac};
 use ml_dsa::signature::Verifier as _;
@@ -223,7 +223,7 @@ pub fn verify_mldsa44(
     })
 }
 
-/// Verify a Groth16-SHA256 token (symmetric key SNARK proof).
+/// Verify a Groth16-Poseidon token (symmetric key SNARK proof).
 ///
 /// `vk` is the Groth16 SNARK verifying key from `snark::setup()`.
 /// `token_bytes` is the serialized SignedToken wire bytes.
@@ -236,9 +236,9 @@ pub fn verify_groth16(
     let token = deserialize_signed_token(token_bytes)?;
     let payload = deserialize_payload(&token.payload_bytes)?;
 
-    if payload.metadata.algorithm != Algorithm::Groth16Sha256 {
+    if payload.metadata.algorithm != Algorithm::Groth16Poseidon {
         return Err(ProtokenError::VerificationFailed(format!(
-            "expected Groth16Sha256, got {:?}",
+            "expected Groth16Poseidon, got {:?}",
             payload.metadata.algorithm
         )));
     }
@@ -632,7 +632,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // Groth16-SHA256 verification tests
+    // Groth16-Poseidon verification tests
 
     fn groth16_test_token() -> (crate::snark::SnarkVerifyingKey, Vec<u8>, [u8; 32]) {
         let (pk, vk) = crate::snark::setup().unwrap();
@@ -651,7 +651,7 @@ mod tests {
         let result = verify_groth16(&vk, &token_bytes, 1700000000);
         assert!(result.is_ok());
         let verified = result.unwrap();
-        assert_eq!(verified.metadata.algorithm, Algorithm::Groth16Sha256);
+        assert_eq!(verified.metadata.algorithm, Algorithm::Groth16Poseidon);
     }
 
     #[test]
@@ -806,7 +806,7 @@ mod tests {
         assert!(result.is_ok());
         let verified = result.unwrap();
         assert_eq!(verified.claims, claims);
-        assert_eq!(verified.metadata.algorithm, Algorithm::Groth16Sha256);
+        assert_eq!(verified.metadata.algorithm, Algorithm::Groth16Poseidon);
     }
 
     #[test]

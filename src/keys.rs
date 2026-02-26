@@ -34,7 +34,7 @@ pub struct VerifyingKey {
 
 /// Extract the VerifyingKey from a SigningKey (asymmetric keys only).
 pub fn extract_verifying_key(sk: &SigningKey) -> Result<VerifyingKey, ProtokenError> {
-    if sk.algorithm == Algorithm::HmacSha256 || sk.algorithm == Algorithm::Groth16Sha256 {
+    if sk.algorithm == Algorithm::HmacSha256 || sk.algorithm == Algorithm::Groth16Poseidon {
         return Err(ProtokenError::MalformedEncoding(
             "symmetric algorithm; no verifying key to extract".into(),
         ));
@@ -196,7 +196,7 @@ pub fn deserialize_verifying_key(data: &[u8]) -> Result<VerifyingKey, ProtokenEr
         Algorithm::from_byte(algo_byte).ok_or(ProtokenError::InvalidAlgorithm(algo_byte))?;
 
     // Validate
-    if algorithm == Algorithm::HmacSha256 || algorithm == Algorithm::Groth16Sha256 {
+    if algorithm == Algorithm::HmacSha256 || algorithm == Algorithm::Groth16Poseidon {
         return Err(ProtokenError::MalformedEncoding(
             "symmetric algorithm cannot be a verifying key".into(),
         ));
@@ -256,7 +256,7 @@ fn validate_signing_key_sizes(
                 )));
             }
         }
-        Algorithm::Groth16Sha256 => {
+        Algorithm::Groth16Poseidon => {
             // Groth16 uses a symmetric key (same as HMAC): at least 32 bytes.
             if secret_key.len() < HMAC_MIN_KEY_LEN {
                 return Err(ProtokenError::MalformedEncoding(format!(
@@ -274,7 +274,7 @@ fn validate_public_key_size(algorithm: Algorithm, public_key: &[u8]) -> Result<(
     let expected = match algorithm {
         Algorithm::Ed25519 => ED25519_PUBLIC_KEY_LEN,
         Algorithm::MlDsa44 => MLDSA44_PUBLIC_KEY_LEN,
-        Algorithm::HmacSha256 | Algorithm::Groth16Sha256 => {
+        Algorithm::HmacSha256 | Algorithm::Groth16Poseidon => {
             return Err(ProtokenError::MalformedEncoding(
                 "symmetric algorithm has no public key".into(),
             ));

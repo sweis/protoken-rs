@@ -1,27 +1,28 @@
-//! Groth16 SNARK for symmetric key proofs.
+//! Groth16 SNARK for symmetric key proofs using Poseidon hash.
 //!
 //! Proves knowledge of a symmetric key K such that:
-//! 1. SHA-256(K) = key_hash (binds the proof to the key identifier)
-//! 2. HMAC-SHA256(K, SHA-256(payload)) = signature (binds the key to the token)
+//! 1. Poseidon(K) = key_hash (binds the proof to the key identifier)
+//! 2. Poseidon(K, SHA-256(payload)) = mac (binds the key to the token)
 //!
 //! The verifier needs only the key_hash (from the token's key_identifier field),
-//! the signature, and the payload bytes — no symmetric key required.
+//! the mac, and the payload bytes — no symmetric key required.
 //!
-//! The circuit uses SHA-256 for both the key hash and HMAC computation.
-//! HMAC is computed over SHA-256(payload_bytes) rather than the raw payload,
-//! so the circuit has fixed-size inputs regardless of payload length.
+//! Hybrid approach: Poseidon inside the circuit (~480 constraints), SHA-256 outside
+//! for payload hashing. This gives ~300x speedup over the pure SHA-256 circuit.
 
 use ark_bn254::{Bn254, Fr};
-use ark_crypto_primitives::crh::sha256::constraints::Sha256Gadget;
-use ark_crypto_primitives::crh::CRHSchemeGadget;
+use ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar;
+use ark_crypto_primitives::sponge::poseidon::constraints::PoseidonSpongeVar;
+use ark_crypto_primitives::sponge::poseidon::PoseidonConfig;
 use ark_groth16::Groth16;
+use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::*;
-use ark_r1cs_std::uint8::UInt8;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_snark::SNARK;
 
 use crate::error::ProtokenError;
+use crate::poseidon;
 use crate::types::GROTH16_PROOF_LEN;
 
 /// Groth16 proving key (circuit-specific, generated during trusted setup).
@@ -33,155 +34,86 @@ pub type SnarkVerifyingKey = ark_groth16::VerifyingKey<Bn254>;
 /// Compressed Groth16 proof.
 pub type SnarkProof = ark_groth16::Proof<Bn254>;
 
-/// HMAC-SHA256 key hash circuit.
+/// Poseidon key proof circuit.
 ///
-/// Public inputs (96 bytes = 768 Boolean field elements):
-///   - key_hash: SHA-256(K) — 32 bytes
-///   - payload_hash: SHA-256(payload_bytes) — 32 bytes
-///   - hmac_output: HMAC-SHA256(K, payload_hash) — 32 bytes
+/// Public inputs (3 field elements):
+///   - key_hash: Poseidon(K)
+///   - payload_hash: Fr::from_le_bytes_mod_order(SHA-256(payload_bytes))
+///   - mac: Poseidon(K, payload_hash)
 ///
 /// Private witness:
-///   - key: K — 32 bytes
-#[derive(Clone, Default)]
-struct HmacKeyHashCircuit {
-    key: [u8; 32],
-    key_hash: [u8; 32],
-    payload_hash: [u8; 32],
-    hmac_output: [u8; 32],
+///   - key: K (1 field element)
+#[derive(Clone)]
+struct PoseidonKeyProofCircuit {
+    config: PoseidonConfig<Fr>,
+    key: Fr,
+    key_hash: Fr,
+    payload_hash: Fr,
+    mac: Fr,
 }
 
-impl ConstraintSynthesizer<Fr> for HmacKeyHashCircuit {
+impl PoseidonKeyProofCircuit {
+    fn new_default(config: PoseidonConfig<Fr>) -> Self {
+        Self {
+            config,
+            key: Fr::from(0u64),
+            key_hash: Fr::from(0u64),
+            payload_hash: Fr::from(0u64),
+            mac: Fr::from(0u64),
+        }
+    }
+}
+
+impl ConstraintSynthesizer<Fr> for PoseidonKeyProofCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
         // Allocate public inputs
-        let key_hash_vars = allocate_bytes_input(cs.clone(), &self.key_hash)?;
-        let payload_hash_vars = allocate_bytes_input(cs.clone(), &self.payload_hash)?;
-        let hmac_output_vars = allocate_bytes_input(cs.clone(), &self.hmac_output)?;
+        let key_hash_var = FpVar::<Fr>::new_input(cs.clone(), || Ok(self.key_hash))?;
+        let payload_hash_var = FpVar::<Fr>::new_input(cs.clone(), || Ok(self.payload_hash))?;
+        let mac_var = FpVar::<Fr>::new_input(cs.clone(), || Ok(self.mac))?;
 
         // Allocate private witness
-        let key_vars = allocate_bytes_witness(cs.clone(), &self.key)?;
+        let key_var = FpVar::<Fr>::new_witness(cs.clone(), || Ok(self.key))?;
 
-        // SHA-256 parameters (unit — SHA-256 has no variable parameters)
-        let sha256_params = <Sha256Gadget<Fr> as CRHSchemeGadget<
-            ark_crypto_primitives::crh::sha256::Sha256,
-            Fr,
-        >>::ParametersVar::default();
+        // Constraint 1: Poseidon(K) = key_hash
+        let mut sponge1 = PoseidonSpongeVar::<Fr>::new(cs.clone(), &self.config);
+        sponge1.absorb(&key_var)?;
+        let computed_key_hash = sponge1.squeeze_field_elements(1)?;
+        // squeeze_field_elements(1) always returns exactly 1 element
+        let computed_key_hash = computed_key_hash
+            .into_iter()
+            .next()
+            .ok_or(SynthesisError::Unsatisfiable)?;
+        computed_key_hash.enforce_equal(&key_hash_var)?;
 
-        // Constraint 1: SHA-256(K) = key_hash
-        let computed_key_hash = <Sha256Gadget<Fr> as CRHSchemeGadget<
-            ark_crypto_primitives::crh::sha256::Sha256,
-            Fr,
-        >>::evaluate(&sha256_params, &key_vars)?;
-        computed_key_hash.0.enforce_equal(&key_hash_vars)?;
-
-        // Constraint 2: HMAC-SHA256(K, payload_hash) = hmac_output
-        //
-        // HMAC(K, M) = SHA-256((K_padded ^ opad) || SHA-256((K_padded ^ ipad) || M))
-        // K_padded = K || 0x00^32 (pad 32-byte key to 64-byte block size)
-        // ipad = 0x36 repeated, opad = 0x5C repeated
-
-        // Build K_padded (64 bytes): key || zeros
-        let mut k_padded = key_vars.clone();
-        for _ in 0..32 {
-            k_padded.push(UInt8::constant(0u8));
-        }
-
-        // ipad = K_padded XOR 0x36^64
-        let mut ipad = Vec::with_capacity(64);
-        for byte in &k_padded {
-            ipad.push(byte ^ 0x36u8);
-        }
-
-        // inner_input = ipad || payload_hash (96 bytes)
-        let mut inner_input = ipad;
-        inner_input.extend_from_slice(&payload_hash_vars);
-
-        let inner_hash = <Sha256Gadget<Fr> as CRHSchemeGadget<
-            ark_crypto_primitives::crh::sha256::Sha256,
-            Fr,
-        >>::evaluate(&sha256_params, &inner_input)?;
-
-        // opad = K_padded XOR 0x5C^64
-        // Rebuild k_padded since it was moved into ipad
-        let mut k_padded2 = key_vars;
-        for _ in 0..32 {
-            k_padded2.push(UInt8::constant(0u8));
-        }
-        let mut opad = Vec::with_capacity(64);
-        for byte in &k_padded2 {
-            opad.push(byte ^ 0x5Cu8);
-        }
-
-        // outer_input = opad || inner_hash (96 bytes)
-        let mut outer_input = opad;
-        outer_input.extend_from_slice(&inner_hash.0);
-
-        let computed_hmac = <Sha256Gadget<Fr> as CRHSchemeGadget<
-            ark_crypto_primitives::crh::sha256::Sha256,
-            Fr,
-        >>::evaluate(&sha256_params, &outer_input)?;
-
-        // Enforce HMAC output matches
-        computed_hmac.0.enforce_equal(&hmac_output_vars)?;
+        // Constraint 2: Poseidon(K, payload_hash) = mac
+        let mut sponge2 = PoseidonSpongeVar::<Fr>::new(cs, &self.config);
+        sponge2.absorb(&key_var)?;
+        sponge2.absorb(&payload_hash_var)?;
+        let computed_mac = sponge2.squeeze_field_elements(1)?;
+        let computed_mac = computed_mac
+            .into_iter()
+            .next()
+            .ok_or(SynthesisError::Unsatisfiable)?;
+        computed_mac.enforce_equal(&mac_var)?;
 
         Ok(())
     }
 }
 
-/// Allocate bytes as public input variables.
-fn allocate_bytes_input(
-    cs: ConstraintSystemRef<Fr>,
-    bytes: &[u8; 32],
-) -> Result<Vec<UInt8<Fr>>, SynthesisError> {
-    let mut vars = Vec::with_capacity(32);
-    for &b in bytes {
-        vars.push(UInt8::new_input(cs.clone(), || Ok(b))?);
-    }
-    Ok(vars)
-}
-
-/// Allocate bytes as private witness variables.
-fn allocate_bytes_witness(
-    cs: ConstraintSystemRef<Fr>,
-    bytes: &[u8; 32],
-) -> Result<Vec<UInt8<Fr>>, SynthesisError> {
-    let mut vars = Vec::with_capacity(32);
-    for &b in bytes {
-        vars.push(UInt8::new_witness(cs.clone(), || Ok(b))?);
-    }
-    Ok(vars)
-}
-
 /// Generate the Groth16 proving and verifying keys (trusted setup).
 ///
-/// This must be run once per deployment. The proving key is large (~tens of MB)
-/// and should be stored securely. The verifying key is small (~25 KB) and can
-/// be distributed publicly.
+/// This must be run once per deployment. With Poseidon (~480 constraints),
+/// setup is fast (seconds) and the proving key is small (~100s of KB).
 pub fn setup() -> Result<(SnarkProvingKey, SnarkVerifyingKey), ProtokenError> {
-    let circuit = HmacKeyHashCircuit::default();
+    let config = poseidon::poseidon_config();
+    let circuit = PoseidonKeyProofCircuit::new_default(config);
     let mut rng = ark_std::rand::rngs::OsRng;
     let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, &mut rng)
         .map_err(|e| ProtokenError::SigningFailed(format!("Groth16 setup failed: {e}")))?;
     Ok((pk, vk))
 }
 
-/// Compute the native HMAC-SHA256(key, payload_hash).
-///
-/// This is used to compute the signature field natively (outside the circuit).
-fn native_hmac_sha256(key: &[u8; 32], payload_hash: &[u8; 32]) -> [u8; 32] {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    type HmacSha256 = Hmac<Sha256>;
-
-    #[allow(clippy::unwrap_used)] // 32-byte key always valid for HMAC
-    let mut mac = HmacSha256::new_from_slice(key).unwrap();
-    mac.update(payload_hash);
-    let result = mac.finalize().into_bytes();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&result);
-    out
-}
-
-/// Result of a Groth16 proof generation: (key_hash, signature, proof_bytes).
+/// Result of a Groth16 proof generation: (key_hash, mac, proof_bytes).
 pub type ProveResult = ([u8; 32], [u8; 32], Vec<u8>);
 
 /// Generate a Groth16 proof for a symmetric key token.
@@ -191,9 +123,9 @@ pub type ProveResult = ([u8; 32], [u8; 32], Vec<u8>);
 ///   - `key`: the 32-byte symmetric key
 ///   - `payload_bytes`: the canonical-encoded payload bytes
 ///
-/// Returns (key_hash, signature, proof_bytes):
-///   - `key_hash`: SHA-256(key) — 32 bytes, used as FullKeyHash key_identifier
-///   - `signature`: HMAC-SHA256(key, SHA-256(payload_bytes)) — 32 bytes
+/// Returns (key_hash_bytes, mac_bytes, proof_bytes):
+///   - `key_hash_bytes`: Poseidon(K) serialized — 32 bytes, used as FullKeyHash key_identifier
+///   - `mac_bytes`: Poseidon(K, SHA-256(payload) as Fr) — 32 bytes, stored as signature
 ///   - `proof_bytes`: compressed Groth16 proof — 128 bytes
 pub fn prove(
     pk: &SnarkProvingKey,
@@ -202,44 +134,54 @@ pub fn prove(
 ) -> Result<ProveResult, ProtokenError> {
     use sha2::{Digest, Sha256};
 
+    let config = poseidon::poseidon_config();
+
+    // Convert key to field element
+    let key_fr = poseidon::bytes_to_fr(key);
+
     // Compute native values
-    let key_hash: [u8; 32] = Sha256::digest(key).into();
-    let payload_hash: [u8; 32] = Sha256::digest(payload_bytes).into();
-    let hmac_output = native_hmac_sha256(key, &payload_hash);
+    let key_hash = poseidon::poseidon_hash(&config, &[key_fr]);
+    let payload_sha256: [u8; 32] = Sha256::digest(payload_bytes).into();
+    let payload_hash_fr = poseidon::bytes_to_fr(&payload_sha256);
+    let mac = poseidon::poseidon_hash(&config, &[key_fr, payload_hash_fr]);
 
     // Build circuit with actual values
-    let circuit = HmacKeyHashCircuit {
-        key: *key,
+    let circuit = PoseidonKeyProofCircuit {
+        config,
+        key: key_fr,
         key_hash,
-        payload_hash,
-        hmac_output,
+        payload_hash: payload_hash_fr,
+        mac,
     };
 
     let mut rng = ark_std::rand::rngs::OsRng;
     let proof = Groth16::<Bn254>::prove(pk, circuit, &mut rng)
         .map_err(|e| ProtokenError::SigningFailed(format!("Groth16 proving failed: {e}")))?;
 
-    // Serialize proof (compressed)
+    // Serialize
+    let key_hash_bytes = poseidon::fr_to_bytes(&key_hash);
+    let mac_bytes = poseidon::fr_to_bytes(&mac);
+
     let mut proof_bytes = Vec::with_capacity(GROTH16_PROOF_LEN);
     proof
         .serialize_compressed(&mut proof_bytes)
         .map_err(|e| ProtokenError::SigningFailed(format!("proof serialization failed: {e}")))?;
 
-    Ok((key_hash, hmac_output, proof_bytes))
+    Ok((key_hash_bytes, mac_bytes, proof_bytes))
 }
 
 /// Verify a Groth16 proof for a symmetric key token.
 ///
 /// Inputs:
 ///   - `vk`: the Groth16 verifying key (from `setup()`)
-///   - `key_hash`: the 32-byte key hash from the token's key_identifier
-///   - `signature`: the 32-byte HMAC signature from the token
+///   - `key_hash_bytes`: the 32-byte Poseidon key hash from the token's key_identifier
+///   - `mac_bytes`: the 32-byte Poseidon MAC from the token's signature
 ///   - `proof_bytes`: the compressed Groth16 proof (128 bytes)
 ///   - `payload_bytes`: the canonical-encoded payload bytes
 pub fn verify(
     vk: &SnarkVerifyingKey,
-    key_hash: &[u8; 32],
-    signature: &[u8; 32],
+    key_hash_bytes: &[u8; 32],
+    mac_bytes: &[u8; 32],
     proof_bytes: &[u8],
     payload_bytes: &[u8],
 ) -> Result<(), ProtokenError> {
@@ -249,11 +191,14 @@ pub fn verify(
     let proof = SnarkProof::deserialize_compressed(proof_bytes)
         .map_err(|e| ProtokenError::VerificationFailed(format!("invalid Groth16 proof: {e}")))?;
 
-    // Compute payload hash (verifier computes this from the raw payload)
-    let payload_hash: [u8; 32] = Sha256::digest(payload_bytes).into();
+    // Reconstruct public inputs as field elements
+    let key_hash_fr = poseidon::bytes_to_fr(key_hash_bytes);
+    let payload_sha256: [u8; 32] = Sha256::digest(payload_bytes).into();
+    let payload_hash_fr = poseidon::bytes_to_fr(&payload_sha256);
+    let mac_fr = poseidon::bytes_to_fr(mac_bytes);
 
-    // Encode public inputs as field elements (each byte → 8 Boolean field elements)
-    let public_inputs = encode_public_inputs(key_hash, &payload_hash, signature);
+    // Public inputs: [key_hash, payload_hash, mac]
+    let public_inputs = vec![key_hash_fr, payload_hash_fr, mac_fr];
 
     // Prepare verifying key for efficient verification
     let pvk = ark_groth16::prepare_verifying_key(vk);
@@ -271,32 +216,6 @@ pub fn verify(
     }
 
     Ok(())
-}
-
-/// Encode public inputs as BN254 scalar field elements.
-///
-/// Each byte is encoded as 8 Boolean (0/1) field elements in little-endian
-/// order (LSB first), matching arkworks `UInt8::new_input` allocation order.
-fn encode_public_inputs(
-    key_hash: &[u8; 32],
-    payload_hash: &[u8; 32],
-    hmac_output: &[u8; 32],
-) -> Vec<Fr> {
-    let mut inputs = Vec::with_capacity(768); // 96 bytes × 8 bits
-    for group in [
-        key_hash.as_slice(),
-        payload_hash.as_slice(),
-        hmac_output.as_slice(),
-    ] {
-        for &byte in group {
-            // UInt8 allocates bits in little-endian order (LSB first)
-            for bit_idx in 0..8 {
-                let bit = (byte >> bit_idx) & 1;
-                inputs.push(Fr::from(bit as u64));
-            }
-        }
-    }
-    inputs
 }
 
 /// Serialize a Groth16 verifying key to bytes.
@@ -332,35 +251,24 @@ pub fn deserialize_proving_key(data: &[u8]) -> Result<SnarkProvingKey, ProtokenE
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
-
-    #[test]
-    fn test_native_hmac_matches_hmac_crate() {
-        let key = [0xABu8; 32];
-        let payload_hash: [u8; 32] = Sha256::digest(b"test payload").into();
-        let result = native_hmac_sha256(&key, &payload_hash);
-        assert_eq!(result.len(), 32);
-        // Verify deterministic
-        let result2 = native_hmac_sha256(&key, &payload_hash);
-        assert_eq!(result, result2);
-    }
 
     #[test]
     fn test_setup_and_prove_verify() {
-        // This test is slow (~30s) due to circuit setup and proving
         let (pk, vk) = setup().unwrap();
 
         let key = [0x42u8; 32];
         let payload = b"test payload bytes";
 
-        let (key_hash, signature, proof_bytes) = prove(&pk, &key, payload).unwrap();
+        let (key_hash, mac, proof_bytes) = prove(&pk, &key, payload).unwrap();
 
-        // Verify the key hash
-        let expected_hash: [u8; 32] = Sha256::digest(key).into();
-        assert_eq!(key_hash, expected_hash);
+        // Verify the key hash matches native computation
+        let config = poseidon::poseidon_config();
+        let key_fr = poseidon::bytes_to_fr(&key);
+        let expected_hash = poseidon::poseidon_hash(&config, &[key_fr]);
+        assert_eq!(key_hash, poseidon::fr_to_bytes(&expected_hash));
 
         // Verify the proof
-        verify(&vk, &key_hash, &signature, &proof_bytes, payload).unwrap();
+        verify(&vk, &key_hash, &mac, &proof_bytes, payload).unwrap();
 
         // Verify proof size
         assert_eq!(proof_bytes.len(), GROTH16_PROOF_LEN);
@@ -373,11 +281,10 @@ mod tests {
         let key = [0x42u8; 32];
         let payload = b"test payload";
 
-        let (_key_hash, signature, proof_bytes) = prove(&pk, &key, payload).unwrap();
+        let (_key_hash, mac, proof_bytes) = prove(&pk, &key, payload).unwrap();
 
-        // Use a different key hash
         let wrong_hash = [0xFFu8; 32];
-        let result = verify(&vk, &wrong_hash, &signature, &proof_bytes, payload);
+        let result = verify(&vk, &wrong_hash, &mac, &proof_bytes, payload);
         assert!(
             matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("proof verification failed")),
             "expected proof verification failed, got: {result:?}"
@@ -385,17 +292,16 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_rejects_wrong_signature() {
+    fn test_verify_rejects_wrong_mac() {
         let (pk, vk) = setup().unwrap();
 
         let key = [0x42u8; 32];
         let payload = b"test payload";
 
-        let (key_hash, _signature, proof_bytes) = prove(&pk, &key, payload).unwrap();
+        let (key_hash, _mac, proof_bytes) = prove(&pk, &key, payload).unwrap();
 
-        // Use a different signature
-        let wrong_sig = [0xFFu8; 32];
-        let result = verify(&vk, &key_hash, &wrong_sig, &proof_bytes, payload);
+        let wrong_mac = [0xFFu8; 32];
+        let result = verify(&vk, &key_hash, &wrong_mac, &proof_bytes, payload);
         assert!(
             matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("proof verification failed")),
             "expected proof verification failed, got: {result:?}"
@@ -409,10 +315,9 @@ mod tests {
         let key = [0x42u8; 32];
         let payload = b"test payload";
 
-        let (key_hash, signature, proof_bytes) = prove(&pk, &key, payload).unwrap();
+        let (key_hash, mac, proof_bytes) = prove(&pk, &key, payload).unwrap();
 
-        // Use a different payload
-        let result = verify(&vk, &key_hash, &signature, &proof_bytes, b"different");
+        let result = verify(&vk, &key_hash, &mac, &proof_bytes, b"different");
         assert!(
             matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("proof verification failed")),
             "expected proof verification failed, got: {result:?}"
@@ -426,11 +331,10 @@ mod tests {
         let key = [0x42u8; 32];
         let payload = b"test payload";
 
-        let (key_hash, signature, mut proof_bytes) = prove(&pk, &key, payload).unwrap();
+        let (key_hash, mac, mut proof_bytes) = prove(&pk, &key, payload).unwrap();
 
-        // Flip a bit in the proof
         proof_bytes[0] ^= 0x01;
-        let result = verify(&vk, &key_hash, &signature, &proof_bytes, payload);
+        let result = verify(&vk, &key_hash, &mac, &proof_bytes, payload);
         assert!(result.is_err(), "corrupted proof should fail verification");
     }
 
@@ -441,11 +345,10 @@ mod tests {
         let key = [0x42u8; 32];
         let payload = b"test payload";
 
-        let (key_hash, signature, proof_bytes) = prove(&pk, &key, payload).unwrap();
+        let (key_hash, mac, proof_bytes) = prove(&pk, &key, payload).unwrap();
 
-        // Truncate the proof to half its length
         let truncated = &proof_bytes[..proof_bytes.len() / 2];
-        let result = verify(&vk, &key_hash, &signature, truncated, payload);
+        let result = verify(&vk, &key_hash, &mac, truncated, payload);
         assert!(
             matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("invalid Groth16 proof")),
             "expected invalid proof error, got: {result:?}"
@@ -459,9 +362,9 @@ mod tests {
         let key = [0x42u8; 32];
         let payload = b"test payload";
 
-        let (key_hash, signature, _proof_bytes) = prove(&pk, &key, payload).unwrap();
+        let (key_hash, mac, _proof_bytes) = prove(&pk, &key, payload).unwrap();
 
-        let result = verify(&vk, &key_hash, &signature, &[], payload);
+        let result = verify(&vk, &key_hash, &mac, &[], payload);
         assert!(
             matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("invalid Groth16 proof")),
             "expected invalid proof error, got: {result:?}"
@@ -488,37 +391,42 @@ mod tests {
 
     #[test]
     fn test_split_key_attack_rejected() {
-        // Attack scenario: prover uses K2 for the HMAC but claims key_hash = SHA-256(K1).
-        // This tests that the circuit binds the same witness K to both the key hash and
-        // the HMAC — a prover cannot use two different keys for the two constraints.
-        let k1 = [0x42u8; 32]; // legitimate key whose hash is in the DB
-        let k2 = [0x99u8; 32]; // attacker's different key
+        // Attack: prover uses K2 for the MAC but claims key_hash = Poseidon(K1).
+        // The circuit binds the same witness K to both constraints.
+        let k1 = [0x42u8; 32];
+        let k2 = [0x99u8; 32];
         assert_ne!(k1, k2);
 
+        let config = poseidon::poseidon_config();
         let payload = b"test payload";
-        let payload_hash: [u8; 32] = Sha256::digest(payload).into();
 
-        // Attacker computes key_hash from K1 (to match DB) but HMAC from K2
-        let key_hash_k1: [u8; 32] = Sha256::digest(k1).into();
-        let hmac_k2 = native_hmac_sha256(&k2, &payload_hash);
+        use sha2::{Digest, Sha256};
+        let payload_sha256: [u8; 32] = Sha256::digest(payload).into();
+        let payload_hash_fr = poseidon::bytes_to_fr(&payload_sha256);
 
-        // Sanity: these are genuinely different operations on different keys
-        let key_hash_k2: [u8; 32] = Sha256::digest(k2).into();
+        // Attacker computes key_hash from K1 but MAC from K2
+        let k1_fr = poseidon::bytes_to_fr(&k1);
+        let k2_fr = poseidon::bytes_to_fr(&k2);
+        let key_hash_k1 = poseidon::poseidon_hash(&config, &[k1_fr]);
+        let mac_k2 = poseidon::poseidon_hash(&config, &[k2_fr, payload_hash_fr]);
+
+        // Sanity: these use different keys
+        let key_hash_k2 = poseidon::poseidon_hash(&config, &[k2_fr]);
         assert_ne!(key_hash_k1, key_hash_k2);
 
-        // Build circuit with K2 as witness but K1's key_hash — constraints are unsatisfied
-        let bad_circuit = HmacKeyHashCircuit {
-            key: k2,
+        // Build circuit with K2 as witness but K1's key_hash — constraints unsatisfied
+        let bad_circuit = PoseidonKeyProofCircuit {
+            config: config.clone(),
+            key: k2_fr,
             key_hash: key_hash_k1,
-            payload_hash,
-            hmac_output: hmac_k2,
+            payload_hash: payload_hash_fr,
+            mac: mac_k2,
         };
 
         let (pk, vk) = setup().unwrap();
 
-        // Arkworks Groth16 asserts constraint satisfaction in debug builds (panics),
-        // while release builds produce an invalid proof that fails verification.
-        // We handle both: catch_unwind for the panic, then verify rejection if it doesn't.
+        // Arkworks Groth16 panics on unsatisfied constraints in debug builds,
+        // or produces an invalid proof in release builds.
         let pk_clone = pk.clone();
         let prove_result = std::panic::catch_unwind(move || {
             let mut rng = ark_std::rand::rngs::OsRng;
@@ -537,10 +445,12 @@ mod tests {
                 let mut proof_bytes = Vec::new();
                 proof.serialize_compressed(&mut proof_bytes).unwrap();
 
-                let result = verify(&vk, &key_hash_k1, &hmac_k2, &proof_bytes, payload);
+                let key_hash_bytes = poseidon::fr_to_bytes(&key_hash_k1);
+                let mac_bytes = poseidon::fr_to_bytes(&mac_k2);
+                let result = verify(&vk, &key_hash_bytes, &mac_bytes, &proof_bytes, payload);
                 assert!(
                     result.is_err(),
-                    "split-key attack: proof must not verify when key_hash and HMAC use different keys"
+                    "split-key attack: proof must not verify when key_hash and MAC use different keys"
                 );
             }
         }

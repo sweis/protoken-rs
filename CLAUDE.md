@@ -13,7 +13,7 @@ Protokens are designed to be a simple, fast replacement for JWTs, ad hoc tokens,
 2. These are signed tokens that support a symmetric MAC, asymmetric signatures, and SNARK proofs.
 3. The symmetric MAC is HMAC-SHA256.
 4. The asymmetric signatures are Ed25519 and ML-DSA-44 (post-quantum, FIPS 204).
-4b. Groth16-SHA256 proves knowledge of a symmetric key via a zero-knowledge SNARK proof.
+4b. Groth16-Poseidon proves knowledge of a symmetric key via a zero-knowledge SNARK proof.
 5. The implementation is in Rust.
 6. The goal is a minimal token format. We start simple and add only fields essential to our use cases.
 
@@ -21,7 +21,7 @@ Protokens are designed to be a simple, fast replacement for JWTs, ad hoc tokens,
 ```proto
 message Payload {
   uint32 version = 1;      // reserved, always 0 (omitted on wire)
-  uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44, 4 = Groth16-SHA256
+  uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44, 4 = Groth16-Poseidon
   uint32 key_id_type = 3;  // 1 = key_hash, 2 = public_key, 3 = full_key_hash
   bytes  key_id = 4;       // 8 B (key_hash), 32 B (Ed25519/full_key_hash), 1312 B (ML-DSA-44)
   uint64 expires_at = 5;   // Unix seconds
@@ -39,7 +39,7 @@ message SignedToken {
 }
 
 message SigningKey {
-  uint32 algorithm = 1;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44, 4 = Groth16-SHA256
+  uint32 algorithm = 1;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44, 4 = Groth16-Poseidon
   bytes secret_key = 2;    // HMAC/Groth16: raw key (≥32 B); Ed25519: 32 B seed; ML-DSA-44: 2560 B
   bytes public_key = 3;    // Ed25519: 32 B; ML-DSA-44: 1312 B; empty for HMAC/Groth16
 }
@@ -48,7 +48,7 @@ message VerifyingKey {
   uint32 algorithm = 1;    // 2 = Ed25519, 3 = ML-DSA-44
   bytes public_key = 2;    // Ed25519: 32 B; ML-DSA-44: 1312 B
 }
-// Note: Groth16-SHA256 verification uses a separate SNARK verifying key, not VerifyingKey proto.
+// Note: Groth16-Poseidon verification uses a separate SNARK verifying key, not VerifyingKey proto.
 ```
 
 7. Canonical encoding rules: fields in ascending order, minimal varints, default values (0/empty) omitted. Repeated fields (scope) appear consecutively, sorted lexicographically, no duplicates.
@@ -120,37 +120,44 @@ we already support. The original motivation was "verification with only a key ha
 VRFs don't achieve that. Research notes kept in
 [notes/research-symmetric-key-proofs.md](notes/research-symmetric-key-proofs.md).
 
-### Groth16-SHA256 SNARK (added 2026-02-26)
-Added Groth16-SHA256 as algorithm 4, replacing the removed ECVRF. This is a true symmetric
-key proof: the prover demonstrates knowledge of a key K such that SHA-256(K) = key_hash
-and HMAC-SHA256(K, SHA-256(payload)) = signature, without revealing K.
+### Groth16-Poseidon SNARK (added 2026-02-26, migrated SHA-256→Poseidon 2026-02-26)
+Added Groth16 as algorithm 4, replacing the removed ECVRF. This is a true symmetric
+key proof: the prover demonstrates knowledge of a key K such that Poseidon(K) = key_hash
+and Poseidon(K, payload_hash) = mac, without revealing K. The payload_hash is computed
+outside the circuit using SHA-256 for compatibility, while Poseidon is used in-circuit
+for ZK-friendliness.
 
 **Circuit design**: Fixed-size R1CS circuit using arkworks ecosystem (BN254 curve).
-Public inputs: key_hash (32B) + payload_hash (32B) + hmac_output (32B) = 96 bytes
-encoded as 768 Boolean field elements. Private witness: key K (32B).
-The circuit computes SHA-256 in-circuit for both the key hash and HMAC.
+Public inputs: 3 native BN254 field elements (key_hash, payload_hash, mac).
+Private witness: key K (1 field element, derived from 32-byte key via `Fr::from_le_bytes_mod_order`).
+The circuit computes Poseidon in-circuit for both the key hash and MAC (~480 constraints
+vs ~150K for SHA-256).
 
-**Properties**: 128-byte compressed proof (2×G1 + 1×G2 on BN254), ~30s prove time (debug),
+**Poseidon parameters**: BN254 scalar field, t=3 (rate=2, capacity=1), alpha=5,
+8 full rounds + 57 partial rounds. Parameters derived via Grain LFSR (Poseidon paper).
+
+**Properties**: 128-byte compressed proof (2×G1 + 1×G2 on BN254), ~3s prove time,
 <1s verify. Requires trusted setup (circuit-specific CRS). The SNARK verifying key is
-separate from the proto VerifyingKey (it's an arkworks-specific ~25KB structure).
+separate from the proto VerifyingKey (it's an arkworks-specific structure).
 
 **Dependencies**: arkworks ecosystem v0.5 — ark-ff, ark-bn254, ark-groth16, ark-relations,
-ark-r1cs-std, ark-crypto-primitives (SHA-256 gadget), ark-snark, ark-serialize, ark-std.
+ark-r1cs-std, ark-crypto-primitives (Poseidon sponge gadget), ark-snark, ark-serialize, ark-std.
 
 ## Implementation Status
 
-All TODO items 1-8 are implemented, plus ML-DSA-44 and Groth16-SHA256 support:
-- `src/types.rs` - Core types (Version, Algorithm incl. MlDsa44/Groth16Sha256, KeyIdentifier incl. FullKeyHash, Payload, SignedToken, Claims)
+All TODO items 1-8 are implemented, plus ML-DSA-44 and Groth16-Poseidon support:
+- `src/types.rs` - Core types (Version, Algorithm incl. MlDsa44/Groth16Poseidon, KeyIdentifier incl. FullKeyHash, Payload, SignedToken, Claims)
 - `src/proto3.rs` - Canonical proto3 wire encoder/decoder
 - `src/serialize.rs` - Deterministic serialization/deserialization for Payload and SignedToken (incl. proof field)
 - `src/keys.rs` - Proto3 key serialization (SigningKey, VerifyingKey) with validation for all 4 algorithms
-- `src/sign.rs` - HMAC-SHA256, Ed25519, ML-DSA-44, and Groth16-SHA256 signing
+- `src/poseidon.rs` - Poseidon hash config (BN254, t=3), native hash, bytes↔field element conversion
+- `src/sign.rs` - HMAC-SHA256, Ed25519, ML-DSA-44, and Groth16-Poseidon signing
 - `src/verify.rs` - Verification with key hash matching, expiry and not_before checking, Groth16 SNARK verification
-- `src/snark.rs` - Groth16 SNARK circuit (HMAC-SHA256 key proof), setup/prove/verify, key serialization
+- `src/snark.rs` - Groth16 SNARK circuit (Poseidon key proof, ~480 constraints), setup/prove/verify, key serialization
 - `src/main.rs` - CLI tool with `generate-key`, `get-verifying-key`, `snark-setup`, `sign`, `verify`, `inspect` commands (all 4 algorithms)
 - `src/error.rs` - Error types
-- 110 tests (89 unit + 11 SNARK + 10 Groth16 e2e) including byte-level corruption tests for all algorithms
-- `notes/` - Research documents (prior art, Ed25519 vs P-256, protobuf determinism, post-quantum, ML-DSA key formats, subject identifiers, symmetric key proofs)
+- 132 tests (115 unit + 4 reference + 13 test vectors) including byte-level corruption tests for all algorithms
+- `notes/` - Research documents (prior art, Ed25519 vs P-256, protobuf determinism, post-quantum, ML-DSA key formats, subject identifiers, symmetric key proofs, ZK-friendly hashes, Groth16 trusted setup)
 
 ## Research Prior Art
 
