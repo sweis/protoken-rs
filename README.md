@@ -6,11 +6,12 @@ Warning: This is experimental and largely AI generated. It is not production rea
 
 **Warning**: This code is experimental and not ready for production. It is mostly AI generated and has not had human review.
 
-Supports three signature algorithms:
+Supports four algorithms:
 
-- **HMAC-SHA256** -- symmetric, ~56-byte tokens
-- **Ed25519** -- asymmetric, ~88-byte tokens
-- **ML-DSA-44** -- post-quantum (FIPS 204), ~2,500-byte tokens
+- **HMAC-SHA256** -- symmetric MAC, ~56-byte tokens
+- **Ed25519** -- asymmetric signature, ~88-byte tokens
+- **ML-DSA-44** -- post-quantum signature (FIPS 204), ~2,500-byte tokens
+- **ECVRF** -- verifiable random function (RFC 9381), ~190-byte tokens
 
 ## Build
 
@@ -123,6 +124,11 @@ protoken sign hmac.key 4d | protoken verify hmac.key
 protoken generate-key -a ml-dsa-44 > pq.key
 protoken get-verifying-key pq.key > pq.pub
 protoken sign pq.key 1h | protoken verify pq.pub
+
+# ECVRF (verifiable random function, RFC 9381)
+protoken generate-key -a ecvrf > vrf.key
+protoken get-verifying-key vrf.key > vrf.pub
+protoken sign vrf.key 1h | protoken verify vrf.pub
 ```
 
 ### Sign with claims
@@ -154,9 +160,9 @@ Payloads use canonical proto3 encoding: fields in ascending order, minimal varin
 ```proto
 message Payload {
   uint32 version = 1;      // reserved, always 0 (omitted on wire)
-  uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44
-  uint32 key_id_type = 3;  // 1 = key_hash, 2 = public_key
-  bytes  key_id = 4;       // 8 B (key_hash) or variable (32 B Ed25519, 1312 B ML-DSA-44)
+  uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44, 4 = ECVRF
+  uint32 key_id_type = 3;  // 1 = key_hash, 2 = public_key, 3 = full_key_hash
+  bytes  key_id = 4;       // 8 B (key_hash), 32 B (full_key_hash/Ed25519/ECVRF), 1312 B (ML-DSA-44)
   uint64 expires_at = 5;   // Unix seconds
   uint64 not_before = 6;   // optional
   uint64 issued_at = 7;    // optional
@@ -167,18 +173,19 @@ message Payload {
 
 message SignedToken {
   Payload payload = 1;
-  bytes   signature = 2;   // HMAC-SHA256 (32 B), Ed25519 (64 B), or ML-DSA-44 (2420 B)
+  bytes   signature = 2;   // HMAC-SHA256 (32 B), Ed25519 (64 B), ML-DSA-44 (2420 B), or VRF output (64 B)
+  bytes   proof = 3;       // VRF proof (80 B for ECVRF), empty for other algorithms
 }
 
 message SigningKey {
   uint32 algorithm = 1;
-  bytes secret_key = 2;    // HMAC: raw key; Ed25519: 32 B seed; ML-DSA-44: 2560 B
-  bytes public_key = 3;    // Ed25519: 32 B; ML-DSA-44: 1312 B; empty for HMAC
+  bytes secret_key = 2;    // HMAC: raw key (≥32 B); Ed25519: 32 B seed; ML-DSA-44: 2560 B; ECVRF: 32 B
+  bytes public_key = 3;    // Ed25519: 32 B; ML-DSA-44: 1312 B; ECVRF: 32 B; empty for HMAC
 }
 
 message VerifyingKey {
-  uint32 algorithm = 1;
-  bytes public_key = 2;    // Ed25519: 32 B; ML-DSA-44: 1312 B
+  uint32 algorithm = 1;    // 2 = Ed25519, 3 = ML-DSA-44, 4 = ECVRF
+  bytes public_key = 2;    // Ed25519: 32 B; ML-DSA-44: 1312 B; ECVRF: 32 B
 }
 ```
 
@@ -189,6 +196,7 @@ message VerifyingKey {
 | HMAC + key_hash (minimal) | ~20 B | 32 B | ~56 B |
 | Ed25519 + key_hash (minimal) | ~20 B | 64 B | ~88 B |
 | ML-DSA-44 + key_hash (minimal) | ~20 B | 2420 B | ~2,450 B |
+| ECVRF + full_key_hash (minimal) | ~40 B | 64 B + 80 B proof | ~190 B |
 | Ed25519 + public_key + claims | ~70 B | 64 B | ~138 B |
 
 ## Test vectors

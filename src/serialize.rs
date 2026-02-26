@@ -18,6 +18,7 @@
 //! SignedToken proto3 fields:
 //!   Payload payload = 1;     tag 0x0A (submessage)
 //!   bytes   signature = 2;   tag 0x12
+//!   bytes   proof = 3;       tag 0x1A (VRF proof, empty for non-VRF algorithms)
 
 use crate::error::ProtokenError;
 use crate::proto3;
@@ -39,6 +40,7 @@ pub fn serialize_payload(payload: &Payload) -> Vec<u8> {
     match &payload.metadata.key_identifier {
         KeyIdentifier::KeyHash(hash) => proto3::encode_bytes(4, hash, &mut buf),
         KeyIdentifier::PublicKey(pk) => proto3::encode_bytes(4, pk, &mut buf),
+        KeyIdentifier::FullKeyHash(hash) => proto3::encode_bytes(4, hash, &mut buf),
     }
 
     proto3::encode_uint64(5, payload.claims.expires_at, &mut buf);
@@ -204,7 +206,7 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
             let expected_len = match algorithm {
                 Algorithm::Ed25519 => ED25519_PUBLIC_KEY_LEN,
                 Algorithm::MlDsa44 => MLDSA44_PUBLIC_KEY_LEN,
-                Algorithm::HmacSha256 => {
+                Algorithm::HmacSha256 | Algorithm::EcVrf => {
                     return Err(ProtokenError::InvalidKeyIdType(key_id_type.to_byte()));
                 }
             };
@@ -215,6 +217,17 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
                 });
             }
             KeyIdentifier::PublicKey(key_id)
+        }
+        KeyIdType::FullKeyHash => {
+            if key_id.len() != FULL_KEY_HASH_LEN {
+                return Err(ProtokenError::InvalidKeyLength {
+                    expected: FULL_KEY_HASH_LEN,
+                    actual: key_id.len(),
+                });
+            }
+            let mut hash = [0u8; FULL_KEY_HASH_LEN];
+            hash.copy_from_slice(&key_id);
+            KeyIdentifier::FullKeyHash(hash)
         }
     };
 
@@ -235,20 +248,26 @@ pub fn deserialize_payload(data: &[u8]) -> Result<Payload, ProtokenError> {
     })
 }
 
-/// Serialize a SignedToken as proto3: { Payload payload = 1; bytes signature = 2; }
+/// Serialize a SignedToken as proto3:
+/// { Payload payload = 1; bytes signature = 2; bytes proof = 3; }
 #[must_use]
 pub fn serialize_signed_token(token: &SignedToken) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(token.payload_bytes.len() + token.signature.len() + 6);
+    let mut buf = Vec::with_capacity(
+        token.payload_bytes.len() + token.signature.len() + token.proof.len() + 10,
+    );
     proto3::encode_bytes(1, &token.payload_bytes, &mut buf);
     proto3::encode_bytes(2, &token.signature, &mut buf);
+    // proof is omitted when empty (proto3 default)
+    proto3::encode_bytes(3, &token.proof, &mut buf);
     buf
 }
 
 /// Deserialize a SignedToken from proto3 bytes.
-/// Returns the raw payload bytes (for signature verification) and signature.
+/// Returns the raw payload bytes (for signature verification), signature, and optional proof.
 /// Callers should use `deserialize_payload()` on `payload_bytes` to validate and parse the payload.
-/// Maximum total size for a serialized SignedToken (payload + signature + framing).
-const MAX_SIGNED_TOKEN_BYTES: usize = MAX_PAYLOAD_BYTES + MAX_SIGNATURE_BYTES + 32;
+/// Maximum total size for a serialized SignedToken (payload + signature + proof + framing).
+const MAX_SIGNED_TOKEN_BYTES: usize =
+    MAX_PAYLOAD_BYTES + MAX_SIGNATURE_BYTES + MAX_PROOF_BYTES + 32;
 
 pub fn deserialize_signed_token(data: &[u8]) -> Result<SignedToken, ProtokenError> {
     if data.is_empty() {
@@ -267,6 +286,7 @@ pub fn deserialize_signed_token(data: &[u8]) -> Result<SignedToken, ProtokenErro
 
     let mut payload_bytes: Option<Vec<u8>> = None;
     let mut signature: Option<Vec<u8>> = None;
+    let mut proof: Vec<u8> = Vec::new();
 
     let mut pos = 0;
     let mut last_field_number = 0u32;
@@ -304,6 +324,17 @@ pub fn deserialize_signed_token(data: &[u8]) -> Result<SignedToken, ProtokenErro
                 }
                 signature = Some(bytes.to_vec());
             }
+            (3, 2) => {
+                let bytes = proto3::read_bytes_value(data, &mut pos)?;
+                if bytes.len() > MAX_PROOF_BYTES {
+                    return Err(ProtokenError::MalformedEncoding(format!(
+                        "proof too large: {} bytes (max {})",
+                        bytes.len(),
+                        MAX_PROOF_BYTES
+                    )));
+                }
+                proof = bytes.to_vec();
+            }
             (_, _) => {
                 return Err(ProtokenError::MalformedEncoding(format!(
                     "unexpected field {field_number} (wire type {wire_type}) in SignedToken"
@@ -322,6 +353,7 @@ pub fn deserialize_signed_token(data: &[u8]) -> Result<SignedToken, ProtokenErro
     Ok(SignedToken {
         payload_bytes,
         signature,
+        proof,
     })
 }
 
@@ -484,6 +516,7 @@ mod tests {
         let token = SignedToken {
             payload_bytes: payload_bytes.clone(),
             signature: signature.clone(),
+            proof: Vec::new(),
         };
         let wire = serialize_signed_token(&token);
 
@@ -503,6 +536,7 @@ mod tests {
         let token = SignedToken {
             payload_bytes: payload_bytes.clone(),
             signature: signature.clone(),
+            proof: Vec::new(),
         };
         let wire = serialize_signed_token(&token);
         let decoded = deserialize_signed_token(&wire).unwrap();
@@ -713,6 +747,7 @@ mod tests {
         let token = SignedToken {
             payload_bytes,
             signature: vec![0xAB; 32],
+            proof: Vec::new(),
         };
         let wire = serialize_signed_token(&token);
         for len in 1..wire.len() {
@@ -799,6 +834,7 @@ mod tests {
         let token = SignedToken {
             payload_bytes: payload_bytes.clone(),
             signature: vec![0xAB; 32],
+            proof: Vec::new(),
         };
         let wire = serialize_signed_token(&token);
         let decoded = deserialize_signed_token(&wire).unwrap();
@@ -807,5 +843,63 @@ mod tests {
             decoded_payload.claims.scopes,
             vec!["admin", "read", "write"]
         );
+    }
+
+    #[test]
+    fn test_payload_ecvrf_full_key_hash_roundtrip() {
+        let payload = Payload {
+            metadata: Metadata {
+                version: Version::V0,
+                algorithm: Algorithm::EcVrf,
+                key_identifier: KeyIdentifier::FullKeyHash([0xCC; FULL_KEY_HASH_LEN]),
+            },
+            claims: Claims {
+                expires_at: 2000000000,
+                ..Default::default()
+            },
+        };
+        let bytes = serialize_payload(&payload);
+        let decoded = deserialize_payload(&bytes).unwrap();
+        assert_eq!(payload, decoded);
+    }
+
+    #[test]
+    fn test_signed_token_with_proof_roundtrip() {
+        let payload = Payload {
+            metadata: Metadata {
+                version: Version::V0,
+                algorithm: Algorithm::EcVrf,
+                key_identifier: KeyIdentifier::FullKeyHash([0xCC; FULL_KEY_HASH_LEN]),
+            },
+            claims: Claims {
+                expires_at: 2000000000,
+                ..Default::default()
+            },
+        };
+        let payload_bytes = serialize_payload(&payload);
+        let token = SignedToken {
+            payload_bytes: payload_bytes.clone(),
+            signature: vec![0xDD; 64],
+            proof: vec![0xEE; 80],
+        };
+        let wire = serialize_signed_token(&token);
+        let decoded = deserialize_signed_token(&wire).unwrap();
+        assert_eq!(decoded.payload_bytes, payload_bytes);
+        assert_eq!(decoded.signature, vec![0xDD; 64]);
+        assert_eq!(decoded.proof, vec![0xEE; 80]);
+    }
+
+    #[test]
+    fn test_signed_token_without_proof_has_empty_proof() {
+        let payload = sample_payload_hmac();
+        let payload_bytes = serialize_payload(&payload);
+        let token = SignedToken {
+            payload_bytes: payload_bytes.clone(),
+            signature: vec![0xAB; 32],
+            proof: Vec::new(),
+        };
+        let wire = serialize_signed_token(&token);
+        let decoded = deserialize_signed_token(&wire).unwrap();
+        assert!(decoded.proof.is_empty(), "empty proof should remain empty");
     }
 }

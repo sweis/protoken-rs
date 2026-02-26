@@ -1,4 +1,4 @@
-//! Token verification: HMAC-SHA256, Ed25519, and ML-DSA-44.
+//! Token verification: HMAC-SHA256, Ed25519, ML-DSA-44, and ECVRF.
 
 use hmac::{Hmac, Mac};
 use ml_dsa::signature::Verifier as _;
@@ -8,7 +8,7 @@ use subtle::ConstantTimeEq;
 
 use crate::error::ProtokenError;
 use crate::serialize::{deserialize_payload, deserialize_signed_token};
-use crate::sign::compute_key_hash;
+use crate::sign::{compute_full_key_hash, compute_key_hash};
 use crate::types::*;
 
 /// Constant-time key comparison. Returns KeyHashMismatch if slices differ.
@@ -53,9 +53,9 @@ pub fn verify_hmac(
         KeyIdentifier::KeyHash(hash) => {
             verify_key_match(hash, &expected_hash)?;
         }
-        KeyIdentifier::PublicKey(_) => {
+        KeyIdentifier::PublicKey(_) | KeyIdentifier::FullKeyHash(_) => {
             return Err(ProtokenError::VerificationFailed(
-                "HMAC token has public key identifier".into(),
+                "HMAC token must use KeyHash key identifier".into(),
             ));
         }
     }
@@ -112,6 +112,11 @@ pub fn verify_ed25519(
         }
         KeyIdentifier::PublicKey(pk) => {
             verify_key_match(pk, public_key_bytes)?;
+        }
+        KeyIdentifier::FullKeyHash(_) => {
+            return Err(ProtokenError::VerificationFailed(
+                "Ed25519 token cannot use FullKeyHash key identifier".into(),
+            ));
         }
     }
 
@@ -179,6 +184,11 @@ pub fn verify_mldsa44(
         KeyIdentifier::PublicKey(pk) => {
             verify_key_match(pk, public_key_bytes)?;
         }
+        KeyIdentifier::FullKeyHash(_) => {
+            return Err(ProtokenError::VerificationFailed(
+                "ML-DSA-44 token cannot use FullKeyHash key identifier".into(),
+            ));
+        }
     }
 
     // Parse the public key
@@ -203,6 +213,91 @@ pub fn verify_mldsa44(
         .map_err(|_| {
             ProtokenError::VerificationFailed("ML-DSA-44 signature verification failed".into())
         })?;
+
+    check_temporal_claims(&payload.claims, now)?;
+
+    Ok(VerifiedClaims {
+        claims: payload.claims,
+        metadata: payload.metadata,
+    })
+}
+
+/// Verify an ECVRF token.
+///
+/// `public_key_bytes` is the ECVRF public key (32 bytes).
+/// `token_bytes` is the serialized SignedToken wire bytes.
+/// `now` is the current Unix timestamp for expiry checking.
+pub fn verify_ecvrf(
+    public_key_bytes: &[u8],
+    token_bytes: &[u8],
+    now: u64,
+) -> Result<VerifiedClaims, ProtokenError> {
+    let token = deserialize_signed_token(token_bytes)?;
+    let payload = deserialize_payload(&token.payload_bytes)?;
+
+    if payload.metadata.algorithm != Algorithm::EcVrf {
+        return Err(ProtokenError::VerificationFailed(format!(
+            "expected EcVrf, got {:?}",
+            payload.metadata.algorithm
+        )));
+    }
+
+    // Check key identity (constant-time comparison of full 32-byte hash)
+    let expected_hash = compute_full_key_hash(public_key_bytes);
+    match &payload.metadata.key_identifier {
+        KeyIdentifier::FullKeyHash(hash) => {
+            verify_key_match(hash, &expected_hash)?;
+        }
+        _ => {
+            return Err(ProtokenError::VerificationFailed(
+                "ECVRF token must use FullKeyHash key identifier".into(),
+            ));
+        }
+    }
+
+    // Parse the public key
+    let pk_bytes: [u8; ECVRF_PUBLIC_KEY_LEN] = public_key_bytes.try_into().map_err(|_| {
+        ProtokenError::VerificationFailed(format!(
+            "invalid ECVRF public key: expected {} bytes, got {}",
+            ECVRF_PUBLIC_KEY_LEN,
+            public_key_bytes.len()
+        ))
+    })?;
+    let pk = vrf_r255::PublicKey::from_bytes(pk_bytes).ok_or_else(|| {
+        ProtokenError::VerificationFailed("invalid ECVRF public key encoding".into())
+    })?;
+
+    // Parse the proof
+    if token.proof.len() != ECVRF_PROOF_LEN {
+        return Err(ProtokenError::VerificationFailed(format!(
+            "invalid ECVRF proof: expected {} bytes, got {}",
+            ECVRF_PROOF_LEN,
+            token.proof.len()
+        )));
+    }
+    let proof_bytes: [u8; ECVRF_PROOF_LEN] = token
+        .proof
+        .as_slice()
+        .try_into()
+        .map_err(|_| ProtokenError::VerificationFailed("invalid ECVRF proof length".into()))?;
+    let proof = vrf_r255::Proof::from_bytes(proof_bytes)
+        .ok_or_else(|| ProtokenError::VerificationFailed("invalid ECVRF proof encoding".into()))?;
+
+    // Verify the VRF proof and get the output
+    let computed_output: [u8; ECVRF_OUTPUT_LEN] =
+        Option::from(pk.verify(&token.payload_bytes, &proof)).ok_or_else(|| {
+            ProtokenError::VerificationFailed("ECVRF proof verification failed".into())
+        })?;
+
+    // Verify the signature field matches the VRF output (constant-time)
+    if token.signature.len() != ECVRF_OUTPUT_LEN {
+        return Err(ProtokenError::VerificationFailed(format!(
+            "invalid ECVRF output: expected {} bytes, got {}",
+            ECVRF_OUTPUT_LEN,
+            token.signature.len()
+        )));
+    }
+    verify_key_match(&computed_output, &token.signature)?;
 
     check_temporal_claims(&payload.claims, now)?;
 
@@ -240,8 +335,8 @@ mod tests {
     use super::*;
 
     use crate::sign::{
-        generate_ed25519_key, generate_mldsa44_key, mldsa44_key_hash, sign_ed25519, sign_hmac,
-        sign_mldsa44,
+        generate_ecvrf_key, generate_ed25519_key, generate_mldsa44_key, mldsa44_key_hash,
+        sign_ecvrf, sign_ed25519, sign_hmac, sign_mldsa44,
     };
 
     const TEST_HMAC_KEY: &[u8; 32] = &[0xAB; 32];
@@ -580,5 +675,171 @@ mod tests {
         let verified = result.unwrap();
         assert_eq!(verified.claims, claims);
         assert_eq!(verified.metadata.algorithm, Algorithm::MlDsa44);
+    }
+
+    // ECVRF verification tests
+
+    #[test]
+    fn test_verify_ecvrf_valid() {
+        let (sk, pk) = generate_ecvrf_key().unwrap();
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let token_bytes = sign_ecvrf(&sk, &pk, claims).unwrap();
+
+        let result = verify_ecvrf(&pk, &token_bytes, 1700000000);
+        assert!(result.is_ok());
+        let verified = result.unwrap();
+        assert_eq!(verified.claims.expires_at, u64::MAX);
+        assert_eq!(verified.metadata.algorithm, Algorithm::EcVrf);
+    }
+
+    #[test]
+    fn test_verify_ecvrf_expired() {
+        let (sk, pk) = generate_ecvrf_key().unwrap();
+        let claims = Claims {
+            expires_at: 1000,
+            ..Default::default()
+        };
+        let token_bytes = sign_ecvrf(&sk, &pk, claims).unwrap();
+
+        let result = verify_ecvrf(&pk, &token_bytes, 2000);
+        assert!(matches!(result, Err(ProtokenError::TokenExpired { .. })));
+    }
+
+    #[test]
+    fn test_verify_ecvrf_wrong_key() {
+        let (sk1, pk1) = generate_ecvrf_key().unwrap();
+        let (_sk2, pk2) = generate_ecvrf_key().unwrap();
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let token_bytes = sign_ecvrf(&sk1, &pk1, claims).unwrap();
+
+        let result = verify_ecvrf(&pk2, &token_bytes, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_ecvrf_corrupted_proof() {
+        let (sk, pk) = generate_ecvrf_key().unwrap();
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let mut token_bytes = sign_ecvrf(&sk, &pk, claims).unwrap();
+        // Corrupt the last byte (in the proof area)
+        let last = token_bytes.len() - 1;
+        token_bytes[last] ^= 0xFF;
+
+        let result = verify_ecvrf(&pk, &token_bytes, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_ecvrf_corrupted_signature() {
+        let (sk, pk) = generate_ecvrf_key().unwrap();
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let token_bytes = sign_ecvrf(&sk, &pk, claims).unwrap();
+
+        // Deserialize, corrupt the signature (VRF output), re-serialize
+        let mut token = deserialize_signed_token(&token_bytes).unwrap();
+        token.signature[0] ^= 0xFF;
+        let corrupted = crate::serialize::serialize_signed_token(&token);
+
+        let result = verify_ecvrf(&pk, &corrupted, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_ecvrf_not_before() {
+        let (sk, pk) = generate_ecvrf_key().unwrap();
+        let claims = Claims {
+            expires_at: u64::MAX,
+            not_before: 5000,
+            ..Default::default()
+        };
+
+        let token_bytes = sign_ecvrf(&sk, &pk, claims).unwrap();
+
+        // Before not_before -> should fail
+        let result = verify_ecvrf(&pk, &token_bytes, 3000);
+        assert!(matches!(
+            result,
+            Err(ProtokenError::TokenNotYetValid { .. })
+        ));
+
+        // At not_before -> should succeed
+        let result = verify_ecvrf(&pk, &token_bytes, 5000);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ecvrf_sign_verify_with_full_claims() {
+        let (sk, pk) = generate_ecvrf_key().unwrap();
+        let claims = Claims {
+            expires_at: u64::MAX,
+            not_before: 1000,
+            issued_at: 1000,
+            subject: "vrf-user".into(),
+            audience: "vrf-service".into(),
+            scopes: vec!["admin".into(), "read".into(), "write".into()],
+        };
+
+        let token_bytes = sign_ecvrf(&sk, &pk, claims.clone()).unwrap();
+        let result = verify_ecvrf(&pk, &token_bytes, 2000);
+        assert!(result.is_ok());
+        let verified = result.unwrap();
+        assert_eq!(verified.claims, claims);
+        assert_eq!(verified.metadata.algorithm, Algorithm::EcVrf);
+    }
+
+    #[test]
+    fn test_ecvrf_corrupt_every_byte() {
+        let (sk, pk) = generate_ecvrf_key().unwrap();
+        let claims = Claims {
+            expires_at: u64::MAX,
+            subject: "test".into(),
+            audience: "svc".into(),
+            ..Default::default()
+        };
+
+        let token_bytes = sign_ecvrf(&sk, &pk, claims).unwrap();
+
+        for i in 0..token_bytes.len() {
+            let mut corrupted = token_bytes.clone();
+            corrupted[i] ^= 0x01;
+
+            let result = verify_ecvrf(&pk, &corrupted, 1000);
+            assert!(
+                result.is_err(),
+                "corrupting byte {i} should cause verification failure"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ecvrf_full_key_hash_is_32_bytes() {
+        let (sk, pk) = generate_ecvrf_key().unwrap();
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+
+        let token_bytes = sign_ecvrf(&sk, &pk, claims).unwrap();
+        let token = deserialize_signed_token(&token_bytes).unwrap();
+        let payload = deserialize_payload(&token.payload_bytes).unwrap();
+
+        assert!(
+            matches!(&payload.metadata.key_identifier, KeyIdentifier::FullKeyHash(hash) if hash.len() == FULL_KEY_HASH_LEN),
+            "expected FullKeyHash with length {}, got {:?}",
+            FULL_KEY_HASH_LEN,
+            payload.metadata.key_identifier
+        );
     }
 }
