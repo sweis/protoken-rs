@@ -1,4 +1,4 @@
-//! Token signing: HMAC-SHA256, Ed25519, and ML-DSA-44.
+//! Token signing: HMAC-SHA256, Ed25519, ML-DSA-44, and Groth16-SHA256.
 
 use hmac::{Hmac, Mac};
 use ml_dsa::signature::Signer as _;
@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::ProtokenError;
 use crate::serialize::{serialize_payload, serialize_signed_token};
+use crate::snark::SnarkProvingKey;
 use crate::types::*;
 
 /// Compute the 8-byte key hash: SHA-256(key_material)[0..8].
@@ -55,6 +56,7 @@ pub fn sign_hmac(key: &[u8], claims: Claims) -> Result<Vec<u8>, ProtokenError> {
     let token = SignedToken {
         payload_bytes,
         signature: tag.to_vec(),
+        proof: Vec::new(),
     };
     Ok(serialize_signed_token(&token))
 }
@@ -93,6 +95,7 @@ pub fn sign_ed25519(
     let token = SignedToken {
         payload_bytes,
         signature: sig.to_bytes().to_vec(),
+        proof: Vec::new(),
     };
     Ok(serialize_signed_token(&token))
 }
@@ -135,6 +138,7 @@ pub fn sign_mldsa44(
     let token = SignedToken {
         payload_bytes,
         signature: sig.encode().to_vec(),
+        proof: Vec::new(),
     };
     Ok(serialize_signed_token(&token))
 }
@@ -175,6 +179,50 @@ pub fn generate_hmac_key() -> Vec<u8> {
     let mut key = vec![0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
     key
+}
+
+/// Compute the full 32-byte SHA-256 hash of key material.
+/// Used by Groth16Sha256 for full collision resistance (~2^128 at the birthday bound).
+#[must_use]
+pub fn compute_full_key_hash(key_material: &[u8]) -> [u8; FULL_KEY_HASH_LEN] {
+    let hash = Sha256::digest(key_material);
+    let mut out = [0u8; FULL_KEY_HASH_LEN];
+    out.copy_from_slice(&hash);
+    out
+}
+
+/// Sign a token with Groth16-SHA256 (symmetric key SNARK proof).
+///
+/// `pk` is the Groth16 proving key from `snark::setup()`.
+/// `key` is the 32-byte symmetric key.
+/// `claims` are the token claims.
+///
+/// Returns the serialized SignedToken wire bytes including the SNARK proof.
+pub fn sign_groth16(
+    pk: &SnarkProvingKey,
+    key: &[u8; 32],
+    claims: Claims,
+) -> Result<Vec<u8>, ProtokenError> {
+    claims.validate()?;
+    let key_hash = compute_full_key_hash(key);
+    let payload = Payload {
+        metadata: Metadata {
+            version: Version::V0,
+            algorithm: Algorithm::Groth16Sha256,
+            key_identifier: KeyIdentifier::FullKeyHash(key_hash),
+        },
+        claims,
+    };
+
+    let payload_bytes = serialize_payload(&payload);
+    let (_key_hash, hmac_output, proof_bytes) = crate::snark::prove(pk, key, &payload_bytes)?;
+
+    let token = SignedToken {
+        payload_bytes,
+        signature: hmac_output.to_vec(),
+        proof: proof_bytes,
+    };
+    Ok(serialize_signed_token(&token))
 }
 
 #[cfg(test)]

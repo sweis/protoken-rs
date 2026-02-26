@@ -34,9 +34,9 @@ pub struct VerifyingKey {
 
 /// Extract the VerifyingKey from a SigningKey (asymmetric keys only).
 pub fn extract_verifying_key(sk: &SigningKey) -> Result<VerifyingKey, ProtokenError> {
-    if sk.algorithm == Algorithm::HmacSha256 {
+    if sk.algorithm == Algorithm::HmacSha256 || sk.algorithm == Algorithm::Groth16Sha256 {
         return Err(ProtokenError::MalformedEncoding(
-            "HMAC-SHA256 is symmetric; no verifying key to extract".into(),
+            "symmetric algorithm; no verifying key to extract".into(),
         ));
     }
     if sk.public_key.is_empty() {
@@ -196,9 +196,9 @@ pub fn deserialize_verifying_key(data: &[u8]) -> Result<VerifyingKey, ProtokenEr
         Algorithm::from_byte(algo_byte).ok_or(ProtokenError::InvalidAlgorithm(algo_byte))?;
 
     // Validate
-    if algorithm == Algorithm::HmacSha256 {
+    if algorithm == Algorithm::HmacSha256 || algorithm == Algorithm::Groth16Sha256 {
         return Err(ProtokenError::MalformedEncoding(
-            "HMAC-SHA256 is symmetric; cannot be a verifying key".into(),
+            "symmetric algorithm cannot be a verifying key".into(),
         ));
     }
     validate_public_key_size(algorithm, &public_key)?;
@@ -256,6 +256,16 @@ fn validate_signing_key_sizes(
                 )));
             }
         }
+        Algorithm::Groth16Sha256 => {
+            // Groth16 uses a symmetric key (same as HMAC): at least 32 bytes.
+            if secret_key.len() < HMAC_MIN_KEY_LEN {
+                return Err(ProtokenError::MalformedEncoding(format!(
+                    "Groth16 symmetric key too short: {} bytes (minimum {})",
+                    secret_key.len(),
+                    HMAC_MIN_KEY_LEN
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -264,9 +274,9 @@ fn validate_public_key_size(algorithm: Algorithm, public_key: &[u8]) -> Result<(
     let expected = match algorithm {
         Algorithm::Ed25519 => ED25519_PUBLIC_KEY_LEN,
         Algorithm::MlDsa44 => MLDSA44_PUBLIC_KEY_LEN,
-        Algorithm::HmacSha256 => {
+        Algorithm::HmacSha256 | Algorithm::Groth16Sha256 => {
             return Err(ProtokenError::MalformedEncoding(
-                "HMAC-SHA256 has no public key".into(),
+                "symmetric algorithm has no public key".into(),
             ));
         }
     };

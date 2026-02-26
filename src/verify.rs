@@ -1,4 +1,4 @@
-//! Token verification: HMAC-SHA256, Ed25519, and ML-DSA-44.
+//! Token verification: HMAC-SHA256, Ed25519, ML-DSA-44, and Groth16-SHA256.
 
 use hmac::{Hmac, Mac};
 use ml_dsa::signature::Verifier as _;
@@ -9,6 +9,7 @@ use subtle::ConstantTimeEq;
 use crate::error::ProtokenError;
 use crate::serialize::{deserialize_payload, deserialize_signed_token};
 use crate::sign::compute_key_hash;
+use crate::snark::SnarkVerifyingKey;
 use crate::types::*;
 
 /// Constant-time key comparison. Returns KeyHashMismatch if slices differ.
@@ -53,7 +54,7 @@ pub fn verify_hmac(
         KeyIdentifier::KeyHash(hash) => {
             verify_key_match(hash, &expected_hash)?;
         }
-        KeyIdentifier::PublicKey(_) => {
+        KeyIdentifier::PublicKey(_) | KeyIdentifier::FullKeyHash(_) => {
             return Err(ProtokenError::VerificationFailed(
                 "HMAC token must use KeyHash key identifier".into(),
             ));
@@ -112,6 +113,11 @@ pub fn verify_ed25519(
         }
         KeyIdentifier::PublicKey(pk) => {
             verify_key_match(pk, public_key_bytes)?;
+        }
+        KeyIdentifier::FullKeyHash(_) => {
+            return Err(ProtokenError::VerificationFailed(
+                "Ed25519 token cannot use FullKeyHash key identifier".into(),
+            ));
         }
     }
 
@@ -179,6 +185,11 @@ pub fn verify_mldsa44(
         KeyIdentifier::PublicKey(pk) => {
             verify_key_match(pk, public_key_bytes)?;
         }
+        KeyIdentifier::FullKeyHash(_) => {
+            return Err(ProtokenError::VerificationFailed(
+                "ML-DSA-44 token cannot use FullKeyHash key identifier".into(),
+            ));
+        }
     }
 
     // Parse the public key
@@ -203,6 +214,66 @@ pub fn verify_mldsa44(
         .map_err(|_| {
             ProtokenError::VerificationFailed("ML-DSA-44 signature verification failed".into())
         })?;
+
+    check_temporal_claims(&payload.claims, now)?;
+
+    Ok(VerifiedClaims {
+        claims: payload.claims,
+        metadata: payload.metadata,
+    })
+}
+
+/// Verify a Groth16-SHA256 token (symmetric key SNARK proof).
+///
+/// `vk` is the Groth16 SNARK verifying key from `snark::setup()`.
+/// `token_bytes` is the serialized SignedToken wire bytes.
+/// `now` is the current Unix timestamp for expiry checking.
+pub fn verify_groth16(
+    vk: &SnarkVerifyingKey,
+    token_bytes: &[u8],
+    now: u64,
+) -> Result<VerifiedClaims, ProtokenError> {
+    let token = deserialize_signed_token(token_bytes)?;
+    let payload = deserialize_payload(&token.payload_bytes)?;
+
+    if payload.metadata.algorithm != Algorithm::Groth16Sha256 {
+        return Err(ProtokenError::VerificationFailed(format!(
+            "expected Groth16Sha256, got {:?}",
+            payload.metadata.algorithm
+        )));
+    }
+
+    // Extract the full key hash from the key identifier
+    let key_hash = match &payload.metadata.key_identifier {
+        KeyIdentifier::FullKeyHash(hash) => hash,
+        _ => {
+            return Err(ProtokenError::VerificationFailed(
+                "Groth16 token must use FullKeyHash key identifier".into(),
+            ));
+        }
+    };
+
+    // Validate signature length
+    if token.signature.len() != HMAC_SHA256_SIG_LEN {
+        return Err(ProtokenError::VerificationFailed(format!(
+            "invalid Groth16 signature: expected {} bytes, got {}",
+            HMAC_SHA256_SIG_LEN,
+            token.signature.len()
+        )));
+    }
+    let signature: [u8; 32] = token.signature.as_slice().try_into().map_err(|_| {
+        ProtokenError::VerificationFailed("invalid Groth16 signature length".into())
+    })?;
+
+    // Validate proof is present
+    if token.proof.is_empty() {
+        return Err(ProtokenError::VerificationFailed(
+            "Groth16 token is missing proof".into(),
+        ));
+    }
+
+    // Verify the SNARK proof
+    crate::snark::verify(vk, key_hash, &signature, &token.proof, &token.payload_bytes)?;
 
     check_temporal_claims(&payload.claims, now)?;
 

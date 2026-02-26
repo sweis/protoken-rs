@@ -28,6 +28,7 @@ pub enum Algorithm {
     HmacSha256 = 1,
     Ed25519 = 2,
     MlDsa44 = 3,
+    Groth16Sha256 = 4,
 }
 
 impl Algorithm {
@@ -36,6 +37,7 @@ impl Algorithm {
             1 => Some(Algorithm::HmacSha256),
             2 => Some(Algorithm::Ed25519),
             3 => Some(Algorithm::MlDsa44),
+            4 => Some(Algorithm::Groth16Sha256),
             _ => None,
         }
     }
@@ -47,7 +49,7 @@ impl Algorithm {
     /// Returns the signature length in bytes for this algorithm.
     pub fn signature_len(self) -> usize {
         match self {
-            Algorithm::HmacSha256 => HMAC_SHA256_SIG_LEN,
+            Algorithm::HmacSha256 | Algorithm::Groth16Sha256 => HMAC_SHA256_SIG_LEN,
             Algorithm::Ed25519 => ED25519_SIG_LEN,
             Algorithm::MlDsa44 => MLDSA44_SIG_LEN,
         }
@@ -60,6 +62,8 @@ impl Algorithm {
 pub enum KeyIdType {
     KeyHash = 1,
     PublicKey = 2,
+    /// Full 32-byte SHA-256 hash of the key material (used by Groth16Sha256).
+    FullKeyHash = 3,
 }
 
 impl KeyIdType {
@@ -67,6 +71,7 @@ impl KeyIdType {
         match b {
             1 => Some(KeyIdType::KeyHash),
             2 => Some(KeyIdType::PublicKey),
+            3 => Some(KeyIdType::FullKeyHash),
             _ => None,
         }
     }
@@ -76,7 +81,7 @@ impl KeyIdType {
     }
 }
 
-/// Key identifier — either a truncated hash or an embedded public key.
+/// Key identifier — either a truncated hash, an embedded public key, or a full hash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum KeyIdentifier {
     /// 8-byte truncated SHA-256 hash of the key material.
@@ -84,6 +89,9 @@ pub enum KeyIdentifier {
     KeyHash([u8; 8]),
     /// Raw public key bytes (Ed25519: 32 B, ML-DSA-44: 1312 B).
     PublicKey(Vec<u8>),
+    /// Full 32-byte SHA-256 hash of the key material.
+    /// Used by Groth16Sha256 for full collision resistance (~2^128 at the birthday bound).
+    FullKeyHash([u8; FULL_KEY_HASH_LEN]),
 }
 
 impl KeyIdentifier {
@@ -91,6 +99,7 @@ impl KeyIdentifier {
         match self {
             KeyIdentifier::KeyHash(_) => KeyIdType::KeyHash,
             KeyIdentifier::PublicKey(_) => KeyIdType::PublicKey,
+            KeyIdentifier::FullKeyHash(_) => KeyIdType::FullKeyHash,
         }
     }
 }
@@ -205,11 +214,13 @@ pub struct Payload {
     pub claims: Claims,
 }
 
-/// A signed token: serialized payload + signature.
+/// A signed token: serialized payload + signature + optional proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedToken {
     pub payload_bytes: Vec<u8>,
     pub signature: Vec<u8>,
+    /// SNARK proof (128 bytes for Groth16Sha256, empty for other algorithms).
+    pub proof: Vec<u8>,
 }
 
 pub const MAX_PAYLOAD_BYTES: usize = 4096;
@@ -225,3 +236,7 @@ pub const ED25519_SIG_LEN: usize = 64;
 pub const MLDSA44_PUBLIC_KEY_LEN: usize = 1312;
 pub const MLDSA44_SIGNING_KEY_LEN: usize = 2560;
 pub const MLDSA44_SIG_LEN: usize = 2420;
+
+pub const FULL_KEY_HASH_LEN: usize = 32;
+pub const GROTH16_PROOF_LEN: usize = 128;
+pub const MAX_PROOF_BYTES: usize = 256;

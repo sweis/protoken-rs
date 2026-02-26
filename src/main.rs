@@ -221,6 +221,11 @@ fn cmd_sign(
             let key_id = mldsa44_key_hash(&sk.public_key)?;
             sign_mldsa44(&sk.secret_key, claims, key_id)?
         }
+        Algorithm::Groth16Sha256 => {
+            return Err(
+                "Groth16 signing requires a proving key; use the library API directly".into(),
+            )
+        }
     };
 
     println!("{}", B64.encode(&token_bytes));
@@ -251,20 +256,25 @@ fn cmd_verify(
         match vk.algorithm {
             Algorithm::Ed25519 => verify_ed25519(&vk.public_key, &token_bytes, now)?,
             Algorithm::MlDsa44 => verify_mldsa44(&vk.public_key, &token_bytes, now)?,
-            Algorithm::HmacSha256 => {
-                return Err("HMAC-SHA256 is symmetric; use the signing key to verify".into());
+            Algorithm::HmacSha256 | Algorithm::Groth16Sha256 => {
+                return Err("symmetric algorithm; use the signing key to verify".into());
             }
         }
     } else {
         let sk = deserialize_signing_key(&key_bytes)?;
-        if sk.algorithm != Algorithm::HmacSha256 {
-            return Err(format!(
-                "expected an HMAC signing key or a verifying key, got {:?} signing key",
-                sk.algorithm
-            )
-            .into());
+        match sk.algorithm {
+            Algorithm::HmacSha256 => verify_hmac(&sk.secret_key, &token_bytes, now)?,
+            Algorithm::Groth16Sha256 => {
+                return Err("Groth16 verification requires a SNARK verifying key; use the library API directly".into());
+            }
+            _ => {
+                return Err(format!(
+                    "expected an HMAC signing key or a verifying key, got {:?} signing key",
+                    sk.algorithm
+                )
+                .into());
+            }
         }
-        verify_hmac(&sk.secret_key, &token_bytes, now)?
     };
 
     if json {
@@ -287,16 +297,27 @@ fn cmd_inspect(token_arg: Option<String>, json: bool) -> Result<(), Box<dyn std:
         Ok(token) => {
             let payload = deserialize_payload(&token.payload_bytes)?;
             if json {
-                let output = serde_json::json!({
+                let mut output = serde_json::json!({
                     "type": "SignedToken",
                     "payload": payload,
                     "signature_base64": B64.encode(&token.signature),
                     "total_bytes": token_bytes.len(),
                 });
+                if !token.proof.is_empty() {
+                    if let Some(obj) = output.as_object_mut() {
+                        obj.insert(
+                            "proof_base64".into(),
+                            serde_json::Value::String(B64.encode(&token.proof)),
+                        );
+                    }
+                }
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 print_payload_colored(&payload);
                 print_field("Signature", &B64.encode(&token.signature).magenta());
+                if !token.proof.is_empty() {
+                    print_field("Proof", &B64.encode(&token.proof).magenta());
+                }
                 print_field("Size", &format_size(token_bytes.len()).cyan());
             }
         }
@@ -334,6 +355,7 @@ fn print_payload_colored(payload: &Payload) {
         Algorithm::HmacSha256 => "HMAC-SHA256",
         Algorithm::Ed25519 => "Ed25519",
         Algorithm::MlDsa44 => "ML-DSA-44",
+        Algorithm::Groth16Sha256 => "Groth16-SHA256",
     };
     print_field("Algorithm", &algo_name.green());
 
@@ -350,6 +372,7 @@ fn print_payload_colored(payload: &Payload) {
                 )
             }
         }
+        KeyIdentifier::FullKeyHash(h) => format!("{} (full_key_hash)", B64.encode(h)),
     };
     print_field("Key ID", &key_id_str.magenta());
 
