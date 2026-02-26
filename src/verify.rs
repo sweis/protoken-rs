@@ -632,6 +632,180 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // Groth16-SHA256 verification tests
+
+    fn groth16_test_token() -> (crate::snark::SnarkVerifyingKey, Vec<u8>, [u8; 32]) {
+        let (pk, vk) = crate::snark::setup().unwrap();
+        let key = [0x42u8; 32];
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let token_bytes = crate::sign::sign_groth16(&pk, &key, claims).unwrap();
+        (vk, token_bytes, key)
+    }
+
+    #[test]
+    fn test_verify_groth16_valid() {
+        let (vk, token_bytes, _key) = groth16_test_token();
+        let result = verify_groth16(&vk, &token_bytes, 1700000000);
+        assert!(result.is_ok());
+        let verified = result.unwrap();
+        assert_eq!(verified.metadata.algorithm, Algorithm::Groth16Sha256);
+    }
+
+    #[test]
+    fn test_verify_groth16_expired() {
+        let (pk, vk) = crate::snark::setup().unwrap();
+        let key = [0x42u8; 32];
+        let claims = Claims {
+            expires_at: 1000,
+            ..Default::default()
+        };
+        let token_bytes = crate::sign::sign_groth16(&pk, &key, claims).unwrap();
+        let result = verify_groth16(&vk, &token_bytes, 2000);
+        assert!(matches!(result, Err(ProtokenError::TokenExpired { .. })));
+    }
+
+    #[test]
+    fn test_verify_groth16_not_before() {
+        let (pk, vk) = crate::snark::setup().unwrap();
+        let key = [0x42u8; 32];
+        let claims = Claims {
+            expires_at: u64::MAX,
+            not_before: 5000,
+            ..Default::default()
+        };
+        let token_bytes = crate::sign::sign_groth16(&pk, &key, claims).unwrap();
+
+        let result = verify_groth16(&vk, &token_bytes, 3000);
+        assert!(matches!(
+            result,
+            Err(ProtokenError::TokenNotYetValid { .. })
+        ));
+
+        let result = verify_groth16(&vk, &token_bytes, 5000);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_groth16_corrupted_key_hash() {
+        let (vk, mut token_bytes, _key) = groth16_test_token();
+        // The key hash is inside the payload submessage. Find and corrupt it.
+        // The token structure: field 1 (payload LV), field 2 (sig LV), field 3 (proof LV).
+        // Corrupt a byte deep in the payload area where the key_hash lives.
+        // key_hash is 32 bytes after algorithm+key_id_type fields in the payload.
+        // We corrupt byte at offset ~10 which is inside the payload.
+        token_bytes[10] ^= 0x01;
+        let result = verify_groth16(&vk, &token_bytes, 1700000000);
+        assert!(result.is_err(), "corrupted key hash should fail verification");
+    }
+
+    #[test]
+    fn test_verify_groth16_corrupted_signature() {
+        let (vk, token_bytes, _key) = groth16_test_token();
+        let token = crate::serialize::deserialize_signed_token(&token_bytes).unwrap();
+        // Corrupt the signature
+        let mut bad_sig = token.signature.clone();
+        bad_sig[0] ^= 0xFF;
+        let bad_token = crate::types::SignedToken {
+            payload_bytes: token.payload_bytes,
+            signature: bad_sig,
+            proof: token.proof,
+        };
+        let bad_bytes = crate::serialize::serialize_signed_token(&bad_token);
+        let result = verify_groth16(&vk, &bad_bytes, 1700000000);
+        assert!(
+            matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("proof verification failed")),
+            "corrupted signature should fail with proof verification error, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_verify_groth16_corrupted_proof() {
+        let (vk, token_bytes, _key) = groth16_test_token();
+        let token = crate::serialize::deserialize_signed_token(&token_bytes).unwrap();
+        // Corrupt the proof
+        let mut bad_proof = token.proof.clone();
+        bad_proof[0] ^= 0x01;
+        let bad_token = crate::types::SignedToken {
+            payload_bytes: token.payload_bytes,
+            signature: token.signature,
+            proof: bad_proof,
+        };
+        let bad_bytes = crate::serialize::serialize_signed_token(&bad_token);
+        let result = verify_groth16(&vk, &bad_bytes, 1700000000);
+        assert!(result.is_err(), "corrupted proof should fail verification");
+    }
+
+    #[test]
+    fn test_verify_groth16_truncated_proof() {
+        let (vk, token_bytes, _key) = groth16_test_token();
+        let token = crate::serialize::deserialize_signed_token(&token_bytes).unwrap();
+        // Truncate the proof
+        let bad_token = crate::types::SignedToken {
+            payload_bytes: token.payload_bytes,
+            signature: token.signature,
+            proof: token.proof[..64].to_vec(),
+        };
+        let bad_bytes = crate::serialize::serialize_signed_token(&bad_token);
+        let result = verify_groth16(&vk, &bad_bytes, 1700000000);
+        assert!(
+            matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("invalid Groth16 proof")),
+            "truncated proof should fail with invalid proof error, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_verify_groth16_empty_proof() {
+        let (vk, token_bytes, _key) = groth16_test_token();
+        let token = crate::serialize::deserialize_signed_token(&token_bytes).unwrap();
+        // Empty proof
+        let bad_token = crate::types::SignedToken {
+            payload_bytes: token.payload_bytes,
+            signature: token.signature,
+            proof: vec![],
+        };
+        let bad_bytes = crate::serialize::serialize_signed_token(&bad_token);
+        let result = verify_groth16(&vk, &bad_bytes, 1700000000);
+        assert!(
+            matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("missing proof")),
+            "empty proof should fail with missing proof error, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_verify_groth16_wrong_vk() {
+        let (_vk1, token_bytes, _key) = groth16_test_token();
+        // Generate a different VK (from a different trusted setup)
+        let (_pk2, vk2) = crate::snark::setup().unwrap();
+        let result = verify_groth16(&vk2, &token_bytes, 1700000000);
+        assert!(
+            matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("proof verification failed")),
+            "wrong verifying key should fail, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_verify_groth16_with_full_claims() {
+        let (pk, vk) = crate::snark::setup().unwrap();
+        let key = [0x42u8; 32];
+        let claims = Claims {
+            expires_at: u64::MAX,
+            not_before: 1000,
+            issued_at: 1000,
+            subject: "snark-user".into(),
+            audience: "snark-service".into(),
+            scopes: vec!["admin".into(), "read".into(), "write".into()],
+        };
+        let token_bytes = crate::sign::sign_groth16(&pk, &key, claims.clone()).unwrap();
+        let result = verify_groth16(&vk, &token_bytes, 2000);
+        assert!(result.is_ok());
+        let verified = result.unwrap();
+        assert_eq!(verified.claims, claims);
+        assert_eq!(verified.metadata.algorithm, Algorithm::Groth16Sha256);
+    }
+
     #[test]
     fn test_mldsa44_sign_verify_with_full_claims() {
         let (sk, pk) = generate_mldsa44_key().unwrap();

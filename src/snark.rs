@@ -378,7 +378,10 @@ mod tests {
         // Use a different key hash
         let wrong_hash = [0xFFu8; 32];
         let result = verify(&vk, &wrong_hash, &signature, &proof_bytes, payload);
-        assert!(result.is_err());
+        assert!(
+            matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("proof verification failed")),
+            "expected proof verification failed, got: {result:?}"
+        );
     }
 
     #[test]
@@ -393,7 +396,10 @@ mod tests {
         // Use a different signature
         let wrong_sig = [0xFFu8; 32];
         let result = verify(&vk, &key_hash, &wrong_sig, &proof_bytes, payload);
-        assert!(result.is_err());
+        assert!(
+            matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("proof verification failed")),
+            "expected proof verification failed, got: {result:?}"
+        );
     }
 
     #[test]
@@ -407,7 +413,62 @@ mod tests {
 
         // Use a different payload
         let result = verify(&vk, &key_hash, &signature, &proof_bytes, b"different");
-        assert!(result.is_err());
+        assert!(
+            matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("proof verification failed")),
+            "expected proof verification failed, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_verify_rejects_corrupted_proof() {
+        let (pk, vk) = setup().unwrap();
+
+        let key = [0x42u8; 32];
+        let payload = b"test payload";
+
+        let (key_hash, signature, mut proof_bytes) = prove(&pk, &key, payload).unwrap();
+
+        // Flip a bit in the proof
+        proof_bytes[0] ^= 0x01;
+        let result = verify(&vk, &key_hash, &signature, &proof_bytes, payload);
+        assert!(
+            result.is_err(),
+            "corrupted proof should fail verification"
+        );
+    }
+
+    #[test]
+    fn test_verify_rejects_truncated_proof() {
+        let (pk, vk) = setup().unwrap();
+
+        let key = [0x42u8; 32];
+        let payload = b"test payload";
+
+        let (key_hash, signature, proof_bytes) = prove(&pk, &key, payload).unwrap();
+
+        // Truncate the proof to half its length
+        let truncated = &proof_bytes[..proof_bytes.len() / 2];
+        let result = verify(&vk, &key_hash, &signature, truncated, payload);
+        assert!(
+            matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("invalid Groth16 proof")),
+            "expected invalid proof error, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_verify_rejects_empty_proof() {
+        let (pk, vk) = setup().unwrap();
+
+        let key = [0x42u8; 32];
+        let payload = b"test payload";
+
+        let (key_hash, signature, _proof_bytes) = prove(&pk, &key, payload).unwrap();
+
+        let result = verify(&vk, &key_hash, &signature, &[], payload);
+        assert!(
+            matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("invalid Groth16 proof")),
+            "expected invalid proof error, got: {result:?}"
+        );
     }
 
     #[test]
