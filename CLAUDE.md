@@ -10,10 +10,9 @@ Protokens are designed to be a simple, fast replacement for JWTs, ad hoc tokens,
 
 ## Design Guidelines
 1. The wire format uses canonical proto3 encoding. Payloads are valid proto3 messages.
-2. These are signed tokens that support a symmetric MAC, asymmetric signatures, and VRF proofs.
+2. These are signed tokens that support a symmetric MAC and asymmetric signatures.
 3. The symmetric MAC is HMAC-SHA256.
 4. The asymmetric signatures are Ed25519 and ML-DSA-44 (post-quantum, FIPS 204).
-4b. ECVRF (RFC 9381, ECVRF-RISTRETTO255-SHA512) provides verifiable random function proofs.
 5. The implementation is in Rust.
 6. The goal is a minimal token format. We start simple and add only fields essential to our use cases.
 
@@ -21,9 +20,9 @@ Protokens are designed to be a simple, fast replacement for JWTs, ad hoc tokens,
 ```proto
 message Payload {
   uint32 version = 1;      // reserved, always 0 (omitted on wire)
-  uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44, 4 = ECVRF
-  uint32 key_id_type = 3;  // 1 = key_hash, 2 = public_key, 3 = full_key_hash
-  bytes  key_id = 4;       // 8 B (key_hash), 32 B (full_key_hash/Ed25519), 1312 B (ML-DSA-44)
+  uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44
+  uint32 key_id_type = 3;  // 1 = key_hash, 2 = public_key
+  bytes  key_id = 4;       // 8 B (key_hash), 32 B (Ed25519), 1312 B (ML-DSA-44)
   uint64 expires_at = 5;   // Unix seconds
   uint64 not_before = 6;   // optional (0 = omitted)
   uint64 issued_at = 7;    // optional (0 = omitted)
@@ -34,19 +33,18 @@ message Payload {
 
 message SignedToken {
   Payload payload = 1;     // canonical-encoded Payload submessage
-  bytes   signature = 2;   // HMAC-SHA256 (32 B), Ed25519 (64 B), ML-DSA-44 (2420 B), or VRF output (64 B)
-  bytes   proof = 3;       // VRF proof (80 B for ECVRF), empty for other algorithms
+  bytes   signature = 2;   // HMAC-SHA256 (32 B), Ed25519 (64 B), ML-DSA-44 (2420 B)
 }
 
 message SigningKey {
-  uint32 algorithm = 1;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44, 4 = ECVRF
-  bytes secret_key = 2;    // HMAC: raw key (≥32 B); Ed25519: 32 B seed; ML-DSA-44: 2560 B; ECVRF: 32 B
-  bytes public_key = 3;    // Ed25519: 32 B; ML-DSA-44: 1312 B; ECVRF: 32 B; empty for HMAC
+  uint32 algorithm = 1;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44
+  bytes secret_key = 2;    // HMAC: raw key (≥32 B); Ed25519: 32 B seed; ML-DSA-44: 2560 B
+  bytes public_key = 3;    // Ed25519: 32 B; ML-DSA-44: 1312 B; empty for HMAC
 }
 
 message VerifyingKey {
-  uint32 algorithm = 1;    // 2 = Ed25519, 3 = ML-DSA-44, 4 = ECVRF
-  bytes public_key = 2;    // Ed25519: 32 B; ML-DSA-44: 1312 B; ECVRF: 32 B
+  uint32 algorithm = 1;    // 2 = Ed25519, 3 = ML-DSA-44
+  bytes public_key = 2;    // Ed25519: 32 B; ML-DSA-44: 1312 B
 }
 ```
 
@@ -87,12 +85,11 @@ ML-DSA-44: stateless, ~200μs sign, 2,420 B signatures, 1,312 B public keys.
 Token sizes: ~2,500 B (KeyHash) or ~3,800 B (PublicKey).
 See [notes/research-pq-signatures.md](notes/research-pq-signatures.md) for full analysis.
 
-### Dependencies: RustCrypto + vrf-r255 (migrated 2026-02-18, originally ring 2026-02-10)
+### Dependencies: RustCrypto (migrated 2026-02-18, originally ring 2026-02-10)
 Migrated from `ring` to RustCrypto ecosystem to unify with `ml-dsa` crate:
 - `ed25519-dalek` for Ed25519 signing/verification (raw 32-byte seeds, no PKCS#8)
 - `hmac` + `sha2` for HMAC-SHA256 and SHA-256 key hashing
 - `ml-dsa` for ML-DSA-44 (post-quantum), chosen over `fips204` crate (~1,100 dependents vs ~1)
-- `vrf-r255` for ECVRF (RFC 9381), shares curve25519-dalek/sha2/subtle with existing deps
 - `rand` for key generation
 - `zeroize` for secret key memory wiping
 - `clap` (derive) for CLI, `serde`/`serde_json` for JSON, `humantime`, `base64`, `thiserror`
@@ -112,30 +109,25 @@ The 8-byte key hash (SHA-256[0..8]) gives ~2^32 collision resistance at the birt
 It is a key *identifier* for key selection, not a security binding. Security relies on full
 signature verification. This is documented in the code and README.
 
-### ECVRF Verifiable Random Function (decided 2026-02-25)
-Added ECVRF (RFC 9381, ECVRF-RISTRETTO255-SHA512) as algorithm 4. This enables "public
-verification" of tokens: the verifier only needs the key hash (not the full key) to verify.
-The VRF proof (80 B) proves the token was created by the holder of the secret key whose
-public key hashes to the key_id. Chose VRF over SNARKs after researching Groth16, Halo2,
-Bulletproofs, STARKs, and Spartan. VRFs are 1000× faster (<1ms vs seconds), require no
-trusted setup, produce shorter proofs (80 B vs 128+ B), and are standardized (RFC 9381).
-Uses `vrf-r255` crate by str4d (Zcash core dev), which shares deps with existing stack
-(curve25519-dalek, sha2, subtle). Added `FullKeyHash` key_id_type (3) for full 32-byte
-SHA-256 hash (~2^128 collision resistance vs ~2^32 for truncated 8-byte hash).
-See [notes/research-symmetric-key-proofs.md](notes/research-symmetric-key-proofs.md).
+### ECVRF Removed (decided 2026-02-26)
+ECVRF (RFC 9381) was originally added as algorithm 4. Removed because VRF verification
+still requires the full public key — making it functionally identical to Ed25519, which
+we already support. The original motivation was "verification with only a key hash," but
+VRFs don't achieve that. Research notes kept in
+[notes/research-symmetric-key-proofs.md](notes/research-symmetric-key-proofs.md).
 
 ## Implementation Status
 
-All TODO items 1-8 are implemented, plus ML-DSA-44 post-quantum and ECVRF support:
-- `src/types.rs` - Core types (Version, Algorithm incl. MlDsa44 and EcVrf, KeyIdentifier incl. FullKeyHash, Payload, SignedToken with proof field, Claims)
+All TODO items 1-8 are implemented, plus ML-DSA-44 post-quantum support:
+- `src/types.rs` - Core types (Version, Algorithm incl. MlDsa44, KeyIdentifier, Payload, SignedToken, Claims)
 - `src/proto3.rs` - Canonical proto3 wire encoder/decoder
-- `src/serialize.rs` - Deterministic serialization/deserialization for Payload and SignedToken (with proof field)
-- `src/keys.rs` - Proto3 key serialization (SigningKey, VerifyingKey) with validation for all 4 algorithms
-- `src/sign.rs` - HMAC-SHA256, Ed25519, ML-DSA-44, and ECVRF signing (raw seeds, RustCrypto + vrf-r255)
-- `src/verify.rs` - Verification with key hash matching, VRF proof verification, expiry and not_before checking
-- `src/main.rs` - CLI tool with `generate-key`, `get-verifying-key`, `sign`, `verify`, `inspect` commands (all 4 algorithms, proto key format)
+- `src/serialize.rs` - Deterministic serialization/deserialization for Payload and SignedToken
+- `src/keys.rs` - Proto3 key serialization (SigningKey, VerifyingKey) with validation for all 3 algorithms
+- `src/sign.rs` - HMAC-SHA256, Ed25519, and ML-DSA-44 signing (raw seeds, RustCrypto)
+- `src/verify.rs` - Verification with key hash matching, expiry and not_before checking
+- `src/main.rs` - CLI tool with `generate-key`, `get-verifying-key`, `sign`, `verify`, `inspect` commands (all 3 algorithms, proto key format)
 - `src/error.rs` - Error types
-- 126 tests (109 unit + 4 reference + 13 integration) including byte-level corruption tests for all algorithms
+- 106 tests (89 unit + 4 reference + 13 integration) including byte-level corruption tests for all algorithms
 - `notes/` - Research documents (prior art, Ed25519 vs P-256, protobuf determinism, post-quantum, ML-DSA key formats, subject identifiers, symmetric key proofs)
 
 ## Research Prior Art

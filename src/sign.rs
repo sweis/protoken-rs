@@ -1,4 +1,4 @@
-//! Token signing: HMAC-SHA256, Ed25519, ML-DSA-44, and ECVRF.
+//! Token signing: HMAC-SHA256, Ed25519, and ML-DSA-44.
 
 use hmac::{Hmac, Mac};
 use ml_dsa::signature::Signer as _;
@@ -55,7 +55,6 @@ pub fn sign_hmac(key: &[u8], claims: Claims) -> Result<Vec<u8>, ProtokenError> {
     let token = SignedToken {
         payload_bytes,
         signature: tag.to_vec(),
-        proof: Vec::new(),
     };
     Ok(serialize_signed_token(&token))
 }
@@ -94,7 +93,6 @@ pub fn sign_ed25519(
     let token = SignedToken {
         payload_bytes,
         signature: sig.to_bytes().to_vec(),
-        proof: Vec::new(),
     };
     Ok(serialize_signed_token(&token))
 }
@@ -137,7 +135,6 @@ pub fn sign_mldsa44(
     let token = SignedToken {
         payload_bytes,
         signature: sig.encode().to_vec(),
-        proof: Vec::new(),
     };
     Ok(serialize_signed_token(&token))
 }
@@ -178,89 +175,6 @@ pub fn generate_hmac_key() -> Vec<u8> {
     let mut key = vec![0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
     key
-}
-
-/// Compute the full 32-byte key hash: SHA-256(key_material).
-/// Used by ECVRF for full collision resistance (~2^128 at the birthday bound).
-#[must_use]
-pub fn compute_full_key_hash(key_material: &[u8]) -> [u8; FULL_KEY_HASH_LEN] {
-    let hash = Sha256::digest(key_material);
-    let mut full = [0u8; FULL_KEY_HASH_LEN];
-    full.copy_from_slice(&hash);
-    full
-}
-
-/// Generate a new ECVRF key pair, returning (secret_key, public_key) as raw bytes.
-pub fn generate_ecvrf_key() -> Result<(Vec<u8>, Vec<u8>), ProtokenError> {
-    let sk = vrf_r255::SecretKey::generate(rand::rngs::OsRng);
-    let sk_bytes = sk.to_bytes().to_vec();
-    let pk = vrf_r255::PublicKey::from(sk);
-    Ok((sk_bytes, pk.to_bytes().to_vec()))
-}
-
-/// Sign a token with ECVRF (RFC 9381, ECVRF-RISTRETTO255-SHA512).
-/// Returns the serialized SignedToken wire bytes.
-///
-/// The VRF output (64 bytes) is stored as the signature, and the VRF proof
-/// (80 bytes) is stored in the proof field. The key_id is a full 32-byte
-/// SHA-256 hash of the public key.
-///
-/// `secret_key_bytes` is the raw 32-byte ECVRF secret key.
-/// `public_key_bytes` is the raw 32-byte ECVRF public key.
-pub fn sign_ecvrf(
-    secret_key_bytes: &[u8],
-    public_key_bytes: &[u8],
-    claims: Claims,
-) -> Result<Vec<u8>, ProtokenError> {
-    claims.validate()?;
-
-    let sk_array: [u8; ECVRF_SECRET_KEY_LEN] = secret_key_bytes.try_into().map_err(|_| {
-        ProtokenError::SigningFailed(format!(
-            "invalid ECVRF secret key: expected {} bytes, got {}",
-            ECVRF_SECRET_KEY_LEN,
-            secret_key_bytes.len()
-        ))
-    })?;
-    let sk: vrf_r255::SecretKey = Option::from(vrf_r255::SecretKey::from_bytes(sk_array))
-        .ok_or_else(|| ProtokenError::SigningFailed("invalid ECVRF secret key encoding".into()))?;
-
-    if public_key_bytes.len() != ECVRF_PUBLIC_KEY_LEN {
-        return Err(ProtokenError::SigningFailed(format!(
-            "invalid ECVRF public key: expected {} bytes, got {}",
-            ECVRF_PUBLIC_KEY_LEN,
-            public_key_bytes.len()
-        )));
-    }
-
-    let key_hash = compute_full_key_hash(public_key_bytes);
-
-    let payload = Payload {
-        metadata: Metadata {
-            version: Version::V0,
-            algorithm: Algorithm::EcVrf,
-            key_identifier: KeyIdentifier::FullKeyHash(key_hash),
-        },
-        claims,
-    };
-
-    // Parse the public key for self-verification
-    let pk_array: [u8; ECVRF_PUBLIC_KEY_LEN] = public_key_bytes
-        .try_into()
-        .map_err(|_| ProtokenError::SigningFailed("invalid ECVRF public key length".into()))?;
-    let pk = vrf_r255::PublicKey::from_bytes(pk_array)
-        .ok_or_else(|| ProtokenError::SigningFailed("invalid ECVRF public key encoding".into()))?;
-
-    let payload_bytes = serialize_payload(&payload);
-    let proof = sk.prove(&payload_bytes);
-    let output: [u8; ECVRF_OUTPUT_LEN] = Option::from(pk.verify(&payload_bytes, &proof))
-        .ok_or_else(|| ProtokenError::SigningFailed("ECVRF self-verification failed".into()))?;
-
-    let token = SignedToken {
-        payload_bytes,
-        signature: output.to_vec(),
-        proof: proof.to_bytes().to_vec(),
-    };
-    Ok(serialize_signed_token(&token))
 }
 
 #[cfg(test)]
@@ -464,81 +378,5 @@ mod tests {
         let (sk, pk) = generate_mldsa44_key().unwrap();
         assert_eq!(sk.len(), MLDSA44_SIGNING_KEY_LEN);
         assert_eq!(pk.len(), MLDSA44_PUBLIC_KEY_LEN);
-    }
-
-    // ECVRF tests
-
-    #[test]
-    fn test_sign_ecvrf_produces_valid_token() {
-        let (sk, pk) = generate_ecvrf_key().unwrap();
-        let claims = Claims {
-            expires_at: 2000000000,
-            ..Default::default()
-        };
-
-        let token_bytes = sign_ecvrf(&sk, &pk, claims).unwrap();
-        let token = deserialize_signed_token(&token_bytes).unwrap();
-        let payload = deserialize_payload(&token.payload_bytes).unwrap();
-
-        assert_eq!(payload.metadata.algorithm, Algorithm::EcVrf);
-        assert_eq!(payload.claims.expires_at, 2000000000);
-        assert_eq!(token.signature.len(), ECVRF_OUTPUT_LEN);
-        assert_eq!(token.proof.len(), ECVRF_PROOF_LEN);
-
-        let expected_hash = compute_full_key_hash(&pk);
-        assert_eq!(
-            payload.metadata.key_identifier,
-            KeyIdentifier::FullKeyHash(expected_hash)
-        );
-    }
-
-    #[test]
-    fn test_sign_ecvrf_with_claims() {
-        let (sk, pk) = generate_ecvrf_key().unwrap();
-        let claims = Claims {
-            expires_at: 2000000000,
-            not_before: 1999990000,
-            issued_at: 1999990000,
-            subject: "vrf-user".into(),
-            audience: "vrf-service".into(),
-            scopes: vec!["admin".into(), "read".into()],
-        };
-
-        let token_bytes = sign_ecvrf(&sk, &pk, claims.clone()).unwrap();
-        let token = deserialize_signed_token(&token_bytes).unwrap();
-        let payload = deserialize_payload(&token.payload_bytes).unwrap();
-
-        assert_eq!(payload.metadata.algorithm, Algorithm::EcVrf);
-        assert_eq!(payload.claims, claims);
-    }
-
-    #[test]
-    fn test_ecvrf_signing_deterministic() {
-        let (sk, pk) = generate_ecvrf_key().unwrap();
-        let claims = Claims {
-            expires_at: 2000000000,
-            subject: "test".into(),
-            ..Default::default()
-        };
-
-        let t1 = sign_ecvrf(&sk, &pk, claims.clone()).unwrap();
-        let t2 = sign_ecvrf(&sk, &pk, claims).unwrap();
-        assert_eq!(t1, t2, "ECVRF signing must be deterministic");
-    }
-
-    #[test]
-    fn test_ecvrf_key_sizes() {
-        let (sk, pk) = generate_ecvrf_key().unwrap();
-        assert_eq!(sk.len(), ECVRF_SECRET_KEY_LEN);
-        assert_eq!(pk.len(), ECVRF_PUBLIC_KEY_LEN);
-    }
-
-    #[test]
-    fn test_full_key_hash_deterministic() {
-        let pk = vec![0xBB; 32];
-        let h1 = compute_full_key_hash(&pk);
-        let h2 = compute_full_key_hash(&pk);
-        assert_eq!(h1, h2);
-        assert_eq!(h1.len(), FULL_KEY_HASH_LEN);
     }
 }
