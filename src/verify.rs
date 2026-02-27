@@ -1,4 +1,4 @@
-//! Token verification: HMAC-SHA256, Ed25519, ML-DSA-44, and Groth16-Poseidon.
+//! Token verification: HMAC-SHA256, Ed25519, ML-DSA-44, Groth16-Poseidon, and Groth16-Hybrid.
 
 use hmac::{Hmac, Mac};
 use ml_dsa::signature::Verifier as _;
@@ -274,6 +274,62 @@ pub fn verify_groth16(
 
     // Verify the SNARK proof
     crate::snark::verify(vk, key_hash, &signature, &token.proof, &token.payload_bytes)?;
+
+    check_temporal_claims(&payload.claims, now)?;
+
+    Ok(VerifiedClaims {
+        claims: payload.claims,
+        metadata: payload.metadata,
+    })
+}
+
+/// Verify a Groth16-Hybrid token (SHA-256 key hash + Poseidon MAC SNARK proof).
+///
+/// `vk` is the Groth16 SNARK verifying key from `snark::setup_hybrid()`.
+/// `token_bytes` is the serialized SignedToken wire bytes.
+/// `now` is the current Unix timestamp for expiry checking.
+pub fn verify_groth16_hybrid(
+    vk: &SnarkVerifyingKey,
+    token_bytes: &[u8],
+    now: u64,
+) -> Result<VerifiedClaims, ProtokenError> {
+    let token = deserialize_signed_token(token_bytes)?;
+    let payload = deserialize_payload(&token.payload_bytes)?;
+
+    if payload.metadata.algorithm != Algorithm::Groth16Hybrid {
+        return Err(ProtokenError::VerificationFailed(format!(
+            "expected Groth16Hybrid, got {:?}",
+            payload.metadata.algorithm
+        )));
+    }
+
+    let key_hash = match &payload.metadata.key_identifier {
+        KeyIdentifier::FullKeyHash(hash) => hash,
+        _ => {
+            return Err(ProtokenError::VerificationFailed(
+                "Groth16Hybrid token must use FullKeyHash key identifier".into(),
+            ));
+        }
+    };
+
+    if token.signature.len() != HMAC_SHA256_SIG_LEN {
+        return Err(ProtokenError::VerificationFailed(format!(
+            "invalid Groth16Hybrid signature: expected {} bytes, got {}",
+            HMAC_SHA256_SIG_LEN,
+            token.signature.len()
+        )));
+    }
+    let signature: [u8; 32] = token.signature.as_slice().try_into().map_err(|_| {
+        ProtokenError::VerificationFailed("invalid Groth16Hybrid signature length".into())
+    })?;
+
+    if token.proof.is_empty() {
+        return Err(ProtokenError::VerificationFailed(
+            "Groth16Hybrid token is missing proof".into(),
+        ));
+    }
+
+    crate::snark::verify_hybrid(vk, key_hash, &signature, &token.proof, &token.payload_bytes)?;
 
     check_temporal_claims(&payload.claims, now)?;
 
@@ -807,6 +863,96 @@ mod tests {
         let verified = result.unwrap();
         assert_eq!(verified.claims, claims);
         assert_eq!(verified.metadata.algorithm, Algorithm::Groth16Poseidon);
+    }
+
+    // ---- Groth16Hybrid verify tests ----
+    //
+    // SHA-256 circuit needs a large stack in debug mode.
+
+    fn run_with_large_stack<F: FnOnce() + Send + 'static>(f: F) {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn groth16_hybrid_test_token() -> (crate::snark::SnarkVerifyingKey, Vec<u8>) {
+        let (pk, vk) = crate::snark::setup_hybrid().unwrap();
+        let key = [0x42u8; 32];
+        let claims = Claims {
+            expires_at: 1800000000,
+            ..Default::default()
+        };
+        let token_bytes = crate::sign::sign_groth16_hybrid(&pk, &key, claims).unwrap();
+        (vk, token_bytes)
+    }
+
+    #[test]
+    fn test_verify_groth16_hybrid_valid() {
+        run_with_large_stack(|| {
+            let (vk, token_bytes) = groth16_hybrid_test_token();
+            let result = verify_groth16_hybrid(&vk, &token_bytes, 1700000000);
+            assert!(result.is_ok(), "hybrid verify failed: {result:?}");
+            let verified = result.unwrap();
+            assert_eq!(verified.metadata.algorithm, Algorithm::Groth16Hybrid);
+        });
+    }
+
+    #[test]
+    fn test_verify_groth16_hybrid_expired() {
+        run_with_large_stack(|| {
+            let (pk, vk) = crate::snark::setup_hybrid().unwrap();
+            let key = [0x42u8; 32];
+            let claims = Claims {
+                expires_at: 1000,
+                ..Default::default()
+            };
+            let token_bytes = crate::sign::sign_groth16_hybrid(&pk, &key, claims).unwrap();
+            let result = verify_groth16_hybrid(&vk, &token_bytes, 2000);
+            assert!(matches!(result, Err(ProtokenError::TokenExpired { .. })));
+        });
+    }
+
+    #[test]
+    fn test_verify_groth16_hybrid_corrupted_proof() {
+        run_with_large_stack(|| {
+            let (vk, token_bytes) = groth16_hybrid_test_token();
+            let token = crate::serialize::deserialize_signed_token(&token_bytes).unwrap();
+            let mut bad_proof = token.proof.clone();
+            bad_proof[0] ^= 0x01;
+            let bad_token = crate::types::SignedToken {
+                payload_bytes: token.payload_bytes,
+                signature: token.signature,
+                proof: bad_proof,
+            };
+            let bad_bytes = crate::serialize::serialize_signed_token(&bad_token);
+            let result = verify_groth16_hybrid(&vk, &bad_bytes, 1700000000);
+            assert!(result.is_err(), "corrupted proof should fail verification");
+        });
+    }
+
+    #[test]
+    fn test_verify_groth16_hybrid_with_full_claims() {
+        run_with_large_stack(|| {
+            let (pk, vk) = crate::snark::setup_hybrid().unwrap();
+            let key = [0x42u8; 32];
+            let claims = Claims {
+                expires_at: u64::MAX,
+                not_before: 1000,
+                issued_at: 1000,
+                subject: "hybrid-user".into(),
+                audience: "hybrid-service".into(),
+                scopes: vec!["admin".into(), "read".into()],
+            };
+            let token_bytes = crate::sign::sign_groth16_hybrid(&pk, &key, claims.clone()).unwrap();
+            let result = verify_groth16_hybrid(&vk, &token_bytes, 2000);
+            assert!(result.is_ok());
+            let verified = result.unwrap();
+            assert_eq!(verified.claims, claims);
+            assert_eq!(verified.metadata.algorithm, Algorithm::Groth16Hybrid);
+        });
     }
 
     #[test]
