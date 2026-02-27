@@ -1,4 +1,4 @@
-//! Token signing: HMAC-SHA256, Ed25519, ML-DSA-44, and Groth16-Poseidon.
+//! Token signing: HMAC-SHA256, Ed25519, ML-DSA-44, Groth16-Poseidon, and Groth16-Hybrid.
 
 use hmac::{Hmac, Mac};
 use ml_dsa::signature::Signer as _;
@@ -221,6 +221,51 @@ pub fn sign_groth16(
 
     let payload_bytes = serialize_payload(&payload);
     let (_key_hash, mac_output, proof_bytes) = crate::snark::prove(pk, key, &payload_bytes)?;
+
+    let token = SignedToken {
+        payload_bytes,
+        signature: mac_output.to_vec(),
+        proof: proof_bytes,
+    };
+    Ok(serialize_signed_token(&token))
+}
+
+/// Compute the full 32-byte SHA-256 hash of a symmetric key.
+/// Used by Groth16Hybrid for FullKeyHash key identifier.
+#[must_use]
+#[allow(clippy::indexing_slicing)] // SHA-256 always produces exactly 32 bytes
+pub fn compute_sha256_full_key_hash(key_material: &[u8]) -> [u8; FULL_KEY_HASH_LEN] {
+    let hash = Sha256::digest(key_material);
+    let mut out = [0u8; FULL_KEY_HASH_LEN];
+    out.copy_from_slice(&hash);
+    out
+}
+
+/// Sign a token with Groth16-Hybrid (SHA-256 key hash + Poseidon MAC SNARK proof).
+///
+/// `pk` is the Groth16 proving key from `snark::setup_hybrid()`.
+/// `key` is the 32-byte symmetric key.
+///
+/// The circuit proves knowledge of K such that SHA-256(K) = key_hash and
+/// Poseidon(K_fr, SHA-256(payload) as Fr) = mac.
+pub fn sign_groth16_hybrid(
+    pk: &SnarkProvingKey,
+    key: &[u8; 32],
+    claims: Claims,
+) -> Result<Vec<u8>, ProtokenError> {
+    claims.validate()?;
+    let key_hash = compute_sha256_full_key_hash(key);
+    let payload = Payload {
+        metadata: Metadata {
+            version: Version::V0,
+            algorithm: Algorithm::Groth16Hybrid,
+            key_identifier: KeyIdentifier::FullKeyHash(key_hash),
+        },
+        claims,
+    };
+
+    let payload_bytes = serialize_payload(&payload);
+    let (_key_hash, mac_output, proof_bytes) = crate::snark::prove_hybrid(pk, key, &payload_bytes)?;
 
     let token = SignedToken {
         payload_bytes,

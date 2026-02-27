@@ -14,6 +14,7 @@ Protokens are designed to be a simple, fast replacement for JWTs, ad hoc tokens,
 3. The symmetric MAC is HMAC-SHA256.
 4. The asymmetric signatures are Ed25519 and ML-DSA-44 (post-quantum, FIPS 204).
 4b. Groth16-Poseidon proves knowledge of a symmetric key via a zero-knowledge SNARK proof.
+4c. Groth16-Hybrid uses SHA-256 for key hash (compatible with existing HMAC keys) + Poseidon for MAC.
 5. The implementation is in Rust.
 6. The goal is a minimal token format. We start simple and add only fields essential to our use cases.
 
@@ -21,7 +22,7 @@ Protokens are designed to be a simple, fast replacement for JWTs, ad hoc tokens,
 ```proto
 message Payload {
   uint32 version = 1;      // reserved, always 0 (omitted on wire)
-  uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44, 4 = Groth16-Poseidon
+  uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44, 4 = Groth16-Poseidon, 5 = Groth16-Hybrid
   uint32 key_id_type = 3;  // 1 = key_hash, 2 = public_key, 3 = full_key_hash
   bytes  key_id = 4;       // 8 B (key_hash), 32 B (Ed25519/full_key_hash), 1312 B (ML-DSA-44)
   uint64 expires_at = 5;   // Unix seconds
@@ -39,7 +40,7 @@ message SignedToken {
 }
 
 message SigningKey {
-  uint32 algorithm = 1;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44, 4 = Groth16-Poseidon
+  uint32 algorithm = 1;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44, 4 = Groth16-Poseidon, 5 = Groth16-Hybrid
   bytes secret_key = 2;    // HMAC/Groth16: raw key (≥32 B); Ed25519: 32 B seed; ML-DSA-44: 2560 B
   bytes public_key = 3;    // Ed25519: 32 B; ML-DSA-44: 1312 B; empty for HMAC/Groth16
 }
@@ -48,7 +49,7 @@ message VerifyingKey {
   uint32 algorithm = 1;    // 2 = Ed25519, 3 = ML-DSA-44
   bytes public_key = 2;    // Ed25519: 32 B; ML-DSA-44: 1312 B
 }
-// Note: Groth16-Poseidon verification uses a separate SNARK verifying key, not VerifyingKey proto.
+// Note: Groth16-Poseidon/Hybrid verification uses a separate SNARK verifying key, not VerifyingKey proto.
 ```
 
 7. Canonical encoding rules: fields in ascending order, minimal varints, default values (0/empty) omitted. Repeated fields (scope) appear consecutively, sorted lexicographically, no duplicates.
@@ -143,20 +144,39 @@ separate from the proto VerifyingKey (it's an arkworks-specific structure).
 **Dependencies**: arkworks ecosystem v0.5 — ark-ff, ark-bn254, ark-groth16, ark-relations,
 ark-r1cs-std, ark-crypto-primitives (Poseidon sponge gadget), ark-snark, ark-serialize, ark-std.
 
+### Groth16-Hybrid SNARK (added 2026-02-27)
+Added as algorithm 5. Uses SHA-256 for the key hash and Poseidon for the MAC.
+This enables verification with only SHA-256(K) — compatible with existing HMAC key
+infrastructure where the verifier only knows the SHA-256 hash of the key.
+
+**Circuit design**: Hybrid R1CS circuit (~26K constraints in debug).
+Public inputs: 3 Fr elements (key_hash, payload_hash, mac) — same as Groth16Poseidon.
+Private witness: key K as 32 bytes (UInt8 gadget variables).
+- Constraint 1: SHA-256(K) packed as Fr == key_hash (in-circuit SHA-256 + le_bytes_to_fpvar)
+- Constraint 2: Poseidon(K_fr, payload_hash) == mac (in-circuit Poseidon)
+
+**Key difference from Groth16Poseidon**: key_hash = Fr::from_le_bytes_mod_order(SHA-256(K))
+instead of Poseidon(K). The larger circuit (~26K vs ~480 constraints) is the cost of
+SHA-256 compatibility. Separate trusted setup required (`snark-setup -a groth16-hybrid`).
+
+**Stack note**: SHA-256 circuit gadget requires ~64MB thread stack in debug builds.
+Hybrid tests use `run_with_large_stack()`. Run tests with `--test-threads=2` in
+memory-constrained environments.
+
 ## Implementation Status
 
-All TODO items 1-8 are implemented, plus ML-DSA-44 and Groth16-Poseidon support:
-- `src/types.rs` - Core types (Version, Algorithm incl. MlDsa44/Groth16Poseidon, KeyIdentifier incl. FullKeyHash, Payload, SignedToken, Claims)
+All TODO items 1-8 are implemented, plus ML-DSA-44, Groth16-Poseidon, and Groth16-Hybrid support:
+- `src/types.rs` - Core types (Version, Algorithm incl. MlDsa44/Groth16Poseidon/Groth16Hybrid, KeyIdentifier incl. FullKeyHash, Payload, SignedToken, Claims)
 - `src/proto3.rs` - Canonical proto3 wire encoder/decoder
 - `src/serialize.rs` - Deterministic serialization/deserialization for Payload and SignedToken (incl. proof field)
-- `src/keys.rs` - Proto3 key serialization (SigningKey, VerifyingKey) with validation for all 4 algorithms
+- `src/keys.rs` - Proto3 key serialization (SigningKey, VerifyingKey) with validation for all 5 algorithms
 - `src/poseidon.rs` - Poseidon hash config (BN254, t=3), native hash, bytes↔field element conversion
-- `src/sign.rs` - HMAC-SHA256, Ed25519, ML-DSA-44, and Groth16-Poseidon signing
-- `src/verify.rs` - Verification with key hash matching, expiry and not_before checking, Groth16 SNARK verification
-- `src/snark.rs` - Groth16 SNARK circuit (Poseidon key proof, ~480 constraints), setup/prove/verify, key serialization
-- `src/main.rs` - CLI tool with `generate-key`, `get-verifying-key`, `snark-setup`, `sign`, `verify`, `inspect` commands (all 4 algorithms)
+- `src/sign.rs` - HMAC-SHA256, Ed25519, ML-DSA-44, Groth16-Poseidon, and Groth16-Hybrid signing
+- `src/verify.rs` - Verification with key hash matching, expiry and not_before checking, Groth16 SNARK verification (both Poseidon and Hybrid)
+- `src/snark.rs` - Two Groth16 circuits: PoseidonKeyProofCircuit (~480 constraints) and HybridKeyProofCircuit (~26K constraints), setup/prove/verify, key serialization
+- `src/main.rs` - CLI tool with `generate-key`, `get-verifying-key`, `snark-setup`, `sign`, `verify`, `inspect` commands (all 5 algorithms)
 - `src/error.rs` - Error types
-- 132 tests (115 unit + 4 reference + 13 test vectors) including byte-level corruption tests for all algorithms
+- 142 tests (125 unit + 4 reference + 13 test vectors) including byte-level corruption tests for all algorithms
 - `notes/` - Research documents (prior art, Ed25519 vs P-256, protobuf determinism, post-quantum, ML-DSA key formats, subject identifiers, symmetric key proofs, ZK-friendly hashes, Groth16 trusted setup)
 
 ## Research Prior Art

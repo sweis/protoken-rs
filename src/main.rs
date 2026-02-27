@@ -14,11 +14,13 @@ use protoken::keys::{
 use protoken::serialize::{deserialize_payload, deserialize_signed_token};
 use protoken::sign::{
     compute_key_hash, generate_ed25519_key, generate_hmac_key, generate_mldsa44_key,
-    mldsa44_key_hash, sign_ed25519, sign_groth16, sign_hmac, sign_mldsa44,
+    mldsa44_key_hash, sign_ed25519, sign_groth16, sign_groth16_hybrid, sign_hmac, sign_mldsa44,
 };
 use protoken::snark;
 use protoken::types::{Algorithm, Claims, KeyIdentifier, Payload};
-use protoken::verify::{verify_ed25519, verify_groth16, verify_hmac, verify_mldsa44};
+use protoken::verify::{
+    verify_ed25519, verify_groth16, verify_groth16_hybrid, verify_hmac, verify_mldsa44,
+};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -45,7 +47,7 @@ struct Cli {
 enum Command {
     /// Generate a new signing key (base64-encoded SigningKey proto).
     GenerateKey {
-        /// Algorithm: "hmac", "ed25519" (default), "ml-dsa-44", or "groth16".
+        /// Algorithm: "hmac", "ed25519" (default), "ml-dsa-44", "groth16", or "groth16-hybrid".
         #[arg(short, long, default_value = "ed25519")]
         algorithm: String,
     },
@@ -58,6 +60,10 @@ enum Command {
 
     /// Run Groth16 trusted setup (one-time, produces proving + verifying keys).
     SnarkSetup {
+        /// Circuit type: "groth16" (Poseidon-only) or "groth16-hybrid" (SHA-256 key hash + Poseidon MAC).
+        #[arg(short, long, default_value = "groth16")]
+        algorithm: String,
+
         /// Output file for the proving key (base64-encoded).
         #[arg(long, default_value = "snark-pk.b64")]
         proving_key: String,
@@ -125,9 +131,10 @@ fn main() {
         Command::GenerateKey { algorithm } => cmd_generate_key(&algorithm),
         Command::GetVerifyingKey { keyfile } => cmd_get_verifying_key(&keyfile),
         Command::SnarkSetup {
+            algorithm,
             proving_key,
             verifying_key,
-        } => cmd_snark_setup(&proving_key, &verifying_key),
+        } => cmd_snark_setup(&algorithm, &proving_key, &verifying_key),
         Command::Sign {
             keyfile,
             duration,
@@ -184,9 +191,17 @@ fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
                 public_key: Vec::new(),
             }
         }
+        "groth16-hybrid" => {
+            let secret_key = generate_hmac_key();
+            ProtoSigningKey {
+                algorithm: Algorithm::Groth16Hybrid,
+                secret_key: Zeroizing::new(secret_key),
+                public_key: Vec::new(),
+            }
+        }
         _ => {
             return Err(format!(
-                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', 'ml-dsa-44', or 'groth16')"
+                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', 'ml-dsa-44', 'groth16', or 'groth16-hybrid')"
             )
             .into())
         }
@@ -207,9 +222,27 @@ fn cmd_get_verifying_key(keyfile: &str) -> Result<(), Box<dyn std::error::Error>
 /// Maximum SNARK key input size. Proving keys can be tens of MB.
 const MAX_SNARK_KEY_INPUT: u64 = 100_000_000; // 100 MB
 
-fn cmd_snark_setup(pk_path: &str, vk_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("Running Groth16 trusted setup (this may take a minute)...");
-    let (pk, vk) = snark::setup()?;
+fn cmd_snark_setup(
+    algorithm: &str,
+    pk_path: &str,
+    vk_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (pk, vk) = match algorithm {
+        "groth16" => {
+            eprintln!("Running Groth16-Poseidon trusted setup...");
+            snark::setup()?
+        }
+        "groth16-hybrid" => {
+            eprintln!("Running Groth16-Hybrid trusted setup (this may take a minute)...");
+            snark::setup_hybrid()?
+        }
+        _ => {
+            return Err(format!(
+                "unknown SNARK algorithm: {algorithm} (use 'groth16' or 'groth16-hybrid')"
+            )
+            .into())
+        }
+    };
 
     let pk_bytes = snark::serialize_proving_key(&pk)?;
     let vk_bytes = snark::serialize_verifying_key(&vk)?;
@@ -288,6 +321,19 @@ fn cmd_sign(
             })?;
             sign_groth16(&pk, &key, claims)?
         }
+        Algorithm::Groth16Hybrid => {
+            let pk_file = proving_key_file
+                .ok_or("Groth16Hybrid signing requires --proving-key <file> (from snark-setup)")?;
+            let pk_bytes = read_snark_keyfile(&pk_file)?;
+            let pk = snark::deserialize_proving_key(&pk_bytes)?;
+            let key: [u8; 32] = sk.secret_key.as_slice().try_into().map_err(|_| {
+                format!(
+                    "Groth16Hybrid key must be 32 bytes, got {}",
+                    sk.secret_key.len()
+                )
+            })?;
+            sign_groth16_hybrid(&pk, &key, claims)?
+        }
     };
 
     println!("{}", B64.encode(&token_bytes));
@@ -319,14 +365,14 @@ fn cmd_verify(
         match vk.algorithm {
             Algorithm::Ed25519 => verify_ed25519(&vk.public_key, &token_bytes, now)?,
             Algorithm::MlDsa44 => verify_mldsa44(&vk.public_key, &token_bytes, now)?,
-            Algorithm::HmacSha256 | Algorithm::Groth16Poseidon => {
+            Algorithm::HmacSha256 | Algorithm::Groth16Poseidon | Algorithm::Groth16Hybrid => {
                 return Err("symmetric algorithm; use the signing key to verify".into());
             }
         }
     } else if let Ok(sk) = deserialize_signing_key(&key_bytes) {
         match sk.algorithm {
             Algorithm::HmacSha256 => verify_hmac(&sk.secret_key, &token_bytes, now)?,
-            Algorithm::Groth16Poseidon => {
+            Algorithm::Groth16Poseidon | Algorithm::Groth16Hybrid => {
                 return Err(
                     "use the SNARK verifying key (from snark-setup) to verify Groth16 tokens"
                         .into(),
@@ -341,7 +387,19 @@ fn cmd_verify(
             }
         }
     } else if let Ok(snark_vk) = snark::deserialize_verifying_key(&key_bytes) {
-        verify_groth16(&snark_vk, &token_bytes, now)?
+        // Peek at the token's algorithm to dispatch to the correct verifier.
+        let token = deserialize_signed_token(&token_bytes)?;
+        let payload = deserialize_payload(&token.payload_bytes)?;
+        match payload.metadata.algorithm {
+            Algorithm::Groth16Poseidon => verify_groth16(&snark_vk, &token_bytes, now)?,
+            Algorithm::Groth16Hybrid => verify_groth16_hybrid(&snark_vk, &token_bytes, now)?,
+            other => {
+                return Err(format!(
+                    "SNARK verifying key given but token algorithm is {:?} (expected Groth16Poseidon or Groth16Hybrid)",
+                    other
+                ).into());
+            }
+        }
     } else {
         return Err(
             "could not parse key file as VerifyingKey, SigningKey, or SNARK VerifyingKey".into(),
@@ -427,6 +485,7 @@ fn print_payload_colored(payload: &Payload) {
         Algorithm::Ed25519 => "Ed25519",
         Algorithm::MlDsa44 => "ML-DSA-44",
         Algorithm::Groth16Poseidon => "Groth16-Poseidon",
+        Algorithm::Groth16Hybrid => "Groth16-Hybrid",
     };
     print_field("Algorithm", &algo_name.green());
 

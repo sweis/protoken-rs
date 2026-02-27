@@ -29,6 +29,7 @@ pub enum Algorithm {
     Ed25519 = 2,
     MlDsa44 = 3,
     Groth16Poseidon = 4,
+    Groth16Hybrid = 5,
 }
 
 impl Algorithm {
@@ -38,6 +39,7 @@ impl Algorithm {
             2 => Some(Algorithm::Ed25519),
             3 => Some(Algorithm::MlDsa44),
             4 => Some(Algorithm::Groth16Poseidon),
+            5 => Some(Algorithm::Groth16Hybrid),
             _ => None,
         }
     }
@@ -49,7 +51,9 @@ impl Algorithm {
     /// Returns the signature length in bytes for this algorithm.
     pub fn signature_len(self) -> usize {
         match self {
-            Algorithm::HmacSha256 | Algorithm::Groth16Poseidon => HMAC_SHA256_SIG_LEN,
+            Algorithm::HmacSha256 | Algorithm::Groth16Poseidon | Algorithm::Groth16Hybrid => {
+                HMAC_SHA256_SIG_LEN
+            }
             Algorithm::Ed25519 => ED25519_SIG_LEN,
             Algorithm::MlDsa44 => MLDSA44_SIG_LEN,
         }
@@ -62,7 +66,8 @@ impl Algorithm {
 pub enum KeyIdType {
     KeyHash = 1,
     PublicKey = 2,
-    /// Full 32-byte hash of the key material (Poseidon for Groth16, SHA-256 for others).
+    /// Full 32-byte hash of the key material.
+    /// Groth16Poseidon uses Poseidon; Groth16Hybrid and others use SHA-256.
     FullKeyHash = 3,
 }
 
@@ -90,7 +95,7 @@ pub enum KeyIdentifier {
     /// Raw public key bytes (Ed25519: 32 B, ML-DSA-44: 1312 B).
     PublicKey(Vec<u8>),
     /// Full 32-byte hash of the key material.
-    /// Groth16Poseidon uses Poseidon(K); others use SHA-256. Full collision resistance.
+    /// Groth16Poseidon uses Poseidon(K); Groth16Hybrid uses SHA-256(K). Full collision resistance.
     FullKeyHash([u8; FULL_KEY_HASH_LEN]),
 }
 
@@ -219,7 +224,7 @@ pub struct Payload {
 pub struct SignedToken {
     pub payload_bytes: Vec<u8>,
     pub signature: Vec<u8>,
-    /// Groth16 SNARK proof (128 bytes for Groth16Poseidon, empty for other algorithms).
+    /// Groth16 SNARK proof (128 bytes for Groth16Poseidon/Groth16Hybrid, empty for other algorithms).
     pub proof: Vec<u8>,
 }
 
