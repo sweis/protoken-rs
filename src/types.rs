@@ -47,17 +47,6 @@ impl Algorithm {
     pub fn to_byte(self) -> u8 {
         self as u8
     }
-
-    /// Returns the signature length in bytes for this algorithm.
-    pub fn signature_len(self) -> usize {
-        match self {
-            Algorithm::HmacSha256 | Algorithm::Groth16Poseidon | Algorithm::Groth16Hybrid => {
-                HMAC_SHA256_SIG_LEN
-            }
-            Algorithm::Ed25519 => ED25519_SIG_LEN,
-            Algorithm::MlDsa44 => MLDSA44_SIG_LEN,
-        }
-    }
 }
 
 /// How the key is identified in the token.
@@ -245,3 +234,118 @@ pub const MLDSA44_SIG_LEN: usize = 2420;
 pub const FULL_KEY_HASH_LEN: usize = 32;
 pub const GROTH16_PROOF_LEN: usize = 128;
 pub const MAX_PROOF_BYTES: usize = 256;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_algorithm_from_byte_all_variants() {
+        assert_eq!(Algorithm::from_byte(1), Some(Algorithm::HmacSha256));
+        assert_eq!(Algorithm::from_byte(2), Some(Algorithm::Ed25519));
+        assert_eq!(Algorithm::from_byte(3), Some(Algorithm::MlDsa44));
+        assert_eq!(Algorithm::from_byte(4), Some(Algorithm::Groth16Poseidon));
+        assert_eq!(Algorithm::from_byte(5), Some(Algorithm::Groth16Hybrid));
+        assert_eq!(Algorithm::from_byte(0), None);
+        assert_eq!(Algorithm::from_byte(6), None);
+    }
+
+    #[test]
+    fn test_algorithm_to_byte_roundtrip() {
+        for b in 1..=5u8 {
+            let alg = Algorithm::from_byte(b).unwrap();
+            assert_eq!(alg.to_byte(), b);
+        }
+    }
+
+    #[test]
+    fn test_key_id_type_from_byte_all_variants() {
+        assert_eq!(KeyIdType::from_byte(1), Some(KeyIdType::KeyHash));
+        assert_eq!(KeyIdType::from_byte(2), Some(KeyIdType::PublicKey));
+        assert_eq!(KeyIdType::from_byte(3), Some(KeyIdType::FullKeyHash));
+        assert_eq!(KeyIdType::from_byte(0), None);
+        assert_eq!(KeyIdType::from_byte(4), None);
+    }
+
+    #[test]
+    fn test_key_id_type_to_byte_roundtrip() {
+        for b in 1..=3u8 {
+            let kit = KeyIdType::from_byte(b).unwrap();
+            assert_eq!(kit.to_byte(), b);
+        }
+    }
+
+    #[test]
+    fn test_version_to_byte() {
+        // Only V0 = 0 today. Check via repr roundtrip.
+        assert_eq!(Version::V0.to_byte(), 0);
+        assert_eq!(Version::from_byte(0), Some(Version::V0));
+        assert_eq!(Version::from_byte(1), None);
+    }
+
+    #[test]
+    fn test_key_identifier_key_id_type() {
+        assert_eq!(
+            KeyIdentifier::KeyHash([0; 8]).key_id_type(),
+            KeyIdType::KeyHash
+        );
+        assert_eq!(
+            KeyIdentifier::PublicKey(vec![0; 32]).key_id_type(),
+            KeyIdType::PublicKey
+        );
+        assert_eq!(
+            KeyIdentifier::FullKeyHash([0; 32]).key_id_type(),
+            KeyIdType::FullKeyHash
+        );
+    }
+
+    #[test]
+    fn test_claims_json_skip_zero_fields() {
+        // Verifies is_zero(): zero-valued not_before/issued_at are omitted from JSON.
+        let claims = Claims {
+            expires_at: 1000,
+            not_before: 0,
+            issued_at: 0,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&claims).unwrap();
+        assert!(!json.contains("not_before"));
+        assert!(!json.contains("issued_at"));
+        assert!(json.contains("expires_at"));
+    }
+
+    #[test]
+    fn test_claims_json_includes_nonzero_fields() {
+        // Verifies is_zero(): nonzero not_before/issued_at ARE present in JSON.
+        let claims = Claims {
+            expires_at: 1000,
+            not_before: 500,
+            issued_at: 500,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&claims).unwrap();
+        assert!(json.contains("not_before"));
+        assert!(json.contains("issued_at"));
+    }
+
+    #[test]
+    fn test_claims_validate_rejects_duplicate_scopes() {
+        let claims = Claims {
+            expires_at: 1000,
+            scopes: vec!["read".into(), "read".into()],
+            ..Default::default()
+        };
+        assert!(claims.validate().is_err());
+    }
+
+    #[test]
+    fn test_claims_validate_accepts_distinct_scopes() {
+        let claims = Claims {
+            expires_at: 1000,
+            scopes: vec!["read".into(), "write".into()],
+            ..Default::default()
+        };
+        assert!(claims.validate().is_ok());
+    }
+}

@@ -688,6 +688,85 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // --- Mutation-testing-driven coverage additions ---
+
+    /// Build a token with key A's signature but key B's key_hash.
+    /// This isolates `verify_key_match` — the signature is valid but the
+    /// key identity check should fail first with `KeyHashMismatch`.
+    fn build_hmac_token_with_wrong_key_hash(sign_key: &[u8], verify_key: &[u8]) -> Vec<u8> {
+        // Manually build a payload that claims key_hash(verify_key) but sign with sign_key.
+        let payload = Payload {
+            metadata: Metadata {
+                version: Version::V0,
+                algorithm: Algorithm::HmacSha256,
+                key_identifier: KeyIdentifier::KeyHash(compute_key_hash(verify_key)),
+            },
+            claims: Claims {
+                expires_at: u64::MAX,
+                ..Default::default()
+            },
+        };
+        let payload_bytes = crate::serialize::serialize_payload(&payload);
+        let mut mac = Hmac::<Sha256>::new_from_slice(sign_key).unwrap();
+        mac.update(&payload_bytes);
+        let tag = mac.finalize().into_bytes();
+        crate::serialize::serialize_signed_token(&SignedToken {
+            payload_bytes,
+            signature: tag.to_vec(),
+            proof: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn test_verify_key_match_rejects_mismatch() {
+        // verify_key_match should produce KeyHashMismatch specifically — not
+        // just any error — when the key hash doesn't match. This proves the
+        // key identity check is an independent defense layer, not shadowed by
+        // signature verification.
+        let key_a: &[u8] = TEST_HMAC_KEY;
+        let key_b: &[u8] = WRONG_HMAC_KEY;
+
+        // Token signed with key_a but claims key_b's hash. Verify with key_a.
+        // The signature IS valid for key_a, but key_hash in payload is key_b's.
+        let token = build_hmac_token_with_wrong_key_hash(key_a, key_b);
+        let result = verify_hmac(key_a, &token, 1000);
+        assert!(
+            matches!(result, Err(ProtokenError::KeyHashMismatch)),
+            "expected KeyHashMismatch, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_verify_key_match_accepts_match() {
+        // Positive case: key_hash matches, signature valid → Ok.
+        let key: &[u8] = TEST_HMAC_KEY;
+        let token = build_hmac_token_with_wrong_key_hash(key, key);
+        assert!(verify_hmac(key, &token, 1000).is_ok());
+    }
+
+    #[test]
+    fn test_verify_ed25519_key_hash_mismatch() {
+        // Sign with key A using key B's key hash; verify with key A.
+        // Signature is valid for A, but key identity check must fail.
+        let (seed_a, pk_a) = generate_ed25519_key().unwrap();
+        let (_seed_b, pk_b) = generate_ed25519_key().unwrap();
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let token_bytes = sign_ed25519(
+            &seed_a,
+            claims,
+            KeyIdentifier::KeyHash(compute_key_hash(&pk_b)),
+        )
+        .unwrap();
+        let result = verify_ed25519(&pk_a, &token_bytes, 1000);
+        assert!(
+            matches!(result, Err(ProtokenError::KeyHashMismatch)),
+            "expected KeyHashMismatch, got {result:?}"
+        );
+    }
+
     // Groth16-Poseidon verification tests
 
     fn groth16_test_token() -> (crate::snark::SnarkVerifyingKey, Vec<u8>, [u8; 32]) {

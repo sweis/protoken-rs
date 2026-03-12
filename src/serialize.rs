@@ -841,4 +841,243 @@ mod tests {
             vec!["admin", "read", "write"]
         );
     }
+
+    // --- Mutation-testing-driven coverage additions ---
+
+    #[test]
+    fn test_rejects_oversized_payload() {
+        // Exercises MAX_PAYLOAD_BYTES check in deserialize_payload (line 70).
+        let oversized = vec![0u8; MAX_PAYLOAD_BYTES + 1];
+        let err = deserialize_payload(&oversized).unwrap_err();
+        // Must be the specific "too large" error, not a downstream parse error,
+        // so a `> → ==` mutation (which accepts len != MAX) is caught.
+        assert!(
+            matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("payload too large")),
+            "expected 'payload too large', got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_accepts_exactly_max_payload_bytes() {
+        // Exact-boundary: exactly MAX_PAYLOAD_BYTES should NOT be rejected
+        // by the size check (it fails parsing as junk, which is fine).
+        // Catches `> → >=` mutation which would reject it with "too large".
+        let exactly_max = vec![0u8; MAX_PAYLOAD_BYTES];
+        let err = deserialize_payload(&exactly_max).unwrap_err();
+        assert!(
+            !matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("payload too large")),
+            "MAX_PAYLOAD_BYTES should pass size check, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_oversized_signed_token() {
+        // Exercises MAX_SIGNED_TOKEN_BYTES check (line 276).
+        let oversized = vec![0u8; MAX_SIGNED_TOKEN_BYTES + 1];
+        let err = deserialize_signed_token(&oversized).unwrap_err();
+        assert!(
+            matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("signed token too large")),
+            "expected 'signed token too large', got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_accepts_exactly_max_signed_token_bytes() {
+        let exactly_max = vec![0u8; MAX_SIGNED_TOKEN_BYTES];
+        let err = deserialize_signed_token(&exactly_max).unwrap_err();
+        assert!(
+            !matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("signed token too large")),
+            "MAX_SIGNED_TOKEN_BYTES should pass size check, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_max_signed_token_bytes_sanity() {
+        // Pins the MAX_SIGNED_TOKEN_BYTES value so arithmetic mutations are caught.
+        // The constant must be strictly larger than the largest legitimate token
+        // (ML-DSA-44 with embedded public key in a large payload).
+        const { assert!(MAX_SIGNED_TOKEN_BYTES > MAX_PAYLOAD_BYTES) };
+        const { assert!(MAX_SIGNED_TOKEN_BYTES > MAX_SIGNATURE_BYTES) };
+        const { assert!(MAX_SIGNED_TOKEN_BYTES > MAX_PROOF_BYTES) };
+        // Explicit expected value: 4096 + 2560 + 256 + 32 = 6944.
+        assert_eq!(MAX_SIGNED_TOKEN_BYTES, 6944);
+    }
+
+    #[test]
+    fn test_rejects_oversized_payload_inside_token() {
+        // Exercises line 304: payload field > MAX_PAYLOAD_BYTES inside a token.
+        let mut bad = Vec::new();
+        proto3::encode_bytes(1, &vec![0; MAX_PAYLOAD_BYTES + 1], &mut bad);
+        proto3::encode_bytes(2, &[0; 32], &mut bad);
+        assert!(deserialize_signed_token(&bad).is_err());
+    }
+
+    #[test]
+    fn test_rejects_oversized_signature_inside_token() {
+        // Exercises line 315: signature > MAX_SIGNATURE_BYTES.
+        let payload = sample_payload_hmac();
+        let payload_bytes = serialize_payload(&payload);
+        let mut bad = Vec::new();
+        proto3::encode_bytes(1, &payload_bytes, &mut bad);
+        proto3::encode_bytes(2, &vec![0; MAX_SIGNATURE_BYTES + 1], &mut bad);
+        assert!(deserialize_signed_token(&bad).is_err());
+    }
+
+    #[test]
+    fn test_rejects_oversized_proof_inside_token() {
+        // Exercises line 326: proof > MAX_PROOF_BYTES.
+        let payload = sample_payload_hmac();
+        let payload_bytes = serialize_payload(&payload);
+        let mut bad = Vec::new();
+        proto3::encode_bytes(1, &payload_bytes, &mut bad);
+        proto3::encode_bytes(2, &[0; 32], &mut bad);
+        proto3::encode_bytes(3, &vec![0; MAX_PROOF_BYTES + 1], &mut bad);
+        assert!(deserialize_signed_token(&bad).is_err());
+    }
+
+    #[test]
+    fn test_signed_token_with_proof_roundtrip() {
+        // Exercises the proof field (field 3) match arm (line 324-334).
+        let payload = sample_payload_hmac();
+        let payload_bytes = serialize_payload(&payload);
+        let token = SignedToken {
+            payload_bytes: payload_bytes.clone(),
+            signature: vec![0xAB; 32],
+            proof: vec![0xCD; GROTH16_PROOF_LEN],
+        };
+        let wire = serialize_signed_token(&token);
+        let decoded = deserialize_signed_token(&wire).unwrap();
+        assert_eq!(decoded.payload_bytes, payload_bytes);
+        assert_eq!(decoded.signature, vec![0xAB; 32]);
+        assert_eq!(decoded.proof, vec![0xCD; GROTH16_PROOF_LEN]);
+    }
+
+    #[test]
+    fn test_signed_token_max_size_proof_roundtrip() {
+        // Exact-boundary: proof of exactly MAX_PROOF_BYTES.
+        let payload = sample_payload_hmac();
+        let payload_bytes = serialize_payload(&payload);
+        let token = SignedToken {
+            payload_bytes,
+            signature: vec![0xAB; 32],
+            proof: vec![0xEE; MAX_PROOF_BYTES],
+        };
+        let wire = serialize_signed_token(&token);
+        let decoded = deserialize_signed_token(&wire).unwrap();
+        assert_eq!(decoded.proof.len(), MAX_PROOF_BYTES);
+    }
+
+    #[test]
+    fn test_accepts_max_length_subject() {
+        // Exact-boundary: subject of exactly MAX_CLAIM_BYTES_LEN bytes.
+        let mut data = Vec::new();
+        proto3::encode_uint32(2, 1, &mut data);
+        proto3::encode_uint32(3, 1, &mut data);
+        proto3::encode_bytes(4, &[0; 8], &mut data);
+        proto3::encode_uint64(5, 1700000000, &mut data);
+        proto3::encode_bytes(8, &vec![b's'; MAX_CLAIM_BYTES_LEN], &mut data);
+        let result = deserialize_payload(&data).unwrap();
+        assert_eq!(result.claims.subject.len(), MAX_CLAIM_BYTES_LEN);
+    }
+
+    #[test]
+    fn test_accepts_max_length_audience() {
+        let mut data = Vec::new();
+        proto3::encode_uint32(2, 1, &mut data);
+        proto3::encode_uint32(3, 1, &mut data);
+        proto3::encode_bytes(4, &[0; 8], &mut data);
+        proto3::encode_uint64(5, 1700000000, &mut data);
+        proto3::encode_bytes(9, &vec![b'a'; MAX_CLAIM_BYTES_LEN], &mut data);
+        let result = deserialize_payload(&data).unwrap();
+        assert_eq!(result.claims.audience.len(), MAX_CLAIM_BYTES_LEN);
+    }
+
+    #[test]
+    fn test_accepts_max_length_scope() {
+        let mut data = Vec::new();
+        proto3::encode_uint32(2, 1, &mut data);
+        proto3::encode_uint32(3, 1, &mut data);
+        proto3::encode_bytes(4, &[0; 8], &mut data);
+        proto3::encode_uint64(5, 1700000000, &mut data);
+        proto3::encode_bytes(10, &vec![b'x'; MAX_CLAIM_BYTES_LEN], &mut data);
+        let result = deserialize_payload(&data).unwrap();
+        assert_eq!(result.claims.scopes[0].len(), MAX_CLAIM_BYTES_LEN);
+    }
+
+    #[test]
+    fn test_payload_full_key_hash_roundtrip() {
+        // Exercises FullKeyHash deserialization (line 221-231) — needed because
+        // Groth16 tests are skipped in fast mutation runs.
+        let payload = Payload {
+            metadata: Metadata {
+                version: Version::V0,
+                algorithm: Algorithm::Groth16Poseidon,
+                key_identifier: KeyIdentifier::FullKeyHash([0x77; FULL_KEY_HASH_LEN]),
+            },
+            claims: Claims {
+                expires_at: 1700000000,
+                ..Default::default()
+            },
+        };
+        let bytes = serialize_payload(&payload);
+        let decoded = deserialize_payload(&bytes).unwrap();
+        assert_eq!(payload, decoded);
+    }
+
+    #[test]
+    fn test_rejects_wrong_length_full_key_hash() {
+        // Exercises line 222: FullKeyHash must be exactly FULL_KEY_HASH_LEN (32 bytes).
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 4, &mut bad); // Groth16Poseidon
+        proto3::encode_uint32(3, 3, &mut bad); // FullKeyHash
+        proto3::encode_bytes(4, &[0; 16], &mut bad); // wrong length
+        proto3::encode_uint64(5, 1700000000, &mut bad);
+        assert!(matches!(
+            deserialize_payload(&bad),
+            Err(ProtokenError::InvalidKeyLength {
+                expected: 32,
+                actual: 16
+            })
+        ));
+    }
+
+    #[test]
+    fn test_rejects_duplicate_non_scope_field() {
+        // Exercises line 97-98: field_number == last_field_number for non-scope fields.
+        // Field 5 (expires_at) appearing twice is a canonical-encoding violation.
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 8], &mut bad);
+        proto3::encode_uint64(5, 1000, &mut bad);
+        proto3::encode_uint64(5, 2000, &mut bad); // duplicate field 5
+        let err = deserialize_payload(&bad).unwrap_err();
+        assert!(
+            matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("ascending")),
+            "expected ascending-order error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_accepts_max_size_signature() {
+        // Exact-boundary: signature of exactly MAX_SIGNATURE_BYTES.
+        let payload = sample_payload_hmac();
+        let payload_bytes = serialize_payload(&payload);
+        let mut data = Vec::new();
+        proto3::encode_bytes(1, &payload_bytes, &mut data);
+        proto3::encode_bytes(2, &vec![0; MAX_SIGNATURE_BYTES], &mut data);
+        let decoded = deserialize_signed_token(&data).unwrap();
+        assert_eq!(decoded.signature.len(), MAX_SIGNATURE_BYTES);
+    }
+
+    #[test]
+    fn test_accepts_max_size_payload_inside_token() {
+        // A token with a MAX_PAYLOAD_BYTES payload (junk, but passes the raw-size check).
+        let mut data = Vec::new();
+        proto3::encode_bytes(1, &vec![0x10; MAX_PAYLOAD_BYTES], &mut data);
+        proto3::encode_bytes(2, &[0; 32], &mut data);
+        // Raw deserialize succeeds (parsing the payload would fail but that's separate).
+        let decoded = deserialize_signed_token(&data).unwrap();
+        assert_eq!(decoded.payload_bytes.len(), MAX_PAYLOAD_BYTES);
+    }
 }

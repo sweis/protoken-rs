@@ -176,7 +176,7 @@ All TODO items 1-8 are implemented, plus ML-DSA-44, Groth16-Poseidon, and Groth1
 - `src/snark.rs` - Two Groth16 circuits: PoseidonKeyProofCircuit (~480 constraints) and HybridKeyProofCircuit (~26K constraints), setup/prove/verify, key serialization
 - `src/main.rs` - CLI tool with `generate-key`, `get-verifying-key`, `snark-setup`, `sign`, `verify`, `inspect` commands (all 5 algorithms)
 - `src/error.rs` - Error types
-- 142 tests (125 unit + 4 reference + 13 test vectors) including byte-level corruption tests for all algorithms
+- 205 tests (188 unit + 4 reference + 13 test vectors) including byte-level corruption tests for all algorithms
 - `notes/` - Research documents (prior art, Ed25519 vs P-256, protobuf determinism, post-quantum, ML-DSA key formats, subject identifiers, symmetric key proofs, ZK-friendly hashes, Groth16 trusted setup)
 
 ## Research Prior Art

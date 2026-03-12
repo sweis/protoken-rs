@@ -2,19 +2,45 @@
 
 Mutation testing run on 2026-03-12 using cargo-mutants 27.0.0.
 
-## Summary
+## Summary (after fixes)
 
-| Outcome  | Count | Percent |
-|----------|-------|---------|
-| Caught   | 203   | 67.4%   |
-| Missed   | 78    | 25.9%   |
-| Unviable | 19    | 6.3%    |
-| Timeout  | 1     | 0.3%    |
-| **Total** | **301** | |
+| Outcome  | Baseline | After fixes |
+|----------|----------|-------------|
+| Caught   | 203      | 264         |
+| Missed   | 78       | 0           |
+| Unviable | 19       | 20          |
+| Timeout  | 1        | 0           |
+| Excluded | 0        | 12 (SNARK)  |
+| **Total** | **301** | **296**     |
 
-**Mutation score** (caught / testable): 203 / (203 + 78) = **72.2%**
+**Mutation score**: 72.2% → **100%** of fast-testable mutants.
 
-Run time: ~10 minutes with 2 parallel workers.
+The 12 excluded mutants are whole-body replacements of `sign_groth16`,
+`sign_groth16_hybrid`, `verify_groth16`, and `verify_groth16_hybrid`. These
+require a trusted SNARK setup (~2 min) to test, so they're covered by
+`make test-snark` only. All their constituent helpers (`compute_full_key_hash`,
+`bytes_to_fr`, FullKeyHash serialization, etc.) now have fast unit tests.
+
+Run time: ~8 minutes with 2 parallel workers.
+
+## Fixes applied (2026-03-12)
+
+- Removed dead `Algorithm::signature_len()` (5 mutants → 0).
+- Added 63 new unit tests across types, proto3, serialize, keys, sign, verify,
+  and poseidon. Fast unit test count: 95 → 158.
+- Added SNARK function-body exclusions to `.cargo/mutants.toml`.
+
+Key test patterns used to kill mutants:
+- **Error-message pinning** — `matches!(err, MalformedEncoding(m) if m.contains("..."))`
+  so error-shadowing mutants (which reach a different error path) are caught.
+- **Boundary pairs** — every size-limit check gets both an "oversized → rejects"
+  and "exactly-at-limit → passes the check" test, killing `>`→`>=`→`==` cycles.
+- **Known-value tests** — hash functions get a specific-input→specific-output
+  assertion so a constant-return mutant fails.
+- **Test name hygiene** — new Groth16-related tests avoid "snark"/"groth16" in
+  their names so they run under the mutation-test skip filters.
+
+## Original baseline analysis (for reference)
 
 ## Methodology
 
