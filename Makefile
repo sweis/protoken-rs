@@ -1,4 +1,4 @@
-.PHONY: all test test-snark fmt clippy audit check fuzz
+.PHONY: all test test-snark fmt clippy audit check fuzz mutants
 
 # Run all checks (format, clippy, test)
 all: check test
@@ -25,6 +25,12 @@ audit:
 
 # Run all static checks (fmt + clippy)
 check: fmt clippy
+
+# Run mutation testing (requires `cargo install cargo-mutants`).
+# Skips snark.rs and SNARK tests per .cargo/mutants.toml (~10 min, ~300 mutants).
+# See notes/cargo-mutants-analysis.md for baseline results.
+mutants:
+	cargo mutants -j 2 --no-shuffle
 
 # Run fuzz targets (requires nightly). Example:
 #   make fuzz TARGET=parse_payload DURATION=60
