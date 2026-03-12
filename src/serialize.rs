@@ -848,14 +848,47 @@ mod tests {
     fn test_rejects_oversized_payload() {
         // Exercises MAX_PAYLOAD_BYTES check in deserialize_payload (line 70).
         let oversized = vec![0u8; MAX_PAYLOAD_BYTES + 1];
-        assert!(deserialize_payload(&oversized).is_err());
+        let err = deserialize_payload(&oversized).unwrap_err();
+        // Must be the specific "too large" error, not a downstream parse error,
+        // so a `> → ==` mutation (which accepts len != MAX) is caught.
+        assert!(
+            matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("payload too large")),
+            "expected 'payload too large', got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_accepts_exactly_max_payload_bytes() {
+        // Exact-boundary: exactly MAX_PAYLOAD_BYTES should NOT be rejected
+        // by the size check (it fails parsing as junk, which is fine).
+        // Catches `> → >=` mutation which would reject it with "too large".
+        let exactly_max = vec![0u8; MAX_PAYLOAD_BYTES];
+        let err = deserialize_payload(&exactly_max).unwrap_err();
+        assert!(
+            !matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("payload too large")),
+            "MAX_PAYLOAD_BYTES should pass size check, got {err:?}"
+        );
     }
 
     #[test]
     fn test_rejects_oversized_signed_token() {
         // Exercises MAX_SIGNED_TOKEN_BYTES check (line 276).
         let oversized = vec![0u8; MAX_SIGNED_TOKEN_BYTES + 1];
-        assert!(deserialize_signed_token(&oversized).is_err());
+        let err = deserialize_signed_token(&oversized).unwrap_err();
+        assert!(
+            matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("signed token too large")),
+            "expected 'signed token too large', got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_accepts_exactly_max_signed_token_bytes() {
+        let exactly_max = vec![0u8; MAX_SIGNED_TOKEN_BYTES];
+        let err = deserialize_signed_token(&exactly_max).unwrap_err();
+        assert!(
+            !matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("signed token too large")),
+            "MAX_SIGNED_TOKEN_BYTES should pass size check, got {err:?}"
+        );
     }
 
     #[test]

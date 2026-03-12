@@ -24,6 +24,12 @@ additional_cargo_test_args = [
 
 # Semantically equivalent mutations — the bit patterns don't overlap so
 # | and ^ produce identical results. Version only has V0 = 0.
+#
+# The sign_groth16 / verify_groth16 function bodies require a SNARK trusted
+# setup (~2 min). Their internal helpers ARE fast-tested individually
+# (compute_full_key_hash etc.), and the full bodies are covered by
+# `make test-snark`. Excluded here so `make mutants` reports zero misses
+# when the fast suite is complete.
 exclude_re = [
     # (value & 0x7F) | 0x80 — bit 7 always 0 after mask
     'proto3\.rs.*replace \| with \^ in encode_varint',
@@ -31,6 +37,11 @@ exclude_re = [
     'proto3\.rs.*replace \| with \^ in encode_tag',
     # Version::to_byte only has V0 = 0
     'types\.rs.*replace Version::to_byte -> u8 with 0',
+    # SNARK signing/verification bodies — covered by slow test-snark only
+    'replace sign_groth16 ->',
+    'replace sign_groth16_hybrid ->',
+    'in verify_groth16$',
+    'in verify_groth16_hybrid$',
 ]
 
 # Give each mutant test run some headroom in case the machine is loaded.

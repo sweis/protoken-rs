@@ -448,15 +448,17 @@ mod tests {
     #[test]
     fn test_rejects_zk_symmetric_verifying_key() {
         // Groth16 algorithms cannot be VerifyingKey (symmetric).
-        // Exercises keys.rs:203/204 || branches.
+        // Exercises keys.rs:203/204 || branches. Must match the specific
+        // "cannot be a verifying key" message, not the validate_public_key_size
+        // "has no public key" message that would also fire as a fallback.
         for alg in [4u32, 5u32] {
             let mut data = Vec::new();
             proto3::encode_uint32(1, alg, &mut data);
             proto3::encode_bytes(2, &[0; 32], &mut data);
             let err = deserialize_verifying_key(&data).unwrap_err();
             assert!(
-                matches!(err, ProtokenError::MalformedEncoding(m) if m.contains("symmetric")),
-                "alg {alg} should be rejected as symmetric"
+                matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("cannot be a verifying key")),
+                "alg {alg} should hit the pre-validation symmetric check, got {err:?}"
             );
         }
     }
