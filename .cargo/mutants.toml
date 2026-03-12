@@ -1,0 +1,39 @@
+# cargo-mutants configuration for protoken
+#
+# The SNARK tests (Groth16 trusted setup + proving) take ~2 minutes per run
+# and require 64MB thread stacks. They are skipped here so each mutant can
+# be tested in ~10 seconds instead of 2+ minutes. Run snark mutation tests
+# separately if SNARK code changes.
+#
+# main.rs is the CLI binary and has no unit tests — excluded from mutation.
+
+exclude_globs = [
+    "src/main.rs",
+    "src/snark.rs",
+]
+
+# Skip slow SNARK tests (snark::* and verify::tests::test_verify_groth16_*)
+# so mutation runs finish in seconds, not minutes.
+additional_cargo_test_args = [
+    "--lib",
+    "--tests",
+    "--",
+    "--skip", "snark",
+    "--skip", "groth16",
+]
+
+# Semantically equivalent mutations — the bit patterns don't overlap so
+# | and ^ produce identical results. Version only has V0 = 0.
+exclude_re = [
+    # (value & 0x7F) | 0x80 — bit 7 always 0 after mask
+    'proto3\.rs.*replace \| with \^ in encode_varint',
+    # (field << 3) | wire_type — low 3 bits always 0 after shift
+    'proto3\.rs.*replace \| with \^ in encode_tag',
+    # Version::to_byte only has V0 = 0
+    'types\.rs.*replace Version::to_byte -> u8 with 0',
+]
+
+# Give each mutant test run some headroom in case the machine is loaded.
+# Fast tests normally finish in ~6s.
+timeout_multiplier = 5.0
+minimum_test_timeout = 60
