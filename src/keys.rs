@@ -420,4 +420,151 @@ mod tests {
     fn test_rejects_empty_verifying_key() {
         assert!(deserialize_verifying_key(&[]).is_err());
     }
+
+    // --- Mutation-testing-driven coverage additions ---
+
+    #[test]
+    fn test_rejects_wrong_length_ed25519_public_key() {
+        // Exercises validate_public_key_size — Ed25519 VK with 31-byte public key.
+        let mut data = Vec::new();
+        proto3::encode_uint32(1, 2, &mut data); // Ed25519
+        proto3::encode_bytes(2, &[0; 31], &mut data); // 31 bytes, not 32
+        let err = deserialize_verifying_key(&data).unwrap_err();
+        assert!(
+            matches!(err, ProtokenError::MalformedEncoding(m) if m.contains("32 bytes")),
+            "expected wrong-size Ed25519 public key error"
+        );
+    }
+
+    #[test]
+    fn test_rejects_wrong_length_mldsa44_public_key() {
+        // Exercises validate_public_key_size — ML-DSA-44 VK with 1000-byte public key.
+        let mut data = Vec::new();
+        proto3::encode_uint32(1, 3, &mut data); // ML-DSA-44
+        proto3::encode_bytes(2, &[0; 1000], &mut data);
+        assert!(deserialize_verifying_key(&data).is_err());
+    }
+
+    #[test]
+    fn test_rejects_zk_symmetric_verifying_key() {
+        // Groth16 algorithms cannot be VerifyingKey (symmetric).
+        // Exercises keys.rs:203/204 || branches.
+        for alg in [4u32, 5u32] {
+            let mut data = Vec::new();
+            proto3::encode_uint32(1, alg, &mut data);
+            proto3::encode_bytes(2, &[0; 32], &mut data);
+            let err = deserialize_verifying_key(&data).unwrap_err();
+            assert!(
+                matches!(err, ProtokenError::MalformedEncoding(m) if m.contains("symmetric")),
+                "alg {alg} should be rejected as symmetric"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_verifying_key_zk_symmetric_fails() {
+        // Exercises keys.rs:38/39 || branches.
+        for alg in [Algorithm::Groth16Poseidon, Algorithm::Groth16Hybrid] {
+            let sk = SigningKey {
+                algorithm: alg,
+                secret_key: Zeroizing::new(vec![0xAB; 32]),
+                public_key: vec![0xCD; 32], // non-empty — must hit the alg check, not empty-pk
+            };
+            let err = extract_verifying_key(&sk).unwrap_err();
+            assert!(
+                matches!(err, ProtokenError::MalformedEncoding(m) if m.contains("symmetric")),
+                "{alg:?} should be rejected as symmetric"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rejects_oversized_secret_key() {
+        // Exercises MAX_SECRET_KEY_BYTES limit (4096).
+        let mut data = Vec::new();
+        proto3::encode_uint32(1, 1, &mut data); // HMAC
+        proto3::encode_bytes(2, &vec![0; MAX_SECRET_KEY_BYTES + 1], &mut data);
+        assert!(deserialize_signing_key(&data).is_err());
+    }
+
+    #[test]
+    fn test_accepts_max_size_secret_key() {
+        // Exact-boundary: HMAC key of exactly MAX_SECRET_KEY_BYTES.
+        let mut data = Vec::new();
+        proto3::encode_uint32(1, 1, &mut data); // HMAC (accepts any length ≥32)
+        proto3::encode_bytes(2, &vec![0xAB; MAX_SECRET_KEY_BYTES], &mut data);
+        assert!(deserialize_signing_key(&data).is_ok());
+    }
+
+    #[test]
+    fn test_rejects_oversized_public_key_in_signing_key() {
+        // Exercises MAX_PUBLIC_KEY_BYTES limit in deserialize_signing_key (line 122).
+        let mut data = Vec::new();
+        proto3::encode_uint32(1, 2, &mut data); // Ed25519
+        proto3::encode_bytes(2, &[0; 32], &mut data);
+        proto3::encode_bytes(3, &vec![0; MAX_PUBLIC_KEY_BYTES + 1], &mut data);
+        assert!(deserialize_signing_key(&data).is_err());
+    }
+
+    #[test]
+    fn test_accepts_max_size_public_key_in_signing_key() {
+        // Exact-boundary: public key of exactly MAX_PUBLIC_KEY_BYTES gets through
+        // the raw-size check (then fails algorithm-specific validation, which is fine).
+        let mut data = Vec::new();
+        proto3::encode_uint32(1, 2, &mut data); // Ed25519
+        proto3::encode_bytes(2, &[0; 32], &mut data);
+        proto3::encode_bytes(3, &vec![0; MAX_PUBLIC_KEY_BYTES], &mut data);
+        // Fails at Ed25519 PK size check (32 expected), not at the raw MAX check.
+        let err = deserialize_signing_key(&data).unwrap_err();
+        assert!(
+            matches!(err, ProtokenError::MalformedEncoding(m) if m.contains("32 bytes")),
+            "should reach algorithm-specific size check, not raw MAX check"
+        );
+    }
+
+    #[test]
+    fn test_rejects_oversized_public_key_in_verifying_key() {
+        // Exercises MAX_PUBLIC_KEY_BYTES limit in deserialize_verifying_key (line 180).
+        let mut data = Vec::new();
+        proto3::encode_uint32(1, 2, &mut data); // Ed25519
+        proto3::encode_bytes(2, &vec![0; MAX_PUBLIC_KEY_BYTES + 1], &mut data);
+        assert!(deserialize_verifying_key(&data).is_err());
+    }
+
+    #[test]
+    fn test_accepts_max_size_public_key_in_verifying_key() {
+        let mut data = Vec::new();
+        proto3::encode_uint32(1, 3, &mut data); // ML-DSA-44 (1312 expected)
+        proto3::encode_bytes(2, &vec![0; MAX_PUBLIC_KEY_BYTES], &mut data);
+        // Fails at ML-DSA-44 PK size check (1312 expected), not raw MAX check.
+        let err = deserialize_verifying_key(&data).unwrap_err();
+        assert!(
+            matches!(err, ProtokenError::MalformedEncoding(m) if m.contains("1312")),
+            "should reach algorithm-specific size check"
+        );
+    }
+
+    #[test]
+    fn test_signing_key_zk_symmetric_roundtrip() {
+        // Exercises Groth16 key size validation (keys.rs:267).
+        for alg in [Algorithm::Groth16Poseidon, Algorithm::Groth16Hybrid] {
+            let key = SigningKey {
+                algorithm: alg,
+                secret_key: Zeroizing::new(vec![0x42; 32]),
+                public_key: Vec::new(),
+            };
+            let bytes = serialize_signing_key(&key);
+            let decoded = deserialize_signing_key(&bytes).unwrap();
+            assert_eq!(key, decoded);
+        }
+    }
+
+    #[test]
+    fn test_rejects_short_zk_symmetric_key() {
+        // Exercises keys.rs:267 < HMAC_MIN_KEY_LEN for Groth16.
+        let mut data = Vec::new();
+        proto3::encode_uint32(1, 4, &mut data); // Groth16Poseidon
+        proto3::encode_bytes(2, &[0; 16], &mut data); // too short
+        assert!(deserialize_signing_key(&data).is_err());
+    }
 }

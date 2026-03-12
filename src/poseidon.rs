@@ -128,4 +128,36 @@ mod tests {
         let b2 = fr_to_bytes(&fr);
         assert_eq!(b1, b2);
     }
+
+    // --- Mutation-testing-driven coverage additions ---
+
+    #[test]
+    fn test_bytes_to_fr_known_values() {
+        // Pin a known input → known output so bytes_to_fr can't be a constant.
+        // Little-endian 1 == Fr(1).
+        let mut one = [0u8; 32];
+        one[0] = 1;
+        assert_eq!(bytes_to_fr(&one), Fr::from(1u64));
+
+        // Zero input → Fr(0).
+        assert_eq!(bytes_to_fr(&[0u8; 32]), Fr::from(0u64));
+
+        // Different inputs → different outputs.
+        let a = bytes_to_fr(&[0x42; 32]);
+        let b = bytes_to_fr(&[0x43; 32]);
+        assert_ne!(a, b);
+        assert_ne!(a, Fr::from(0u64));
+    }
+
+    #[test]
+    fn test_poseidon_config_parameters() {
+        // Pin the expected parameter values so poseidon_config can't
+        // return a differently-shaped config.
+        let c = poseidon_config();
+        assert_eq!(c.full_rounds, 8);
+        assert_eq!(c.partial_rounds, 57);
+        assert_eq!(c.alpha, 5);
+        assert_eq!(c.rate, 2);
+        assert_eq!(c.capacity, 1);
+    }
 }

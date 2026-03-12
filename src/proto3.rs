@@ -281,6 +281,59 @@ mod tests {
     }
 
     #[test]
+    fn test_varint_overflow_10th_byte() {
+        // A 10-byte varint where the final byte is 2 encodes a value
+        // ≥ 2^64, which must be rejected. Exercises proto3.rs:100 `byte > 1`.
+        let overflow: &[u8] = &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02];
+        let mut pos = 0;
+        assert!(
+            decode_varint(overflow, &mut pos).is_err(),
+            "varint with 10th byte=2 should overflow u64"
+        );
+
+        // Boundary: 10th byte = 1 is u64::MAX, must succeed.
+        let max: &[u8] = &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+        let mut pos = 0;
+        assert_eq!(decode_varint(max, &mut pos).unwrap(), u64::MAX);
+    }
+
+    #[test]
+    fn test_varint_zero_at_nonzero_offset() {
+        // Valid single-byte 0x00 at pos > 0. Exercises proto3.rs:110 `*pos - start`.
+        // In practice proto3 omits zero-valued fields, but the decoder must still
+        // accept a zero varint at any offset correctly.
+        let buf: &[u8] = &[0xFF, 0xFF, 0x00]; // padding + varint 0 at pos=2
+        let mut pos = 2;
+        let v = decode_varint(buf, &mut pos).unwrap();
+        assert_eq!(v, 0);
+        assert_eq!(pos, 3);
+    }
+
+    #[test]
+    fn test_varint_non_minimal_at_nonzero_offset() {
+        // Non-minimal encoding [0x81, 0x00] at pos > 0 must still be rejected.
+        let buf: &[u8] = &[0xFF, 0x81, 0x00]; // padding + non-minimal at pos=1
+        let mut pos = 1;
+        assert!(decode_varint(buf, &mut pos).is_err());
+    }
+
+    #[test]
+    fn test_to_u8_rejects_large_value() {
+        assert!(to_u8(256, "test").is_err());
+        assert_eq!(to_u8(255, "test").unwrap(), 255);
+        assert_eq!(to_u8(0, "test").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_read_u32_rejects_large_value() {
+        // Varint encoding of u32::MAX + 1.
+        let mut buf = Vec::new();
+        encode_varint(u32::MAX as u64 + 1, &mut buf);
+        let mut pos = 0;
+        assert!(read_u32(&buf, &mut pos).is_err());
+    }
+
+    #[test]
     fn test_field_tag_values() {
         // Verify our field tag bytes match the proto3 spec
         let cases: &[(u32, u32, u8)] = &[

@@ -477,4 +477,137 @@ mod tests {
         assert_eq!(sk.len(), MLDSA44_SIGNING_KEY_LEN);
         assert_eq!(pk.len(), MLDSA44_PUBLIC_KEY_LEN);
     }
+
+    // --- Mutation-testing-driven coverage additions ---
+
+    #[test]
+    fn test_generate_hmac_key_length_and_entropy() {
+        let k1 = generate_hmac_key();
+        let k2 = generate_hmac_key();
+        assert_eq!(k1.len(), 32, "HMAC key must be 32 bytes");
+        assert_ne!(k1, k2, "two generated keys should differ");
+        assert_ne!(k1, vec![0u8; 32], "key should not be all zeros");
+    }
+
+    #[test]
+    fn test_compute_full_key_hash_deterministic() {
+        let h1 = compute_full_key_hash(&[0x42; 32]);
+        let h2 = compute_full_key_hash(&[0x42; 32]);
+        assert_eq!(h1, h2);
+        assert_ne!(h1, [0u8; 32], "hash should not be all zeros");
+        assert_ne!(h1, [1u8; 32], "hash should not be all ones");
+    }
+
+    #[test]
+    fn test_compute_full_key_hash_different_keys() {
+        let h1 = compute_full_key_hash(&[0x01; 32]);
+        let h2 = compute_full_key_hash(&[0x02; 32]);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_compute_sha256_full_key_hash_known_value() {
+        // SHA-256 of 32 zero bytes is a well-known constant.
+        let hash = compute_sha256_full_key_hash(&[0u8; 32]);
+        let expected =
+            hex::decode("66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925")
+                .unwrap();
+        assert_eq!(hash.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn test_compute_sha256_full_key_hash_different_keys() {
+        let h1 = compute_sha256_full_key_hash(&[0x01; 32]);
+        let h2 = compute_sha256_full_key_hash(&[0x02; 32]);
+        assert_ne!(h1, h2);
+        assert_ne!(h1, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_sign_rejects_overlong_subject() {
+        let key: &[u8] = TEST_HMAC_KEY;
+        let claims = Claims {
+            expires_at: 1700000000,
+            subject: "x".repeat(MAX_CLAIM_BYTES_LEN + 1),
+            ..Default::default()
+        };
+        assert!(sign_hmac(key, claims).is_err());
+    }
+
+    #[test]
+    fn test_sign_rejects_overlong_audience() {
+        let key: &[u8] = TEST_HMAC_KEY;
+        let claims = Claims {
+            expires_at: 1700000000,
+            audience: "x".repeat(MAX_CLAIM_BYTES_LEN + 1),
+            ..Default::default()
+        };
+        assert!(sign_hmac(key, claims).is_err());
+    }
+
+    #[test]
+    fn test_sign_rejects_too_many_scopes() {
+        let key: &[u8] = TEST_HMAC_KEY;
+        let scopes: Vec<String> = (0..=MAX_SCOPES).map(|i| format!("s{i:03}")).collect();
+        let claims = Claims {
+            expires_at: 1700000000,
+            scopes,
+            ..Default::default()
+        };
+        assert!(sign_hmac(key, claims).is_err());
+    }
+
+    #[test]
+    fn test_sign_rejects_overlong_scope_entry() {
+        let key: &[u8] = TEST_HMAC_KEY;
+        let claims = Claims {
+            expires_at: 1700000000,
+            scopes: vec!["x".repeat(MAX_CLAIM_BYTES_LEN + 1)],
+            ..Default::default()
+        };
+        assert!(sign_hmac(key, claims).is_err());
+    }
+
+    #[test]
+    fn test_sign_accepts_max_length_claims() {
+        // Exact-boundary: subject/audience/scope of exactly 255 bytes.
+        let key: &[u8] = TEST_HMAC_KEY;
+        let claims = Claims {
+            expires_at: 1700000000,
+            subject: "s".repeat(MAX_CLAIM_BYTES_LEN),
+            audience: "a".repeat(MAX_CLAIM_BYTES_LEN),
+            scopes: vec!["x".repeat(MAX_CLAIM_BYTES_LEN)],
+            ..Default::default()
+        };
+        assert!(sign_hmac(key, claims).is_ok());
+    }
+
+    #[test]
+    fn test_sign_accepts_max_scopes() {
+        let key: &[u8] = TEST_HMAC_KEY;
+        let scopes: Vec<String> = (0..MAX_SCOPES).map(|i| format!("s{i:03}")).collect();
+        let claims = Claims {
+            expires_at: 1700000000,
+            scopes,
+            ..Default::default()
+        };
+        assert!(sign_hmac(key, claims).is_ok());
+    }
+
+    #[test]
+    fn test_sign_accepts_not_before_equal_expires_at() {
+        // Boundary: not_before == expires_at is a valid instantaneous token.
+        let key: &[u8] = TEST_HMAC_KEY;
+        let claims = Claims {
+            expires_at: 5000,
+            not_before: 5000,
+            ..Default::default()
+        };
+        assert!(sign_hmac(key, claims).is_ok());
+    }
+
+    #[test]
+    fn test_mldsa44_key_hash_rejects_wrong_length() {
+        assert!(mldsa44_key_hash(&[0; 100]).is_err());
+    }
 }
