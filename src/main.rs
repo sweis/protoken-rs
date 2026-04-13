@@ -108,6 +108,11 @@ enum Command {
         /// Token (base64). If omitted, reads from stdin.
         token: Option<String>,
 
+        /// Expected 32-byte key hash (base64), required for Groth16 verification.
+        /// Poseidon(K) for groth16, SHA-256(K) for groth16-hybrid.
+        #[arg(long)]
+        key_hash: Option<String>,
+
         /// Output as JSON instead of colored text.
         #[arg(long)]
         json: bool,
@@ -146,8 +151,9 @@ fn main() {
         Command::Verify {
             keyfile,
             token,
+            key_hash,
             json,
-        } => cmd_verify(&keyfile, token, json),
+        } => cmd_verify(&keyfile, token, key_hash, json),
         Command::Inspect { token, json } => cmd_inspect(token, json),
     };
 
@@ -343,6 +349,7 @@ fn cmd_sign(
 fn cmd_verify(
     keyfile: &str,
     token_arg: Option<String>,
+    key_hash_arg: Option<String>,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if keyfile == "-" && token_arg.is_none() {
@@ -387,12 +394,31 @@ fn cmd_verify(
             }
         }
     } else if let Ok(snark_vk) = snark::deserialize_verifying_key(&key_bytes) {
+        // The SNARK proof only proves "I know K with Hash(K) = key_hash". The
+        // verifier must supply a trusted key_hash; the one embedded in the token
+        // is attacker-controlled.
+        let key_hash_b64 = key_hash_arg
+            .ok_or("Groth16 verification requires --key-hash <base64> (the expected key hash)")?;
+        let key_hash_vec = B64
+            .decode(key_hash_b64.trim())
+            .map_err(|e| format!("invalid --key-hash base64: {e}"))?;
+        let expected_key_hash: [u8; 32] = key_hash_vec.as_slice().try_into().map_err(|_| {
+            format!(
+                "--key-hash must decode to 32 bytes, got {}",
+                key_hash_vec.len()
+            )
+        })?;
+
         // Peek at the token's algorithm to dispatch to the correct verifier.
         let token = deserialize_signed_token(&token_bytes)?;
         let payload = deserialize_payload(&token.payload_bytes)?;
         match payload.metadata.algorithm {
-            Algorithm::Groth16Poseidon => verify_groth16(&snark_vk, &token_bytes, now)?,
-            Algorithm::Groth16Hybrid => verify_groth16_hybrid(&snark_vk, &token_bytes, now)?,
+            Algorithm::Groth16Poseidon => {
+                verify_groth16(&snark_vk, &expected_key_hash, &token_bytes, now)?
+            }
+            Algorithm::Groth16Hybrid => {
+                verify_groth16_hybrid(&snark_vk, &expected_key_hash, &token_bytes, now)?
+            }
             other => {
                 return Err(format!(
                     "SNARK verifying key given but token algorithm is {:?} (expected Groth16Poseidon or Groth16Hybrid)",
@@ -554,9 +580,8 @@ fn format_size(bytes: usize) -> String {
 const MAX_KEY_INPUT: u64 = 100_000;
 
 /// Read a key from a file path or "-" for stdin. Decodes base64.
-/// The intermediate base64 string is zeroized on drop to avoid leaving
-/// key material in memory.
-fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+/// Both the base64 string and the decoded bytes are zeroized on drop.
+fn read_keyfile(path: &str) -> Result<Zeroizing<Vec<u8>>, Box<dyn std::error::Error>> {
     let raw: Zeroizing<String> = if path == "-" {
         let mut buf = String::new();
         io::stdin()
@@ -578,7 +603,7 @@ fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         }
         Zeroizing::new(std::fs::read_to_string(path)?)
     };
-    decode_base64(raw.trim())
+    Ok(Zeroizing::new(decode_base64(raw.trim())?))
 }
 
 /// Maximum token input size (base64-encoded). 16 KB covers even ML-DSA-44 tokens with headroom.

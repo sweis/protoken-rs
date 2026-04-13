@@ -21,6 +21,17 @@ fn verify_key_match(a: &[u8], b: &[u8]) -> Result<(), ProtokenError> {
     }
 }
 
+/// Reject a non-empty proof field on algorithms that don't use one.
+/// Prevents trivial token-byte malleability via an appended proto3 field 3.
+fn reject_unexpected_proof(token: &SignedToken) -> Result<(), ProtokenError> {
+    if !token.proof.is_empty() {
+        return Err(ProtokenError::VerificationFailed(
+            "unexpected proof field for non-Groth16 algorithm".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Result of a successful token verification.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VerifiedClaims {
@@ -47,6 +58,7 @@ pub fn verify_hmac(
             payload.metadata.algorithm
         )));
     }
+    reject_unexpected_proof(&token)?;
 
     // Check key hash (constant-time comparison)
     let expected_hash = compute_key_hash(key);
@@ -104,6 +116,7 @@ pub fn verify_ed25519(
             payload.metadata.algorithm
         )));
     }
+    reject_unexpected_proof(&token)?;
 
     // Check key identity (constant-time comparison)
     let expected_hash = compute_key_hash(public_key_bytes);
@@ -175,6 +188,7 @@ pub fn verify_mldsa44(
             payload.metadata.algorithm
         )));
     }
+    reject_unexpected_proof(&token)?;
 
     // Check key identity (constant-time comparison)
     let expected_hash = compute_key_hash(public_key_bytes);
@@ -230,6 +244,7 @@ pub fn verify_mldsa44(
 /// `now` is the current Unix timestamp for expiry checking.
 pub fn verify_groth16(
     vk: &SnarkVerifyingKey,
+    expected_key_hash: &[u8; FULL_KEY_HASH_LEN],
     token_bytes: &[u8],
     now: u64,
 ) -> Result<VerifiedClaims, ProtokenError> {
@@ -243,15 +258,20 @@ pub fn verify_groth16(
         )));
     }
 
-    // Extract the full key hash from the key identifier
-    let key_hash = match &payload.metadata.key_identifier {
-        KeyIdentifier::FullKeyHash(hash) => hash,
+    // SECURITY: the token-embedded key hash is attacker-controlled. We must bind
+    // verification to a caller-supplied expected_key_hash. The SNARK proof only
+    // proves "I know K with Hash(K) = key_hash" — meaningless if key_hash is
+    // chosen by the attacker, since the proving key (CRS) is public.
+    match &payload.metadata.key_identifier {
+        KeyIdentifier::FullKeyHash(hash) => {
+            verify_key_match(hash, expected_key_hash)?;
+        }
         _ => {
             return Err(ProtokenError::VerificationFailed(
                 "Groth16 token must use FullKeyHash key identifier".into(),
             ));
         }
-    };
+    }
 
     // Validate signature length
     if token.signature.len() != HMAC_SHA256_SIG_LEN {
@@ -272,8 +292,14 @@ pub fn verify_groth16(
         ));
     }
 
-    // Verify the SNARK proof
-    crate::snark::verify(vk, key_hash, &signature, &token.proof, &token.payload_bytes)?;
+    // Verify the SNARK proof against the trusted expected_key_hash, not the token's.
+    crate::snark::verify(
+        vk,
+        expected_key_hash,
+        &signature,
+        &token.proof,
+        &token.payload_bytes,
+    )?;
 
     check_temporal_claims(&payload.claims, now)?;
 
@@ -290,6 +316,7 @@ pub fn verify_groth16(
 /// `now` is the current Unix timestamp for expiry checking.
 pub fn verify_groth16_hybrid(
     vk: &SnarkVerifyingKey,
+    expected_key_hash: &[u8; FULL_KEY_HASH_LEN],
     token_bytes: &[u8],
     now: u64,
 ) -> Result<VerifiedClaims, ProtokenError> {
@@ -303,14 +330,18 @@ pub fn verify_groth16_hybrid(
         )));
     }
 
-    let key_hash = match &payload.metadata.key_identifier {
-        KeyIdentifier::FullKeyHash(hash) => hash,
+    // SECURITY: bind to caller-supplied expected_key_hash; the embedded one is
+    // attacker-controlled. See verify_groth16 for rationale.
+    match &payload.metadata.key_identifier {
+        KeyIdentifier::FullKeyHash(hash) => {
+            verify_key_match(hash, expected_key_hash)?;
+        }
         _ => {
             return Err(ProtokenError::VerificationFailed(
                 "Groth16Hybrid token must use FullKeyHash key identifier".into(),
             ));
         }
-    };
+    }
 
     if token.signature.len() != HMAC_SHA256_SIG_LEN {
         return Err(ProtokenError::VerificationFailed(format!(
@@ -329,7 +360,13 @@ pub fn verify_groth16_hybrid(
         ));
     }
 
-    crate::snark::verify_hybrid(vk, key_hash, &signature, &token.proof, &token.payload_bytes)?;
+    crate::snark::verify_hybrid(
+        vk,
+        expected_key_hash,
+        &signature,
+        &token.proof,
+        &token.payload_bytes,
+    )?;
 
     check_temporal_claims(&payload.claims, now)?;
 
@@ -769,36 +806,67 @@ mod tests {
 
     // Groth16-Poseidon verification tests
 
-    fn groth16_test_token() -> (crate::snark::SnarkVerifyingKey, Vec<u8>, [u8; 32]) {
+    fn groth16_test_token() -> (crate::snark::SnarkVerifyingKey, [u8; 32], Vec<u8>, [u8; 32]) {
         let (pk, vk) = crate::snark::setup().unwrap();
         let key = [0x42u8; 32];
+        let key_hash = crate::sign::compute_full_key_hash(&key);
         let claims = Claims {
             expires_at: u64::MAX,
             ..Default::default()
         };
         let token_bytes = crate::sign::sign_groth16(&pk, &key, claims).unwrap();
-        (vk, token_bytes, key)
+        (vk, key_hash, token_bytes, key)
     }
 
     #[test]
     fn test_verify_groth16_valid() {
-        let (vk, token_bytes, _key) = groth16_test_token();
-        let result = verify_groth16(&vk, &token_bytes, 1700000000);
+        let (vk, key_hash, token_bytes, _key) = groth16_test_token();
+        let result = verify_groth16(&vk, &key_hash, &token_bytes, 1700000000);
         assert!(result.is_ok());
         let verified = result.unwrap();
         assert_eq!(verified.metadata.algorithm, Algorithm::Groth16Poseidon);
+    }
+
+    /// Regression test for the auth-bypass where verify_groth16 trusted the
+    /// token-embedded key hash. An attacker with the public CRS could forge
+    /// a token under their own key K' and have it accepted.
+    #[test]
+    fn test_verify_groth16_rejects_forged_key_hash() {
+        let (pk, vk) = crate::snark::setup().unwrap();
+
+        // Legitimate issuer's key hash (what the verifier expects).
+        let real_key = [0x42u8; 32];
+        let real_key_hash = crate::sign::compute_full_key_hash(&real_key);
+
+        // Attacker generates a token under their own key. The token's embedded
+        // FullKeyHash is Poseidon(attacker_key), and the SNARK proof is valid
+        // for that hash — but it must NOT be accepted against real_key_hash.
+        let attacker_key = [0xEEu8; 32];
+        let claims = Claims {
+            expires_at: u64::MAX,
+            subject: "admin".into(),
+            ..Default::default()
+        };
+        let forged = crate::sign::sign_groth16(&pk, &attacker_key, claims).unwrap();
+
+        let result = verify_groth16(&vk, &real_key_hash, &forged, 1700000000);
+        assert!(
+            matches!(result, Err(ProtokenError::KeyHashMismatch)),
+            "forged token with attacker-chosen key hash must be rejected, got: {result:?}"
+        );
     }
 
     #[test]
     fn test_verify_groth16_expired() {
         let (pk, vk) = crate::snark::setup().unwrap();
         let key = [0x42u8; 32];
+        let key_hash = crate::sign::compute_full_key_hash(&key);
         let claims = Claims {
             expires_at: 1000,
             ..Default::default()
         };
         let token_bytes = crate::sign::sign_groth16(&pk, &key, claims).unwrap();
-        let result = verify_groth16(&vk, &token_bytes, 2000);
+        let result = verify_groth16(&vk, &key_hash, &token_bytes, 2000);
         assert!(matches!(result, Err(ProtokenError::TokenExpired { .. })));
     }
 
@@ -806,6 +874,7 @@ mod tests {
     fn test_verify_groth16_not_before() {
         let (pk, vk) = crate::snark::setup().unwrap();
         let key = [0x42u8; 32];
+        let key_hash = crate::sign::compute_full_key_hash(&key);
         let claims = Claims {
             expires_at: u64::MAX,
             not_before: 5000,
@@ -813,26 +882,26 @@ mod tests {
         };
         let token_bytes = crate::sign::sign_groth16(&pk, &key, claims).unwrap();
 
-        let result = verify_groth16(&vk, &token_bytes, 3000);
+        let result = verify_groth16(&vk, &key_hash, &token_bytes, 3000);
         assert!(matches!(
             result,
             Err(ProtokenError::TokenNotYetValid { .. })
         ));
 
-        let result = verify_groth16(&vk, &token_bytes, 5000);
+        let result = verify_groth16(&vk, &key_hash, &token_bytes, 5000);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_verify_groth16_corrupted_key_hash() {
-        let (vk, mut token_bytes, _key) = groth16_test_token();
+        let (vk, key_hash, mut token_bytes, _key) = groth16_test_token();
         // The key hash is inside the payload submessage. Find and corrupt it.
         // The token structure: field 1 (payload LV), field 2 (sig LV), field 3 (proof LV).
         // Corrupt a byte deep in the payload area where the key_hash lives.
         // key_hash is 32 bytes after algorithm+key_id_type fields in the payload.
         // We corrupt byte at offset ~10 which is inside the payload.
         token_bytes[10] ^= 0x01;
-        let result = verify_groth16(&vk, &token_bytes, 1700000000);
+        let result = verify_groth16(&vk, &key_hash, &token_bytes, 1700000000);
         assert!(
             result.is_err(),
             "corrupted key hash should fail verification"
@@ -841,7 +910,7 @@ mod tests {
 
     #[test]
     fn test_verify_groth16_corrupted_signature() {
-        let (vk, token_bytes, _key) = groth16_test_token();
+        let (vk, key_hash, token_bytes, _key) = groth16_test_token();
         let token = crate::serialize::deserialize_signed_token(&token_bytes).unwrap();
         // Corrupt the signature
         let mut bad_sig = token.signature.clone();
@@ -852,7 +921,7 @@ mod tests {
             proof: token.proof,
         };
         let bad_bytes = crate::serialize::serialize_signed_token(&bad_token);
-        let result = verify_groth16(&vk, &bad_bytes, 1700000000);
+        let result = verify_groth16(&vk, &key_hash, &bad_bytes, 1700000000);
         assert!(
             matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("proof verification failed")),
             "corrupted signature should fail with proof verification error, got: {result:?}"
@@ -861,7 +930,7 @@ mod tests {
 
     #[test]
     fn test_verify_groth16_corrupted_proof() {
-        let (vk, token_bytes, _key) = groth16_test_token();
+        let (vk, key_hash, token_bytes, _key) = groth16_test_token();
         let token = crate::serialize::deserialize_signed_token(&token_bytes).unwrap();
         // Corrupt the proof
         let mut bad_proof = token.proof.clone();
@@ -872,13 +941,13 @@ mod tests {
             proof: bad_proof,
         };
         let bad_bytes = crate::serialize::serialize_signed_token(&bad_token);
-        let result = verify_groth16(&vk, &bad_bytes, 1700000000);
+        let result = verify_groth16(&vk, &key_hash, &bad_bytes, 1700000000);
         assert!(result.is_err(), "corrupted proof should fail verification");
     }
 
     #[test]
     fn test_verify_groth16_truncated_proof() {
-        let (vk, token_bytes, _key) = groth16_test_token();
+        let (vk, key_hash, token_bytes, _key) = groth16_test_token();
         let token = crate::serialize::deserialize_signed_token(&token_bytes).unwrap();
         // Truncate the proof
         let bad_token = crate::types::SignedToken {
@@ -887,7 +956,7 @@ mod tests {
             proof: token.proof[..64].to_vec(),
         };
         let bad_bytes = crate::serialize::serialize_signed_token(&bad_token);
-        let result = verify_groth16(&vk, &bad_bytes, 1700000000);
+        let result = verify_groth16(&vk, &key_hash, &bad_bytes, 1700000000);
         assert!(
             matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("invalid Groth16 proof")),
             "truncated proof should fail with invalid proof error, got: {result:?}"
@@ -896,7 +965,7 @@ mod tests {
 
     #[test]
     fn test_verify_groth16_empty_proof() {
-        let (vk, token_bytes, _key) = groth16_test_token();
+        let (vk, key_hash, token_bytes, _key) = groth16_test_token();
         let token = crate::serialize::deserialize_signed_token(&token_bytes).unwrap();
         // Empty proof
         let bad_token = crate::types::SignedToken {
@@ -905,7 +974,7 @@ mod tests {
             proof: vec![],
         };
         let bad_bytes = crate::serialize::serialize_signed_token(&bad_token);
-        let result = verify_groth16(&vk, &bad_bytes, 1700000000);
+        let result = verify_groth16(&vk, &key_hash, &bad_bytes, 1700000000);
         assert!(
             matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("missing proof")),
             "empty proof should fail with missing proof error, got: {result:?}"
@@ -914,10 +983,10 @@ mod tests {
 
     #[test]
     fn test_verify_groth16_wrong_vk() {
-        let (_vk1, token_bytes, _key) = groth16_test_token();
+        let (_vk1, key_hash, token_bytes, _key) = groth16_test_token();
         // Generate a different VK (from a different trusted setup)
         let (_pk2, vk2) = crate::snark::setup().unwrap();
-        let result = verify_groth16(&vk2, &token_bytes, 1700000000);
+        let result = verify_groth16(&vk2, &key_hash, &token_bytes, 1700000000);
         assert!(
             matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("proof verification failed")),
             "wrong verifying key should fail, got: {result:?}"
@@ -928,6 +997,7 @@ mod tests {
     fn test_verify_groth16_with_full_claims() {
         let (pk, vk) = crate::snark::setup().unwrap();
         let key = [0x42u8; 32];
+        let key_hash = crate::sign::compute_full_key_hash(&key);
         let claims = Claims {
             expires_at: u64::MAX,
             not_before: 1000,
@@ -937,7 +1007,7 @@ mod tests {
             scopes: vec!["admin".into(), "read".into(), "write".into()],
         };
         let token_bytes = crate::sign::sign_groth16(&pk, &key, claims.clone()).unwrap();
-        let result = verify_groth16(&vk, &token_bytes, 2000);
+        let result = verify_groth16(&vk, &key_hash, &token_bytes, 2000);
         assert!(result.is_ok());
         let verified = result.unwrap();
         assert_eq!(verified.claims, claims);
@@ -957,25 +1027,48 @@ mod tests {
             .unwrap();
     }
 
-    fn groth16_hybrid_test_token() -> (crate::snark::SnarkVerifyingKey, Vec<u8>) {
+    fn groth16_hybrid_test_token() -> (crate::snark::SnarkVerifyingKey, [u8; 32], Vec<u8>) {
         let (pk, vk) = crate::snark::setup_hybrid().unwrap();
         let key = [0x42u8; 32];
+        let key_hash = crate::sign::compute_sha256_full_key_hash(&key);
         let claims = Claims {
             expires_at: 1800000000,
             ..Default::default()
         };
         let token_bytes = crate::sign::sign_groth16_hybrid(&pk, &key, claims).unwrap();
-        (vk, token_bytes)
+        (vk, key_hash, token_bytes)
     }
 
     #[test]
     fn test_verify_groth16_hybrid_valid() {
         run_with_large_stack(|| {
-            let (vk, token_bytes) = groth16_hybrid_test_token();
-            let result = verify_groth16_hybrid(&vk, &token_bytes, 1700000000);
+            let (vk, key_hash, token_bytes) = groth16_hybrid_test_token();
+            let result = verify_groth16_hybrid(&vk, &key_hash, &token_bytes, 1700000000);
             assert!(result.is_ok(), "hybrid verify failed: {result:?}");
             let verified = result.unwrap();
             assert_eq!(verified.metadata.algorithm, Algorithm::Groth16Hybrid);
+        });
+    }
+
+    #[test]
+    fn test_verify_groth16_hybrid_rejects_forged_key_hash() {
+        run_with_large_stack(|| {
+            let (pk, vk) = crate::snark::setup_hybrid().unwrap();
+            let real_key_hash = crate::sign::compute_sha256_full_key_hash(&[0x42u8; 32]);
+
+            let attacker_key = [0xEEu8; 32];
+            let claims = Claims {
+                expires_at: u64::MAX,
+                subject: "admin".into(),
+                ..Default::default()
+            };
+            let forged = crate::sign::sign_groth16_hybrid(&pk, &attacker_key, claims).unwrap();
+
+            let result = verify_groth16_hybrid(&vk, &real_key_hash, &forged, 1700000000);
+            assert!(
+                matches!(result, Err(ProtokenError::KeyHashMismatch)),
+                "forged hybrid token must be rejected, got: {result:?}"
+            );
         });
     }
 
@@ -984,12 +1077,13 @@ mod tests {
         run_with_large_stack(|| {
             let (pk, vk) = crate::snark::setup_hybrid().unwrap();
             let key = [0x42u8; 32];
+            let key_hash = crate::sign::compute_sha256_full_key_hash(&key);
             let claims = Claims {
                 expires_at: 1000,
                 ..Default::default()
             };
             let token_bytes = crate::sign::sign_groth16_hybrid(&pk, &key, claims).unwrap();
-            let result = verify_groth16_hybrid(&vk, &token_bytes, 2000);
+            let result = verify_groth16_hybrid(&vk, &key_hash, &token_bytes, 2000);
             assert!(matches!(result, Err(ProtokenError::TokenExpired { .. })));
         });
     }
@@ -997,7 +1091,7 @@ mod tests {
     #[test]
     fn test_verify_groth16_hybrid_corrupted_proof() {
         run_with_large_stack(|| {
-            let (vk, token_bytes) = groth16_hybrid_test_token();
+            let (vk, key_hash, token_bytes) = groth16_hybrid_test_token();
             let token = crate::serialize::deserialize_signed_token(&token_bytes).unwrap();
             let mut bad_proof = token.proof.clone();
             bad_proof[0] ^= 0x01;
@@ -1007,7 +1101,7 @@ mod tests {
                 proof: bad_proof,
             };
             let bad_bytes = crate::serialize::serialize_signed_token(&bad_token);
-            let result = verify_groth16_hybrid(&vk, &bad_bytes, 1700000000);
+            let result = verify_groth16_hybrid(&vk, &key_hash, &bad_bytes, 1700000000);
             assert!(result.is_err(), "corrupted proof should fail verification");
         });
     }
@@ -1017,6 +1111,7 @@ mod tests {
         run_with_large_stack(|| {
             let (pk, vk) = crate::snark::setup_hybrid().unwrap();
             let key = [0x42u8; 32];
+            let key_hash = crate::sign::compute_sha256_full_key_hash(&key);
             let claims = Claims {
                 expires_at: u64::MAX,
                 not_before: 1000,
@@ -1026,7 +1121,7 @@ mod tests {
                 scopes: vec!["admin".into(), "read".into()],
             };
             let token_bytes = crate::sign::sign_groth16_hybrid(&pk, &key, claims.clone()).unwrap();
-            let result = verify_groth16_hybrid(&vk, &token_bytes, 2000);
+            let result = verify_groth16_hybrid(&vk, &key_hash, &token_bytes, 2000);
             assert!(result.is_ok());
             let verified = result.unwrap();
             assert_eq!(verified.claims, claims);

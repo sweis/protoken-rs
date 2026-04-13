@@ -18,11 +18,24 @@ use crate::types::*;
 /// A serialized signing key (symmetric or asymmetric).
 /// The `secret_key` field is wrapped in `Zeroizing` so it is automatically
 /// zeroed from memory when dropped.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SigningKey {
     pub algorithm: Algorithm,
     pub secret_key: Zeroizing<Vec<u8>>,
     pub public_key: Vec<u8>,
+}
+
+impl std::fmt::Debug for SigningKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SigningKey")
+            .field("algorithm", &self.algorithm)
+            .field(
+                "secret_key",
+                &format_args!("[{} bytes redacted]", self.secret_key.len()),
+            )
+            .field("public_key", &self.public_key)
+            .finish()
+    }
 }
 
 /// A serialized verifying key (asymmetric only).

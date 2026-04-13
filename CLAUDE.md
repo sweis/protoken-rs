@@ -163,6 +163,13 @@ SHA-256 compatibility. Separate trusted setup required (`snark-setup -a groth16-
 Hybrid tests use `run_with_large_stack()`. Run tests with `--test-threads=2` in
 memory-constrained environments.
 
+### Groth16 verification requires caller-supplied key hash (fixed 2026-04-13)
+Security fix: `verify_groth16` / `verify_groth16_hybrid` previously read the
+key hash from the attacker-controlled token, allowing forgery with the public
+CRS. Both now take `expected_key_hash: &[u8; 32]` and reject mismatches. CLI
+`verify` requires `--key-hash` for Groth16. Full audit findings in
+[notes/security-audit-2026-04.md](notes/security-audit-2026-04.md).
+
 ## Implementation Status
 
 All TODO items 1-8 are implemented, plus ML-DSA-44, Groth16-Poseidon, and Groth16-Hybrid support:
