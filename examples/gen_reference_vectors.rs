@@ -9,7 +9,7 @@ use protoken::keys::{
     extract_verifying_key, serialize_signing_key, serialize_verifying_key, SigningKey,
 };
 use protoken::sign::{
-    compute_key_hash, generate_mldsa44_key, mldsa44_key_hash, sign_ed25519, sign_hmac, sign_mldsa44,
+    compute_key_hash, generate_mldsa44_key, sign_ed25519, sign_hmac, sign_mldsa44,
 };
 use protoken::types::{Algorithm, Claims, KeyIdentifier};
 
@@ -98,8 +98,8 @@ fn main() {
 
     // === ML-DSA-44 ===
     // Uses the deterministic signing variant; the seed is generated once and frozen.
-    let (mldsa_sk_bytes, mldsa_pk_bytes) = generate_mldsa44_key().unwrap();
-    let mldsa_key_hash = mldsa44_key_hash(&mldsa_pk_bytes).unwrap();
+    let (mldsa_sk_bytes, mldsa_pk_bytes) = generate_mldsa44_key();
+    let mldsa_key_hash = KeyIdentifier::KeyHash(compute_key_hash(&mldsa_pk_bytes));
     let claims = reference_claims();
     let mldsa_token = sign_mldsa44(&mldsa_sk_bytes, &claims, mldsa_key_hash).unwrap();
     let mldsa_sk = SigningKey {

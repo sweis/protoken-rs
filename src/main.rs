@@ -13,8 +13,8 @@ use protoken::keys::{
 };
 use protoken::serialize::{deserialize_claims, deserialize_signed_token};
 use protoken::sign::{
-    compute_key_hash, generate_ed25519_key, generate_hmac_key, generate_mldsa44_key,
-    mldsa44_key_hash, sign_ed25519, sign_hmac, sign_mldsa44,
+    compute_key_hash, generate_ed25519_key, generate_hmac_key, generate_mldsa44_key, sign_ed25519,
+    sign_hmac, sign_mldsa44,
 };
 use protoken::types::{Algorithm, Claims, KeyIdentifier};
 use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
@@ -136,7 +136,7 @@ fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
             public_key: Vec::new(),
         },
         "ed25519" => {
-            let (seed, pk) = generate_ed25519_key()?;
+            let (seed, pk) = generate_ed25519_key();
             ProtoSigningKey {
                 algorithm: Algorithm::Ed25519,
                 secret_key: Zeroizing::new(seed),
@@ -144,7 +144,7 @@ fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         "ml-dsa-44" => {
-            let (sk_raw, pk) = generate_mldsa44_key()?;
+            let (sk_raw, pk) = generate_mldsa44_key();
             ProtoSigningKey {
                 algorithm: Algorithm::MlDsa44,
                 secret_key: Zeroizing::new(sk_raw),
@@ -211,7 +211,7 @@ fn cmd_sign(
             sign_ed25519(&sk.secret_key, &claims, key_id)?
         }
         Algorithm::MlDsa44 => {
-            let key_id = mldsa44_key_hash(&sk.public_key)?;
+            let key_id = KeyIdentifier::KeyHash(compute_key_hash(&sk.public_key));
             sign_mldsa44(&sk.secret_key, &claims, key_id)?
         }
     };

@@ -41,8 +41,8 @@ pub fn serialize_claims(claims: &Claims) -> Vec<u8> {
     proto3::encode_bytes(5, claims.audience.as_bytes(), &mut buf);
 
     // Repeated field 6: scopes, sorted for canonical encoding
-    let mut sorted_scopes: Vec<&str> = claims.scopes.iter().map(|s| s.as_str()).collect();
-    sorted_scopes.sort();
+    let mut sorted_scopes: Vec<&str> = claims.scopes.iter().map(String::as_str).collect();
+    sorted_scopes.sort_unstable();
     for scope in sorted_scopes {
         proto3::encode_bytes(6, scope.as_bytes(), &mut buf);
     }
@@ -57,7 +57,7 @@ fn read_nonzero_varint(
     pos: &mut usize,
     field_name: &str,
 ) -> Result<u64, ProtokenError> {
-    let value = proto3::read_varint_value(data, pos)?;
+    let value = proto3::decode_varint(data, pos)?;
     if value == 0 {
         return Err(ProtokenError::MalformedEncoding(format!(
             "{field_name} is zero (canonical encoding omits default values)"
@@ -237,8 +237,8 @@ pub(crate) fn deserialize_signed_token_at(
         )));
     }
 
-    let mut algorithm: u32 = 0;
-    let mut key_id_type: u32 = 0;
+    let mut algorithm: u64 = 0;
+    let mut key_id_type: u64 = 0;
     let mut key_id: Vec<u8> = Vec::new();
     let mut payload: Option<Vec<u8>> = None;
     let mut signature: Option<Vec<u8>> = None;
@@ -262,22 +262,11 @@ pub(crate) fn deserialize_signed_token_at(
             // Version can only legally be 0, and canonical encoding omits
             // zero values, so an explicit version field is always invalid.
             (1, 0) => {
-                let v = proto3::read_u32(data, &mut pos)?;
-                let v = proto3::to_u8(v, "version")?;
-                return Err(ProtokenError::InvalidVersion(v));
+                let v = proto3::decode_varint(data, &mut pos)?;
+                return Err(ProtokenError::InvalidVersion(proto3::to_u8(v, "version")?));
             }
-            (2, 0) => {
-                let v = read_nonzero_varint(data, &mut pos, "algorithm")?;
-                algorithm = u32::try_from(v).map_err(|_| {
-                    ProtokenError::MalformedEncoding("algorithm exceeds u32 range".into())
-                })?;
-            }
-            (3, 0) => {
-                let v = read_nonzero_varint(data, &mut pos, "key_id_type")?;
-                key_id_type = u32::try_from(v).map_err(|_| {
-                    ProtokenError::MalformedEncoding("key_id_type exceeds u32 range".into())
-                })?;
-            }
+            (2, 0) => algorithm = read_nonzero_varint(data, &mut pos, "algorithm")?,
+            (3, 0) => key_id_type = read_nonzero_varint(data, &mut pos, "key_id_type")?,
             (4, 2) => {
                 key_id =
                     read_bounded_bytes(data, &mut pos, MLDSA44_PUBLIC_KEY_LEN, "key_id")?.to_vec();
@@ -302,8 +291,6 @@ pub(crate) fn deserialize_signed_token_at(
         }
     }
 
-    let version = Version::V0;
-
     let algorithm = proto3::to_u8(algorithm, "algorithm")?;
     let algorithm =
         Algorithm::from_byte(algorithm).ok_or(ProtokenError::InvalidAlgorithm(algorithm))?;
@@ -314,14 +301,14 @@ pub(crate) fn deserialize_signed_token_at(
 
     let key_identifier = match key_id_type {
         KeyIdType::KeyHash => {
-            if key_id.len() != KEY_HASH_LEN {
-                return Err(ProtokenError::InvalidKeyLength {
-                    expected: KEY_HASH_LEN,
-                    actual: key_id.len(),
-                });
-            }
-            let mut hash = [0u8; KEY_HASH_LEN];
-            hash.copy_from_slice(&key_id);
+            let hash: [u8; KEY_HASH_LEN] =
+                key_id
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| ProtokenError::InvalidKeyLength {
+                        expected: KEY_HASH_LEN,
+                        actual: key_id.len(),
+                    })?;
             KeyIdentifier::KeyHash(hash)
         }
         KeyIdType::PublicKey => {
@@ -348,7 +335,7 @@ pub(crate) fn deserialize_signed_token_at(
 
     Ok((
         SignedToken {
-            version,
+            version: Version::V0,
             algorithm,
             key_identifier,
             payload,

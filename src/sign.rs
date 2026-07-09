@@ -4,6 +4,8 @@ use ed25519_dalek::Signer as _;
 use hmac::{Hmac, Mac};
 use ml_dsa::signature::Signer as _;
 use ml_dsa::MlDsa44;
+use rand::rngs::OsRng;
+use rand::RngCore as _;
 use sha2::{Digest, Sha256};
 
 use crate::error::ProtokenError;
@@ -22,6 +24,16 @@ pub fn compute_key_hash(key_material: &[u8]) -> [u8; KEY_HASH_LEN] {
     let mut truncated = [0u8; KEY_HASH_LEN];
     truncated.copy_from_slice(&hash[..KEY_HASH_LEN]);
     truncated
+}
+
+/// Convert a slice to a fixed-size seed array with a descriptive error.
+fn to_seed<const N: usize>(seed: &[u8], what: &str) -> Result<[u8; N], ProtokenError> {
+    seed.try_into().map_err(|_| {
+        ProtokenError::SigningFailed(format!(
+            "invalid {what}: expected {N} bytes, got {}",
+            seed.len()
+        ))
+    })
 }
 
 /// Sign a token with HMAC-SHA256.
@@ -61,13 +73,7 @@ pub fn sign_ed25519(
     key_id: KeyIdentifier,
 ) -> Result<Vec<u8>, ProtokenError> {
     claims.validate()?;
-    let seed_array: [u8; ED25519_SEED_LEN] = seed.try_into().map_err(|_| {
-        ProtokenError::SigningFailed(format!(
-            "invalid Ed25519 seed: expected {} bytes, got {}",
-            ED25519_SEED_LEN,
-            seed.len()
-        ))
-    })?;
+    let seed_array = to_seed::<ED25519_SEED_LEN>(seed, "Ed25519 seed")?;
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_array);
 
     let payload = serialize_claims(claims);
@@ -88,14 +94,7 @@ pub fn sign_mldsa44(
     key_id: KeyIdentifier,
 ) -> Result<Vec<u8>, ProtokenError> {
     claims.validate()?;
-
-    let seed_array: [u8; MLDSA44_SEED_LEN] = seed.try_into().map_err(|_| {
-        ProtokenError::SigningFailed(format!(
-            "invalid ML-DSA-44 seed: expected {} bytes, got {}",
-            MLDSA44_SEED_LEN,
-            seed.len()
-        ))
-    })?;
+    let seed_array = to_seed::<MLDSA44_SEED_LEN>(seed, "ML-DSA-44 seed")?;
     let signing_key = ml_dsa::SigningKey::<MlDsa44>::from_seed(&seed_array.into());
 
     let payload = serialize_claims(claims);
@@ -107,40 +106,27 @@ pub fn sign_mldsa44(
     Ok(append_signature(signing_input, &sig.encode()))
 }
 
-/// Compute the KeyIdentifier::KeyHash for an ML-DSA-44 public key.
-pub fn mldsa44_key_hash(public_key_bytes: &[u8]) -> Result<KeyIdentifier, ProtokenError> {
-    if public_key_bytes.len() != MLDSA44_PUBLIC_KEY_LEN {
-        return Err(ProtokenError::SigningFailed(format!(
-            "invalid ML-DSA-44 public key: expected {} bytes, got {}",
-            MLDSA44_PUBLIC_KEY_LEN,
-            public_key_bytes.len()
-        )));
-    }
-    Ok(KeyIdentifier::KeyHash(compute_key_hash(public_key_bytes)))
-}
-
 /// Generate a new Ed25519 key pair, returning (seed, public_key) as raw bytes.
-pub fn generate_ed25519_key() -> Result<(Vec<u8>, Vec<u8>), ProtokenError> {
-    let mut rng = rand::rngs::OsRng;
-    let signing_key = ed25519_dalek::SigningKey::generate(&mut rng);
+pub fn generate_ed25519_key() -> (Vec<u8>, Vec<u8>) {
+    let signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
     let seed = signing_key.to_bytes().to_vec();
     let pk = signing_key.verifying_key().to_bytes().to_vec();
-    Ok((seed, pk))
+    (seed, pk)
 }
 
 /// Generate a new ML-DSA-44 key pair, returning (seed, public_key_bytes).
-pub fn generate_mldsa44_key() -> Result<(Vec<u8>, Vec<u8>), ProtokenError> {
+pub fn generate_mldsa44_key() -> (Vec<u8>, Vec<u8>) {
     let mut seed = [0u8; MLDSA44_SEED_LEN];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+    OsRng.fill_bytes(&mut seed);
     let signing_key = ml_dsa::SigningKey::<MlDsa44>::from_seed(&seed.into());
     let pk_bytes = signing_key.expanded_key().verifying_key().encode().to_vec();
-    Ok((seed.to_vec(), pk_bytes))
+    (seed.to_vec(), pk_bytes)
 }
 
 /// Generate a new HMAC key (32 bytes of cryptographically random data).
 pub fn generate_hmac_key() -> Vec<u8> {
-    let mut key = vec![0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
+    let mut key = vec![0u8; HMAC_MIN_KEY_LEN];
+    OsRng.fill_bytes(&mut key);
     key
 }
 
@@ -196,7 +182,7 @@ mod tests {
 
     #[test]
     fn test_sign_ed25519_produces_valid_token() {
-        let (seed, pk) = generate_ed25519_key().unwrap();
+        let (seed, pk) = generate_ed25519_key();
         let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: 1800000000,
@@ -213,7 +199,7 @@ mod tests {
 
     #[test]
     fn test_ed25519_signing_deterministic() {
-        let (seed, pk) = generate_ed25519_key().unwrap();
+        let (seed, pk) = generate_ed25519_key();
         let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: 1800000000,
@@ -280,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_sign_ed25519_with_claims() {
-        let (seed, pk) = generate_ed25519_key().unwrap();
+        let (seed, pk) = generate_ed25519_key();
         let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: 1800000000,
@@ -310,8 +296,8 @@ mod tests {
 
     #[test]
     fn test_sign_mldsa44_produces_valid_token() {
-        let (sk, pk) = generate_mldsa44_key().unwrap();
-        let key_id = mldsa44_key_hash(&pk).unwrap();
+        let (sk, pk) = generate_mldsa44_key();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: 1900000000,
             ..Default::default()
@@ -327,8 +313,8 @@ mod tests {
 
     #[test]
     fn test_sign_mldsa44_with_claims() {
-        let (sk, pk) = generate_mldsa44_key().unwrap();
-        let key_id = mldsa44_key_hash(&pk).unwrap();
+        let (sk, pk) = generate_mldsa44_key();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: 1900000000,
             subject: "pq-user".into(),
@@ -357,16 +343,8 @@ mod tests {
     }
 
     #[test]
-    fn test_mldsa44_key_hash_deterministic() {
-        let (_sk, pk) = generate_mldsa44_key().unwrap();
-        let h1 = mldsa44_key_hash(&pk).unwrap();
-        let h2 = mldsa44_key_hash(&pk).unwrap();
-        assert_eq!(h1, h2);
-    }
-
-    #[test]
     fn test_mldsa44_key_sizes() {
-        let (sk, pk) = generate_mldsa44_key().unwrap();
+        let (sk, pk) = generate_mldsa44_key();
         assert_eq!(sk.len(), MLDSA44_SEED_LEN);
         assert_eq!(pk.len(), MLDSA44_PUBLIC_KEY_LEN);
     }
@@ -461,10 +439,5 @@ mod tests {
             ..Default::default()
         };
         assert!(sign_hmac(key, &claims).is_ok());
-    }
-
-    #[test]
-    fn test_mldsa44_key_hash_rejects_wrong_length() {
-        assert!(mldsa44_key_hash(&[0; 100]).is_err());
     }
 }

@@ -99,7 +99,7 @@ pub fn deserialize_signing_key(data: &[u8]) -> Result<SigningKey, ProtokenError>
         return Err(ProtokenError::MalformedEncoding("empty signing key".into()));
     }
 
-    let mut algorithm: u32 = 0;
+    let mut algorithm: u64 = 0;
     let mut secret_key: Vec<u8> = Vec::new();
     let mut public_key: Vec<u8> = Vec::new();
 
@@ -116,7 +116,7 @@ pub fn deserialize_signing_key(data: &[u8]) -> Result<SigningKey, ProtokenError>
         last_field_number = field_number;
 
         match (field_number, wire_type) {
-            (1, 0) => algorithm = proto3::read_u32(data, &mut pos)?,
+            (1, 0) => algorithm = proto3::decode_varint(data, &mut pos)?,
             (2, 2) => {
                 secret_key = crate::serialize::read_bounded_bytes(
                     data,
@@ -165,7 +165,7 @@ pub fn deserialize_verifying_key(data: &[u8]) -> Result<VerifyingKey, ProtokenEr
         ));
     }
 
-    let mut algorithm: u32 = 0;
+    let mut algorithm: u64 = 0;
     let mut public_key: Vec<u8> = Vec::new();
 
     let mut pos = 0;
@@ -181,7 +181,7 @@ pub fn deserialize_verifying_key(data: &[u8]) -> Result<VerifyingKey, ProtokenEr
         last_field_number = field_number;
 
         match (field_number, wire_type) {
-            (1, 0) => algorithm = proto3::read_u32(data, &mut pos)?,
+            (1, 0) => algorithm = proto3::decode_varint(data, &mut pos)?,
             (2, 2) => {
                 public_key = crate::serialize::read_bounded_bytes(
                     data,
@@ -239,13 +239,7 @@ fn validate_signing_key_sizes(
                     secret_key.len()
                 )));
             }
-            if public_key.len() != ED25519_PUBLIC_KEY_LEN {
-                return Err(ProtokenError::MalformedEncoding(format!(
-                    "Ed25519 public key must be {} bytes, got {}",
-                    ED25519_PUBLIC_KEY_LEN,
-                    public_key.len()
-                )));
-            }
+            validate_public_key_size(algorithm, public_key)?;
         }
         Algorithm::MlDsa44 => {
             if secret_key.len() != MLDSA44_SEED_LEN {
@@ -255,13 +249,7 @@ fn validate_signing_key_sizes(
                     secret_key.len()
                 )));
             }
-            if public_key.len() != MLDSA44_PUBLIC_KEY_LEN {
-                return Err(ProtokenError::MalformedEncoding(format!(
-                    "ML-DSA-44 public key must be {} bytes, got {}",
-                    MLDSA44_PUBLIC_KEY_LEN,
-                    public_key.len()
-                )));
-            }
+            validate_public_key_size(algorithm, public_key)?;
         }
     }
     Ok(())

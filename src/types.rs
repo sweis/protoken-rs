@@ -9,13 +9,6 @@ pub enum Version {
 }
 
 impl Version {
-    pub fn from_byte(b: u8) -> Option<Version> {
-        match b {
-            0 => Some(Version::V0),
-            _ => None,
-        }
-    }
-
     pub fn to_byte(self) -> u8 {
         self as u8
     }
@@ -196,18 +189,16 @@ impl Claims {
         }
         // Check for duplicates via sorted adjacent comparison (avoids HashSet allocation).
         // Scopes are sorted during serialization, but validate() runs before that.
+        let mut sorted: Vec<&str> = self.scopes.iter().map(String::as_str).collect();
+        sorted.sort_unstable();
+        if let Some((dup, _)) = sorted
+            .iter()
+            .zip(sorted.iter().skip(1))
+            .find(|(a, b)| a == b)
         {
-            let mut sorted: Vec<&str> = self.scopes.iter().map(|s| s.as_str()).collect();
-            sorted.sort();
-            for pair in sorted.windows(2) {
-                #[allow(clippy::indexing_slicing)] // windows(2) guarantees exactly 2 elements
-                if pair[0] == pair[1] {
-                    return Err(ProtokenError::MalformedEncoding(format!(
-                        "duplicate scope: {:?}",
-                        pair[0]
-                    )));
-                }
-            }
+            return Err(ProtokenError::MalformedEncoding(format!(
+                "duplicate scope: {dup:?}"
+            )));
         }
         Ok(())
     }
@@ -245,7 +236,6 @@ pub const HMAC_MIN_KEY_LEN: usize = 32;
 pub const KEY_HASH_LEN: usize = 8;
 pub const ED25519_SEED_LEN: usize = 32;
 pub const ED25519_PUBLIC_KEY_LEN: usize = 32;
-pub const HMAC_SHA256_SIG_LEN: usize = 32;
 pub const ED25519_SIG_LEN: usize = 64;
 pub const MLDSA44_PUBLIC_KEY_LEN: usize = 1312;
 pub const MLDSA44_SEED_LEN: usize = 32;
@@ -292,8 +282,6 @@ mod tests {
     #[test]
     fn test_version_to_byte() {
         assert_eq!(Version::V0.to_byte(), 0);
-        assert_eq!(Version::from_byte(0), Some(Version::V0));
-        assert_eq!(Version::from_byte(1), None);
     }
 
     #[test]

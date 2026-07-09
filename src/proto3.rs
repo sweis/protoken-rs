@@ -12,18 +12,11 @@ use crate::error::ProtokenError;
 
 // --- Shared helpers ---
 
-/// Convert a u32 to u8, rejecting values > 255 to prevent truncation.
-pub fn to_u8(v: u32, field_name: &str) -> Result<u8, ProtokenError> {
+/// Convert a varint value to u8, rejecting values > 255 to prevent truncation.
+pub fn to_u8(v: u64, field_name: &str) -> Result<u8, ProtokenError> {
     u8::try_from(v).map_err(|_| {
         ProtokenError::MalformedEncoding(format!("{field_name} value {v} exceeds u8 range"))
     })
-}
-
-/// Read a varint that must fit in a u32. Rejects values > u32::MAX.
-pub fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32, ProtokenError> {
-    let v = read_varint_value(data, pos)?;
-    u32::try_from(v)
-        .map_err(|_| ProtokenError::MalformedEncoding(format!("varint value {v} exceeds u32::MAX")))
 }
 
 // Wire types
@@ -143,11 +136,6 @@ pub fn decode_tag(data: &[u8], pos: &mut usize) -> Result<(u32, u32), ProtokenEr
     })?;
 
     Ok((field_number, wire_type))
-}
-
-/// Read a varint field value (caller already consumed the tag).
-pub fn read_varint_value(data: &[u8], pos: &mut usize) -> Result<u64, ProtokenError> {
-    decode_varint(data, pos)
 }
 
 /// Read a length-delimited field value (caller already consumed the tag).
@@ -322,15 +310,6 @@ mod tests {
         assert!(to_u8(256, "test").is_err());
         assert_eq!(to_u8(255, "test").unwrap(), 255);
         assert_eq!(to_u8(0, "test").unwrap(), 0);
-    }
-
-    #[test]
-    fn test_read_u32_rejects_large_value() {
-        // Varint encoding of u32::MAX + 1.
-        let mut buf = Vec::new();
-        encode_varint(u32::MAX as u64 + 1, &mut buf);
-        let mut pos = 0;
-        assert!(read_u32(&buf, &mut pos).is_err());
     }
 
     #[test]

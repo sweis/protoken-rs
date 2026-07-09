@@ -100,14 +100,7 @@ pub fn verify_hmac(
     // The parser guarantees HMAC tokens use a KeyHash identifier.
     check_key_identity(&token.key_identifier, key)?;
 
-    if token.signature.len() != HMAC_SHA256_SIG_LEN {
-        return Err(ProtokenError::VerificationFailed(format!(
-            "invalid HMAC-SHA256 signature: expected {} bytes, got {}",
-            HMAC_SHA256_SIG_LEN,
-            token.signature.len()
-        )));
-    }
-
+    // mac.verify_slice rejects wrong-length tags, so no separate length check.
     let mut mac = Hmac::<Sha256>::new_from_slice(key)
         .map_err(|e| ProtokenError::VerificationFailed(format!("invalid HMAC key: {e}")))?;
     mac.update(signing_input);
@@ -227,8 +220,7 @@ mod tests {
         deserialize_signed_token, serialize_claims, serialize_signed_token, serialize_signing_input,
     };
     use crate::sign::{
-        generate_ed25519_key, generate_mldsa44_key, mldsa44_key_hash, sign_ed25519, sign_hmac,
-        sign_mldsa44,
+        generate_ed25519_key, generate_mldsa44_key, sign_ed25519, sign_hmac, sign_mldsa44,
     };
 
     const TEST_HMAC_KEY: &[u8; 32] = &[0xAB; 32];
@@ -325,7 +317,7 @@ mod tests {
 
     #[test]
     fn test_verify_ed25519_valid() {
-        let (seed, pk) = generate_ed25519_key().unwrap();
+        let (seed, pk) = generate_ed25519_key();
         let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: u64::MAX,
@@ -339,7 +331,7 @@ mod tests {
 
     #[test]
     fn test_verify_ed25519_with_embedded_public_key() {
-        let (seed, pk) = generate_ed25519_key().unwrap();
+        let (seed, pk) = generate_ed25519_key();
         let key_id = KeyIdentifier::PublicKey(pk.clone());
         let claims = Claims {
             expires_at: u64::MAX,
@@ -353,7 +345,7 @@ mod tests {
 
     #[test]
     fn test_verify_ed25519_expired() {
-        let (seed, pk) = generate_ed25519_key().unwrap();
+        let (seed, pk) = generate_ed25519_key();
         let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: 1000,
@@ -367,8 +359,8 @@ mod tests {
 
     #[test]
     fn test_verify_ed25519_wrong_key() {
-        let (seed, pk) = generate_ed25519_key().unwrap();
-        let (_seed2, pk2) = generate_ed25519_key().unwrap();
+        let (seed, pk) = generate_ed25519_key();
+        let (_seed2, pk2) = generate_ed25519_key();
         let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: u64::MAX,
@@ -382,7 +374,7 @@ mod tests {
 
     #[test]
     fn test_verify_ed25519_corrupted_signature() {
-        let (seed, pk) = generate_ed25519_key().unwrap();
+        let (seed, pk) = generate_ed25519_key();
         let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: u64::MAX,
@@ -445,7 +437,7 @@ mod tests {
 
     #[test]
     fn test_ed25519_corrupt_every_byte() {
-        let (seed, pk) = generate_ed25519_key().unwrap();
+        let (seed, pk) = generate_ed25519_key();
         let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: u64::MAX,
@@ -504,7 +496,7 @@ mod tests {
         };
         let token_bytes = sign_hmac(key, &claims).unwrap();
 
-        let (_seed, pk) = generate_ed25519_key().unwrap();
+        let (_seed, pk) = generate_ed25519_key();
         let result = verify_ed25519(&pk, &token_bytes, 1000);
         assert!(
             matches!(&result, Err(ProtokenError::VerificationFailed(m)) if m.contains("expected")),
@@ -532,7 +524,7 @@ mod tests {
         let swapped_bytes = serialize_signed_token(&swapped);
 
         // As an Ed25519 token, the 32-byte HMAC tag is not a valid signature length.
-        let (_seed, pk) = generate_ed25519_key().unwrap();
+        let (_seed, pk) = generate_ed25519_key();
         assert!(verify_ed25519(&pk, &swapped_bytes, 1000).is_err());
         // And it no longer parses as an HMAC token.
         assert!(verify_hmac(key, &swapped_bytes, 1000).is_err());
@@ -542,8 +534,8 @@ mod tests {
 
     #[test]
     fn test_verify_mldsa44_valid() {
-        let (sk, pk) = generate_mldsa44_key().unwrap();
-        let key_id = mldsa44_key_hash(&pk).unwrap();
+        let (sk, pk) = generate_mldsa44_key();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: u64::MAX,
             ..Default::default()
@@ -556,8 +548,8 @@ mod tests {
 
     #[test]
     fn test_verify_mldsa44_expired() {
-        let (sk, pk) = generate_mldsa44_key().unwrap();
-        let key_id = mldsa44_key_hash(&pk).unwrap();
+        let (sk, pk) = generate_mldsa44_key();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: 1000,
             ..Default::default()
@@ -570,9 +562,9 @@ mod tests {
 
     #[test]
     fn test_verify_mldsa44_wrong_key() {
-        let (sk1, pk1) = generate_mldsa44_key().unwrap();
-        let (_sk2, pk2) = generate_mldsa44_key().unwrap();
-        let key_id = mldsa44_key_hash(&pk1).unwrap();
+        let (sk1, pk1) = generate_mldsa44_key();
+        let (_sk2, pk2) = generate_mldsa44_key();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk1));
         let claims = Claims {
             expires_at: u64::MAX,
             ..Default::default()
@@ -585,8 +577,8 @@ mod tests {
 
     #[test]
     fn test_verify_mldsa44_corrupted_signature() {
-        let (sk, pk) = generate_mldsa44_key().unwrap();
-        let key_id = mldsa44_key_hash(&pk).unwrap();
+        let (sk, pk) = generate_mldsa44_key();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: u64::MAX,
             ..Default::default()
@@ -601,7 +593,7 @@ mod tests {
 
     #[test]
     fn test_verify_mldsa44_with_public_key_id() {
-        let (sk, pk) = generate_mldsa44_key().unwrap();
+        let (sk, pk) = generate_mldsa44_key();
         let key_id = KeyIdentifier::PublicKey(pk.clone());
         let claims = Claims {
             expires_at: u64::MAX,
@@ -615,8 +607,8 @@ mod tests {
 
     #[test]
     fn test_verify_mldsa44_not_before() {
-        let (sk, pk) = generate_mldsa44_key().unwrap();
-        let key_id = mldsa44_key_hash(&pk).unwrap();
+        let (sk, pk) = generate_mldsa44_key();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: u64::MAX,
             not_before: 5000,
@@ -638,8 +630,8 @@ mod tests {
 
     #[test]
     fn test_mldsa44_sign_verify_with_full_claims() {
-        let (sk, pk) = generate_mldsa44_key().unwrap();
-        let key_id = mldsa44_key_hash(&pk).unwrap();
+        let (sk, pk) = generate_mldsa44_key();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
         let claims = Claims {
             expires_at: u64::MAX,
             not_before: 1000,
@@ -709,8 +701,8 @@ mod tests {
     fn test_verify_ed25519_key_hash_mismatch() {
         // Sign with key A using key B's key hash; verify with key A.
         // Signature is valid for A, but key identity check must fail.
-        let (seed_a, pk_a) = generate_ed25519_key().unwrap();
-        let (_seed_b, pk_b) = generate_ed25519_key().unwrap();
+        let (seed_a, pk_a) = generate_ed25519_key();
+        let (_seed_b, pk_b) = generate_ed25519_key();
         let claims = Claims {
             expires_at: u64::MAX,
             ..Default::default()
