@@ -22,10 +22,10 @@ fn make_claims() -> Claims {
 fn bench_hmac(c: &mut Criterion) {
     let key = [0xABu8; 32];
     let claims = make_claims();
-    let token = sign_hmac(&key, claims.clone()).expect("sign");
+    let token = sign_hmac(&key, &claims).expect("sign");
 
     c.bench_function("hmac_sign", |b| {
-        b.iter(|| sign_hmac(&key, claims.clone()).expect("sign"));
+        b.iter(|| sign_hmac(&key, &claims).expect("sign"));
     });
     c.bench_function("hmac_verify", |b| {
         b.iter(|| verify_hmac(&key, &token, 1_000_000).expect("verify"));
@@ -37,10 +37,10 @@ fn bench_ed25519(c: &mut Criterion) {
     let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
 
     let claims = make_claims();
-    let token = sign_ed25519(&seed, claims.clone(), key_id.clone()).expect("sign");
+    let token = sign_ed25519(&seed, &claims, key_id.clone()).expect("sign");
 
     c.bench_function("ed25519_sign", |b| {
-        b.iter(|| sign_ed25519(&seed, claims.clone(), key_id.clone()).expect("sign"));
+        b.iter(|| sign_ed25519(&seed, &claims, key_id.clone()).expect("sign"));
     });
     c.bench_function("ed25519_verify", |b| {
         b.iter(|| verify_ed25519(&pk, &token, 1_000_000).expect("verify"));
@@ -51,10 +51,10 @@ fn bench_mldsa44(c: &mut Criterion) {
     let (sk, pk) = generate_mldsa44_key().expect("keygen");
     let key_id = mldsa44_key_hash(&pk).expect("hash");
     let claims = make_claims();
-    let token = sign_mldsa44(&sk, claims.clone(), key_id.clone()).expect("sign");
+    let token = sign_mldsa44(&sk, &claims, key_id.clone()).expect("sign");
 
     c.bench_function("mldsa44_sign", |b| {
-        b.iter(|| sign_mldsa44(&sk, claims.clone(), key_id.clone()).expect("sign"));
+        b.iter(|| sign_mldsa44(&sk, &claims, key_id.clone()).expect("sign"));
     });
     c.bench_function("mldsa44_verify", |b| {
         b.iter(|| verify_mldsa44(&pk, &token, 1_000_000).expect("verify"));

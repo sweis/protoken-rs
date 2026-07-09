@@ -337,17 +337,12 @@ mod tests {
     fn test_field_tag_values() {
         // Verify our field tag bytes match the proto3 spec
         let cases: &[(u32, u32, u8)] = &[
-            (1, WIRE_VARINT, 0x08), // version
-            (2, WIRE_VARINT, 0x10), // algorithm
-            (3, WIRE_VARINT, 0x18), // key_id_type
-            (4, WIRE_LEN, 0x22),    // key_id
-            (5, WIRE_VARINT, 0x28), // expires_at
-            (6, WIRE_VARINT, 0x30), // not_before
-            (7, WIRE_VARINT, 0x38), // issued_at
-            (8, WIRE_LEN, 0x42),    // subject
-            (9, WIRE_LEN, 0x4A),    // audience
-            (1, WIRE_LEN, 0x0A),    // SignedToken.payload
-            (2, WIRE_LEN, 0x12),    // SignedToken.signature
+            (1, WIRE_VARINT, 0x08), // SignedToken.version / Claims.expires_at
+            (2, WIRE_VARINT, 0x10), // SignedToken.algorithm / Claims.not_before
+            (3, WIRE_VARINT, 0x18), // SignedToken.key_id_type / Claims.issued_at
+            (4, WIRE_LEN, 0x22),    // SignedToken.key_id / Claims.subject
+            (5, WIRE_LEN, 0x2A),    // SignedToken.payload / Claims.audience
+            (6, WIRE_LEN, 0x32),    // SignedToken.signature / Claims.scope
         ];
         for &(field, wire_type, expected_byte) in cases {
             let mut buf = Vec::new();

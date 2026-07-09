@@ -1,4 +1,4 @@
-//! Token signing: HMAC-SHA256, Ed25519, ML-DSA-44, Groth16-Poseidon, and Groth16-Hybrid.
+//! Token signing: HMAC-SHA256, Ed25519, and ML-DSA-44.
 
 use hmac::{Hmac, Mac};
 use ml_dsa::signature::Signer as _;
@@ -6,8 +6,7 @@ use ml_dsa::{KeyGen, MlDsa44};
 use sha2::{Digest, Sha256};
 
 use crate::error::ProtokenError;
-use crate::serialize::{serialize_payload, serialize_signed_token};
-use crate::snark::SnarkProvingKey;
+use crate::serialize::{append_signature, serialize_claims, serialize_signing_input};
 use crate::types::*;
 
 /// Compute the 8-byte key hash: SHA-256(key_material)[0..8].
@@ -28,7 +27,7 @@ pub fn compute_key_hash(key_material: &[u8]) -> [u8; KEY_HASH_LEN] {
 /// Returns the serialized SignedToken wire bytes.
 ///
 /// For HMAC-SHA256, use at least 32 bytes of cryptographically random key material.
-pub fn sign_hmac(key: &[u8], claims: Claims) -> Result<Vec<u8>, ProtokenError> {
+pub fn sign_hmac(key: &[u8], claims: &Claims) -> Result<Vec<u8>, ProtokenError> {
     if key.len() < HMAC_MIN_KEY_LEN {
         return Err(ProtokenError::SigningFailed(format!(
             "HMAC key too short: {} bytes (minimum {})",
@@ -37,37 +36,27 @@ pub fn sign_hmac(key: &[u8], claims: Claims) -> Result<Vec<u8>, ProtokenError> {
         )));
     }
     claims.validate()?;
-    let key_hash = compute_key_hash(key);
-    let payload = Payload {
-        metadata: Metadata {
-            version: Version::V0,
-            algorithm: Algorithm::HmacSha256,
-            key_identifier: KeyIdentifier::KeyHash(key_hash),
-        },
-        claims,
-    };
+    let key_id = KeyIdentifier::KeyHash(compute_key_hash(key));
+    let payload = serialize_claims(claims);
+    let signing_input =
+        serialize_signing_input(Version::V0, Algorithm::HmacSha256, &key_id, &payload);
 
-    let payload_bytes = serialize_payload(&payload);
     let mut mac = Hmac::<Sha256>::new_from_slice(key)
         .map_err(|e| ProtokenError::SigningFailed(format!("invalid HMAC key: {e}")))?;
-    mac.update(&payload_bytes);
+    mac.update(&signing_input);
     let tag = mac.finalize().into_bytes();
 
-    let token = SignedToken {
-        payload_bytes,
-        signature: tag.to_vec(),
-        proof: Vec::new(),
-    };
-    Ok(serialize_signed_token(&token))
+    Ok(append_signature(signing_input, &tag))
 }
 
 /// Sign a token with Ed25519.
 /// Returns the serialized SignedToken wire bytes.
 ///
 /// `seed` is the raw 32-byte Ed25519 private key seed.
+/// `key_id` must identify the corresponding public key (its hash or the key itself).
 pub fn sign_ed25519(
     seed: &[u8],
-    claims: Claims,
+    claims: &Claims,
     key_id: KeyIdentifier,
 ) -> Result<Vec<u8>, ProtokenError> {
     claims.validate()?;
@@ -80,33 +69,21 @@ pub fn sign_ed25519(
     })?;
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_array);
 
-    let payload = Payload {
-        metadata: Metadata {
-            version: Version::V0,
-            algorithm: Algorithm::Ed25519,
-            key_identifier: key_id,
-        },
-        claims,
-    };
+    let payload = serialize_claims(claims);
+    let signing_input = serialize_signing_input(Version::V0, Algorithm::Ed25519, &key_id, &payload);
+    let sig = signing_key.sign(&signing_input);
 
-    let payload_bytes = serialize_payload(&payload);
-    let sig = signing_key.sign(&payload_bytes);
-
-    let token = SignedToken {
-        payload_bytes,
-        signature: sig.to_bytes().to_vec(),
-        proof: Vec::new(),
-    };
-    Ok(serialize_signed_token(&token))
+    Ok(append_signature(signing_input, &sig.to_bytes()))
 }
 
 /// Sign a token with ML-DSA-44.
 /// Returns the serialized SignedToken wire bytes.
 ///
 /// `signing_key_bytes` is the raw 2,560-byte ML-DSA-44 signing key.
+/// `key_id` must identify the corresponding public key (its hash or the key itself).
 pub fn sign_mldsa44(
     signing_key_bytes: &[u8],
-    claims: Claims,
+    claims: &Claims,
     key_id: KeyIdentifier,
 ) -> Result<Vec<u8>, ProtokenError> {
     claims.validate()?;
@@ -121,26 +98,13 @@ pub fn sign_mldsa44(
         })?;
     let signing_key = ml_dsa::SigningKey::<MlDsa44>::decode(encoded);
 
-    let payload = Payload {
-        metadata: Metadata {
-            version: Version::V0,
-            algorithm: Algorithm::MlDsa44,
-            key_identifier: key_id,
-        },
-        claims,
-    };
-
-    let payload_bytes = serialize_payload(&payload);
+    let payload = serialize_claims(claims);
+    let signing_input = serialize_signing_input(Version::V0, Algorithm::MlDsa44, &key_id, &payload);
     let sig = signing_key
-        .try_sign(&payload_bytes)
+        .try_sign(&signing_input)
         .map_err(|e| ProtokenError::SigningFailed(format!("ML-DSA-44 signing failed: {e}")))?;
 
-    let token = SignedToken {
-        payload_bytes,
-        signature: sig.encode().to_vec(),
-        proof: Vec::new(),
-    };
-    Ok(serialize_signed_token(&token))
+    Ok(append_signature(signing_input, &sig.encode()))
 }
 
 /// Compute the KeyIdentifier::KeyHash for an ML-DSA-44 public key.
@@ -152,8 +116,7 @@ pub fn mldsa44_key_hash(public_key_bytes: &[u8]) -> Result<KeyIdentifier, Protok
             public_key_bytes.len()
         )));
     }
-    let hash = compute_key_hash(public_key_bytes);
-    Ok(KeyIdentifier::KeyHash(hash))
+    Ok(KeyIdentifier::KeyHash(compute_key_hash(public_key_bytes)))
 }
 
 /// Generate a new Ed25519 key pair, returning (seed, public_key) as raw bytes.
@@ -181,105 +144,11 @@ pub fn generate_hmac_key() -> Vec<u8> {
     key
 }
 
-/// Compute the full 32-byte Poseidon hash of a symmetric key.
-/// Used by Groth16Poseidon for full collision resistance.
-/// The key is interpreted as a BN254 field element (little-endian, mod order).
-#[must_use]
-pub fn compute_full_key_hash(key_material: &[u8]) -> [u8; FULL_KEY_HASH_LEN] {
-    let config = crate::poseidon::poseidon_config();
-    let key_fr = crate::poseidon::bytes_to_fr(key_material);
-    let hash_fr = crate::poseidon::poseidon_hash(&config, &[key_fr]);
-    crate::poseidon::fr_to_bytes(&hash_fr)
-}
-
-/// Sign a token with Groth16-Poseidon (symmetric key SNARK proof).
-///
-/// `pk` is the Groth16 proving key from `snark::setup()`.
-/// `key` is the 32-byte symmetric key.
-/// `claims` are the token claims.
-///
-/// The circuit proves knowledge of K such that Poseidon(K) = key_hash and
-/// Poseidon(K, SHA-256(payload)) = mac. SHA-256 is used outside the circuit
-/// for payload hashing; Poseidon is used inside the circuit for ~300x speedup.
-///
-/// Returns the serialized SignedToken wire bytes including the SNARK proof.
-pub fn sign_groth16(
-    pk: &SnarkProvingKey,
-    key: &[u8; 32],
-    claims: Claims,
-) -> Result<Vec<u8>, ProtokenError> {
-    claims.validate()?;
-    let key_hash = compute_full_key_hash(key);
-    let payload = Payload {
-        metadata: Metadata {
-            version: Version::V0,
-            algorithm: Algorithm::Groth16Poseidon,
-            key_identifier: KeyIdentifier::FullKeyHash(key_hash),
-        },
-        claims,
-    };
-
-    let payload_bytes = serialize_payload(&payload);
-    let (_key_hash, mac_output, proof_bytes) = crate::snark::prove(pk, key, &payload_bytes)?;
-
-    let token = SignedToken {
-        payload_bytes,
-        signature: mac_output.to_vec(),
-        proof: proof_bytes,
-    };
-    Ok(serialize_signed_token(&token))
-}
-
-/// Compute the full 32-byte SHA-256 hash of a symmetric key.
-/// Used by Groth16Hybrid for FullKeyHash key identifier.
-#[must_use]
-#[allow(clippy::indexing_slicing)] // SHA-256 always produces exactly 32 bytes
-pub fn compute_sha256_full_key_hash(key_material: &[u8]) -> [u8; FULL_KEY_HASH_LEN] {
-    let hash = Sha256::digest(key_material);
-    let mut out = [0u8; FULL_KEY_HASH_LEN];
-    out.copy_from_slice(&hash);
-    out
-}
-
-/// Sign a token with Groth16-Hybrid (SHA-256 key hash + Poseidon MAC SNARK proof).
-///
-/// `pk` is the Groth16 proving key from `snark::setup_hybrid()`.
-/// `key` is the 32-byte symmetric key.
-///
-/// The circuit proves knowledge of K such that SHA-256(K) = key_hash and
-/// Poseidon(K_fr, SHA-256(payload) as Fr) = mac.
-pub fn sign_groth16_hybrid(
-    pk: &SnarkProvingKey,
-    key: &[u8; 32],
-    claims: Claims,
-) -> Result<Vec<u8>, ProtokenError> {
-    claims.validate()?;
-    let key_hash = compute_sha256_full_key_hash(key);
-    let payload = Payload {
-        metadata: Metadata {
-            version: Version::V0,
-            algorithm: Algorithm::Groth16Hybrid,
-            key_identifier: KeyIdentifier::FullKeyHash(key_hash),
-        },
-        claims,
-    };
-
-    let payload_bytes = serialize_payload(&payload);
-    let (_key_hash, mac_output, proof_bytes) = crate::snark::prove_hybrid(pk, key, &payload_bytes)?;
-
-    let token = SignedToken {
-        payload_bytes,
-        signature: mac_output.to_vec(),
-        proof: proof_bytes,
-    };
-    Ok(serialize_signed_token(&token))
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::serialize::{deserialize_payload, deserialize_signed_token};
+    use crate::serialize::{deserialize_claims, deserialize_signed_token};
 
     const TEST_HMAC_KEY: &[u8; 32] = &[0xAB; 32];
 
@@ -291,19 +160,16 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_hmac(key, claims).unwrap();
+        let token_bytes = sign_hmac(key, &claims).unwrap();
         let token = deserialize_signed_token(&token_bytes).unwrap();
-        let payload = deserialize_payload(&token.payload_bytes).unwrap();
+        let decoded = deserialize_claims(&token.payload).unwrap();
 
-        assert_eq!(payload.metadata.version, Version::V0);
-        assert_eq!(payload.metadata.algorithm, Algorithm::HmacSha256);
-        assert_eq!(payload.claims.expires_at, 1700000000);
+        assert_eq!(token.version, Version::V0);
+        assert_eq!(token.algorithm, Algorithm::HmacSha256);
+        assert_eq!(decoded.expires_at, 1700000000);
 
         let expected_hash = compute_key_hash(key);
-        assert_eq!(
-            payload.metadata.key_identifier,
-            KeyIdentifier::KeyHash(expected_hash)
-        );
+        assert_eq!(token.key_identifier, KeyIdentifier::KeyHash(expected_hash));
     }
 
     #[test]
@@ -322,6 +188,13 @@ mod tests {
     }
 
     #[test]
+    fn test_key_hash_known_value() {
+        // SHA-256("") = e3b0c44298fc1c14... — first 8 bytes.
+        let hash = compute_key_hash(b"");
+        assert_eq!(hash, [0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14]);
+    }
+
+    #[test]
     fn test_sign_ed25519_produces_valid_token() {
         let (seed, pk) = generate_ed25519_key().unwrap();
         let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
@@ -330,12 +203,12 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_ed25519(&seed, claims, key_id).unwrap();
+        let token_bytes = sign_ed25519(&seed, &claims, key_id).unwrap();
         let token = deserialize_signed_token(&token_bytes).unwrap();
-        let payload = deserialize_payload(&token.payload_bytes).unwrap();
+        let decoded = deserialize_claims(&token.payload).unwrap();
 
-        assert_eq!(payload.metadata.algorithm, Algorithm::Ed25519);
-        assert_eq!(payload.claims.expires_at, 1800000000);
+        assert_eq!(token.algorithm, Algorithm::Ed25519);
+        assert_eq!(decoded.expires_at, 1800000000);
     }
 
     #[test]
@@ -350,8 +223,8 @@ mod tests {
             ..Default::default()
         };
 
-        let t1 = sign_ed25519(&seed, claims.clone(), key_id.clone()).unwrap();
-        let t2 = sign_ed25519(&seed, claims, key_id).unwrap();
+        let t1 = sign_ed25519(&seed, &claims, key_id.clone()).unwrap();
+        let t2 = sign_ed25519(&seed, &claims, key_id).unwrap();
         assert_eq!(t1, t2);
     }
 
@@ -362,7 +235,7 @@ mod tests {
             expires_at: 1700000000,
             ..Default::default()
         };
-        assert!(sign_hmac(short_key, claims).is_err());
+        assert!(sign_hmac(short_key, &claims).is_err());
     }
 
     #[test]
@@ -372,7 +245,7 @@ mod tests {
             expires_at: 0,
             ..Default::default()
         };
-        assert!(sign_hmac(key, claims).is_err());
+        assert!(sign_hmac(key, &claims).is_err());
     }
 
     #[test]
@@ -383,7 +256,7 @@ mod tests {
             not_before: 2000,
             ..Default::default()
         };
-        assert!(sign_hmac(key, claims).is_err());
+        assert!(sign_hmac(key, &claims).is_err());
     }
 
     #[test]
@@ -396,13 +269,13 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_hmac(key, claims.clone()).unwrap();
+        let token_bytes = sign_hmac(key, &claims).unwrap();
         let token = deserialize_signed_token(&token_bytes).unwrap();
-        let payload = deserialize_payload(&token.payload_bytes).unwrap();
+        let decoded = deserialize_claims(&token.payload).unwrap();
 
-        assert_eq!(payload.metadata.version, Version::V0);
-        assert_eq!(payload.metadata.algorithm, Algorithm::HmacSha256);
-        assert_eq!(payload.claims, claims);
+        assert_eq!(token.version, Version::V0);
+        assert_eq!(token.algorithm, Algorithm::HmacSha256);
+        assert_eq!(decoded, claims);
     }
 
     #[test]
@@ -416,13 +289,23 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_ed25519(&seed, claims.clone(), key_id).unwrap();
+        let token_bytes = sign_ed25519(&seed, &claims, key_id).unwrap();
         let token = deserialize_signed_token(&token_bytes).unwrap();
-        let payload = deserialize_payload(&token.payload_bytes).unwrap();
+        let decoded = deserialize_claims(&token.payload).unwrap();
 
-        assert_eq!(payload.metadata.version, Version::V0);
-        assert_eq!(payload.metadata.algorithm, Algorithm::Ed25519);
-        assert_eq!(payload.claims, claims);
+        assert_eq!(token.version, Version::V0);
+        assert_eq!(token.algorithm, Algorithm::Ed25519);
+        assert_eq!(decoded, claims);
+    }
+
+    #[test]
+    fn test_sign_ed25519_rejects_bad_seed_length() {
+        let claims = Claims {
+            expires_at: 1800000000,
+            ..Default::default()
+        };
+        let key_id = KeyIdentifier::KeyHash([0; 8]);
+        assert!(sign_ed25519(&[0; 16], &claims, key_id).is_err());
     }
 
     #[test]
@@ -434,12 +317,12 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_mldsa44(&sk, claims, key_id).unwrap();
+        let token_bytes = sign_mldsa44(&sk, &claims, key_id).unwrap();
         let token = deserialize_signed_token(&token_bytes).unwrap();
-        let payload = deserialize_payload(&token.payload_bytes).unwrap();
+        let decoded = deserialize_claims(&token.payload).unwrap();
 
-        assert_eq!(payload.metadata.algorithm, Algorithm::MlDsa44);
-        assert_eq!(payload.claims.expires_at, 1900000000);
+        assert_eq!(token.algorithm, Algorithm::MlDsa44);
+        assert_eq!(decoded.expires_at, 1900000000);
     }
 
     #[test]
@@ -454,13 +337,23 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_mldsa44(&sk, claims.clone(), key_id).unwrap();
+        let token_bytes = sign_mldsa44(&sk, &claims, key_id).unwrap();
         let token = deserialize_signed_token(&token_bytes).unwrap();
-        let payload = deserialize_payload(&token.payload_bytes).unwrap();
+        let decoded = deserialize_claims(&token.payload).unwrap();
 
-        assert_eq!(payload.metadata.version, Version::V0);
-        assert_eq!(payload.metadata.algorithm, Algorithm::MlDsa44);
-        assert_eq!(payload.claims, claims);
+        assert_eq!(token.version, Version::V0);
+        assert_eq!(token.algorithm, Algorithm::MlDsa44);
+        assert_eq!(decoded, claims);
+    }
+
+    #[test]
+    fn test_sign_mldsa44_rejects_bad_key_length() {
+        let claims = Claims {
+            expires_at: 1900000000,
+            ..Default::default()
+        };
+        let key_id = KeyIdentifier::KeyHash([0; 8]);
+        assert!(sign_mldsa44(&[0; 100], &claims, key_id).is_err());
     }
 
     #[test]
@@ -478,8 +371,6 @@ mod tests {
         assert_eq!(pk.len(), MLDSA44_PUBLIC_KEY_LEN);
     }
 
-    // --- Mutation-testing-driven coverage additions ---
-
     #[test]
     fn test_generate_hmac_key_length_and_entropy() {
         let k1 = generate_hmac_key();
@@ -490,40 +381,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_full_key_hash_deterministic() {
-        let h1 = compute_full_key_hash(&[0x42; 32]);
-        let h2 = compute_full_key_hash(&[0x42; 32]);
-        assert_eq!(h1, h2);
-        assert_ne!(h1, [0u8; 32], "hash should not be all zeros");
-        assert_ne!(h1, [1u8; 32], "hash should not be all ones");
-    }
-
-    #[test]
-    fn test_compute_full_key_hash_different_keys() {
-        let h1 = compute_full_key_hash(&[0x01; 32]);
-        let h2 = compute_full_key_hash(&[0x02; 32]);
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
-    fn test_compute_sha256_full_key_hash_known_value() {
-        // SHA-256 of 32 zero bytes is a well-known constant.
-        let hash = compute_sha256_full_key_hash(&[0u8; 32]);
-        let expected =
-            hex::decode("66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925")
-                .unwrap();
-        assert_eq!(hash.as_slice(), expected.as_slice());
-    }
-
-    #[test]
-    fn test_compute_sha256_full_key_hash_different_keys() {
-        let h1 = compute_sha256_full_key_hash(&[0x01; 32]);
-        let h2 = compute_sha256_full_key_hash(&[0x02; 32]);
-        assert_ne!(h1, h2);
-        assert_ne!(h1, [0u8; 32]);
-    }
-
-    #[test]
     fn test_sign_rejects_overlong_subject() {
         let key: &[u8] = TEST_HMAC_KEY;
         let claims = Claims {
@@ -531,7 +388,7 @@ mod tests {
             subject: "x".repeat(MAX_CLAIM_BYTES_LEN + 1),
             ..Default::default()
         };
-        assert!(sign_hmac(key, claims).is_err());
+        assert!(sign_hmac(key, &claims).is_err());
     }
 
     #[test]
@@ -542,7 +399,7 @@ mod tests {
             audience: "x".repeat(MAX_CLAIM_BYTES_LEN + 1),
             ..Default::default()
         };
-        assert!(sign_hmac(key, claims).is_err());
+        assert!(sign_hmac(key, &claims).is_err());
     }
 
     #[test]
@@ -554,7 +411,7 @@ mod tests {
             scopes,
             ..Default::default()
         };
-        assert!(sign_hmac(key, claims).is_err());
+        assert!(sign_hmac(key, &claims).is_err());
     }
 
     #[test]
@@ -565,7 +422,7 @@ mod tests {
             scopes: vec!["x".repeat(MAX_CLAIM_BYTES_LEN + 1)],
             ..Default::default()
         };
-        assert!(sign_hmac(key, claims).is_err());
+        assert!(sign_hmac(key, &claims).is_err());
     }
 
     #[test]
@@ -579,7 +436,7 @@ mod tests {
             scopes: vec!["x".repeat(MAX_CLAIM_BYTES_LEN)],
             ..Default::default()
         };
-        assert!(sign_hmac(key, claims).is_ok());
+        assert!(sign_hmac(key, &claims).is_ok());
     }
 
     #[test]
@@ -591,7 +448,7 @@ mod tests {
             scopes,
             ..Default::default()
         };
-        assert!(sign_hmac(key, claims).is_ok());
+        assert!(sign_hmac(key, &claims).is_ok());
     }
 
     #[test]
@@ -603,7 +460,7 @@ mod tests {
             not_before: 5000,
             ..Default::default()
         };
-        assert!(sign_hmac(key, claims).is_ok());
+        assert!(sign_hmac(key, &claims).is_ok());
     }
 
     #[test]

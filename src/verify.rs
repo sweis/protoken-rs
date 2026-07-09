@@ -1,4 +1,11 @@
-//! Token verification: HMAC-SHA256, Ed25519, ML-DSA-44, Groth16-Poseidon, and Groth16-Hybrid.
+//! Token verification: HMAC-SHA256, Ed25519, and ML-DSA-44.
+//!
+//! Verification order for every algorithm:
+//! 1. Parse the envelope (structure and size checks only).
+//! 2. Check the envelope algorithm matches the caller's key type.
+//! 3. Check the key identifier matches the caller's key (constant time).
+//! 4. Verify the signature over the envelope's signing input.
+//! 5. Only then parse the payload as Claims and check temporal validity.
 
 use hmac::{Hmac, Mac};
 use ml_dsa::signature::Verifier as _;
@@ -7,9 +14,8 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 use crate::error::ProtokenError;
-use crate::serialize::{deserialize_payload, deserialize_signed_token};
+use crate::serialize::{deserialize_claims, deserialize_signed_token_at};
 use crate::sign::compute_key_hash;
-use crate::snark::SnarkVerifyingKey;
 use crate::types::*;
 
 /// Constant-time key comparison. Returns KeyHashMismatch if slices differ.
@@ -21,11 +27,54 @@ fn verify_key_match(a: &[u8], b: &[u8]) -> Result<(), ProtokenError> {
     }
 }
 
+/// Check the token's key identifier against the caller's key material
+/// (constant time): a KeyHash must match the hash of the key material, an
+/// embedded PublicKey must match it byte for byte.
+fn check_key_identity(id: &KeyIdentifier, key_material: &[u8]) -> Result<(), ProtokenError> {
+    match id {
+        KeyIdentifier::KeyHash(hash) => verify_key_match(hash, &compute_key_hash(key_material)),
+        KeyIdentifier::PublicKey(pk) => verify_key_match(pk, key_material),
+    }
+}
+
 /// Result of a successful token verification.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct VerifiedClaims {
+pub struct VerifiedToken {
+    pub algorithm: Algorithm,
+    pub key_identifier: KeyIdentifier,
     pub claims: Claims,
-    pub metadata: Metadata,
+}
+
+/// Parse the envelope, check the expected algorithm, and return the signed
+/// bytes: the received token bytes up to the signature field. The decoder
+/// enforces canonical encoding, so these are exactly the bytes the signer
+/// produced with `serialize_signing_input`.
+fn parse_envelope(
+    token_bytes: &[u8],
+    expected_algorithm: Algorithm,
+) -> Result<(SignedToken, &[u8]), ProtokenError> {
+    let (token, signed_len) = deserialize_signed_token_at(token_bytes)?;
+    if token.algorithm != expected_algorithm {
+        return Err(ProtokenError::VerificationFailed(format!(
+            "expected {:?}, got {:?}",
+            expected_algorithm, token.algorithm
+        )));
+    }
+    let signing_input = token_bytes.get(..signed_len).ok_or_else(|| {
+        ProtokenError::MalformedEncoding("signature field offset out of range".into())
+    })?;
+    Ok((token, signing_input))
+}
+
+/// Parse the verified payload and check temporal claims.
+fn finish_verification(token: SignedToken, now: u64) -> Result<VerifiedToken, ProtokenError> {
+    let claims = deserialize_claims(&token.payload)?;
+    check_temporal_claims(&claims, now)?;
+    Ok(VerifiedToken {
+        algorithm: token.algorithm,
+        key_identifier: token.key_identifier,
+        claims,
+    })
 }
 
 /// Verify an HMAC-SHA256 signed token.
@@ -37,31 +86,19 @@ pub fn verify_hmac(
     key: &[u8],
     token_bytes: &[u8],
     now: u64,
-) -> Result<VerifiedClaims, ProtokenError> {
-    let token = deserialize_signed_token(token_bytes)?;
-    let payload = deserialize_payload(&token.payload_bytes)?;
-
-    if payload.metadata.algorithm != Algorithm::HmacSha256 {
+) -> Result<VerifiedToken, ProtokenError> {
+    if key.len() < HMAC_MIN_KEY_LEN {
         return Err(ProtokenError::VerificationFailed(format!(
-            "expected HMAC-SHA256, got {:?}",
-            payload.metadata.algorithm
+            "HMAC key too short: {} bytes (minimum {})",
+            key.len(),
+            HMAC_MIN_KEY_LEN
         )));
     }
+    let (token, signing_input) = parse_envelope(token_bytes, Algorithm::HmacSha256)?;
 
-    // Check key hash (constant-time comparison)
-    let expected_hash = compute_key_hash(key);
-    match &payload.metadata.key_identifier {
-        KeyIdentifier::KeyHash(hash) => {
-            verify_key_match(hash, &expected_hash)?;
-        }
-        KeyIdentifier::PublicKey(_) | KeyIdentifier::FullKeyHash(_) => {
-            return Err(ProtokenError::VerificationFailed(
-                "HMAC token must use KeyHash key identifier".into(),
-            ));
-        }
-    }
+    // The parser guarantees HMAC tokens use a KeyHash identifier.
+    check_key_identity(&token.key_identifier, key)?;
 
-    // Validate signature length before verification
     if token.signature.len() != HMAC_SHA256_SIG_LEN {
         return Err(ProtokenError::VerificationFailed(format!(
             "invalid HMAC-SHA256 signature: expected {} bytes, got {}",
@@ -70,19 +107,13 @@ pub fn verify_hmac(
         )));
     }
 
-    // Verify HMAC over the raw payload bytes
     let mut mac = Hmac::<Sha256>::new_from_slice(key)
         .map_err(|e| ProtokenError::VerificationFailed(format!("invalid HMAC key: {e}")))?;
-    mac.update(&token.payload_bytes);
+    mac.update(&signing_input);
     mac.verify_slice(&token.signature)
         .map_err(|_| ProtokenError::VerificationFailed("HMAC verification failed".into()))?;
 
-    check_temporal_claims(&payload.claims, now)?;
-
-    Ok(VerifiedClaims {
-        claims: payload.claims,
-        metadata: payload.metadata,
-    })
+    finish_verification(token, now)
 }
 
 /// Verify an Ed25519 signed token.
@@ -94,34 +125,10 @@ pub fn verify_ed25519(
     public_key_bytes: &[u8],
     token_bytes: &[u8],
     now: u64,
-) -> Result<VerifiedClaims, ProtokenError> {
-    let token = deserialize_signed_token(token_bytes)?;
-    let payload = deserialize_payload(&token.payload_bytes)?;
+) -> Result<VerifiedToken, ProtokenError> {
+    let (token, signing_input) = parse_envelope(token_bytes, Algorithm::Ed25519)?;
+    check_key_identity(&token.key_identifier, public_key_bytes)?;
 
-    if payload.metadata.algorithm != Algorithm::Ed25519 {
-        return Err(ProtokenError::VerificationFailed(format!(
-            "expected Ed25519, got {:?}",
-            payload.metadata.algorithm
-        )));
-    }
-
-    // Check key identity (constant-time comparison)
-    let expected_hash = compute_key_hash(public_key_bytes);
-    match &payload.metadata.key_identifier {
-        KeyIdentifier::KeyHash(hash) => {
-            verify_key_match(hash, &expected_hash)?;
-        }
-        KeyIdentifier::PublicKey(pk) => {
-            verify_key_match(pk, public_key_bytes)?;
-        }
-        KeyIdentifier::FullKeyHash(_) => {
-            return Err(ProtokenError::VerificationFailed(
-                "Ed25519 token cannot use FullKeyHash key identifier".into(),
-            ));
-        }
-    }
-
-    // Parse the public key and signature
     let vk_bytes: [u8; ED25519_PUBLIC_KEY_LEN] = public_key_bytes.try_into().map_err(|_| {
         ProtokenError::VerificationFailed(format!(
             "invalid Ed25519 public key: expected {} bytes, got {}",
@@ -142,18 +149,11 @@ pub fn verify_ed25519(
     })?;
     let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
 
-    verifying_key
-        .verify(&token.payload_bytes, &signature)
-        .map_err(|_| {
-            ProtokenError::VerificationFailed("Ed25519 signature verification failed".into())
-        })?;
+    verifying_key.verify(&signing_input, &signature).map_err(|_| {
+        ProtokenError::VerificationFailed("Ed25519 signature verification failed".into())
+    })?;
 
-    check_temporal_claims(&payload.claims, now)?;
-
-    Ok(VerifiedClaims {
-        claims: payload.claims,
-        metadata: payload.metadata,
-    })
+    finish_verification(token, now)
 }
 
 /// Verify an ML-DSA-44 signed token.
@@ -165,34 +165,10 @@ pub fn verify_mldsa44(
     public_key_bytes: &[u8],
     token_bytes: &[u8],
     now: u64,
-) -> Result<VerifiedClaims, ProtokenError> {
-    let token = deserialize_signed_token(token_bytes)?;
-    let payload = deserialize_payload(&token.payload_bytes)?;
+) -> Result<VerifiedToken, ProtokenError> {
+    let (token, signing_input) = parse_envelope(token_bytes, Algorithm::MlDsa44)?;
+    check_key_identity(&token.key_identifier, public_key_bytes)?;
 
-    if payload.metadata.algorithm != Algorithm::MlDsa44 {
-        return Err(ProtokenError::VerificationFailed(format!(
-            "expected ML-DSA-44, got {:?}",
-            payload.metadata.algorithm
-        )));
-    }
-
-    // Check key identity (constant-time comparison)
-    let expected_hash = compute_key_hash(public_key_bytes);
-    match &payload.metadata.key_identifier {
-        KeyIdentifier::KeyHash(hash) => {
-            verify_key_match(hash, &expected_hash)?;
-        }
-        KeyIdentifier::PublicKey(pk) => {
-            verify_key_match(pk, public_key_bytes)?;
-        }
-        KeyIdentifier::FullKeyHash(_) => {
-            return Err(ProtokenError::VerificationFailed(
-                "ML-DSA-44 token cannot use FullKeyHash key identifier".into(),
-            ));
-        }
-    }
-
-    // Parse the public key
     let vk_encoded: &ml_dsa::EncodedVerifyingKey<MlDsa44> =
         public_key_bytes.try_into().map_err(|_| {
             ProtokenError::VerificationFailed(format!(
@@ -203,140 +179,16 @@ pub fn verify_mldsa44(
         })?;
     let verifying_key = ml_dsa::VerifyingKey::<MlDsa44>::decode(vk_encoded);
 
-    // Parse the signature
     let signature =
         ml_dsa::Signature::<MlDsa44>::try_from(token.signature.as_slice()).map_err(|_| {
             ProtokenError::VerificationFailed("invalid ML-DSA-44 signature encoding".into())
         })?;
 
-    verifying_key
-        .verify(&token.payload_bytes, &signature)
-        .map_err(|_| {
-            ProtokenError::VerificationFailed("ML-DSA-44 signature verification failed".into())
-        })?;
-
-    check_temporal_claims(&payload.claims, now)?;
-
-    Ok(VerifiedClaims {
-        claims: payload.claims,
-        metadata: payload.metadata,
-    })
-}
-
-/// Verify a Groth16-Poseidon token (symmetric key SNARK proof).
-///
-/// `vk` is the Groth16 SNARK verifying key from `snark::setup()`.
-/// `token_bytes` is the serialized SignedToken wire bytes.
-/// `now` is the current Unix timestamp for expiry checking.
-pub fn verify_groth16(
-    vk: &SnarkVerifyingKey,
-    token_bytes: &[u8],
-    now: u64,
-) -> Result<VerifiedClaims, ProtokenError> {
-    let token = deserialize_signed_token(token_bytes)?;
-    let payload = deserialize_payload(&token.payload_bytes)?;
-
-    if payload.metadata.algorithm != Algorithm::Groth16Poseidon {
-        return Err(ProtokenError::VerificationFailed(format!(
-            "expected Groth16Poseidon, got {:?}",
-            payload.metadata.algorithm
-        )));
-    }
-
-    // Extract the full key hash from the key identifier
-    let key_hash = match &payload.metadata.key_identifier {
-        KeyIdentifier::FullKeyHash(hash) => hash,
-        _ => {
-            return Err(ProtokenError::VerificationFailed(
-                "Groth16 token must use FullKeyHash key identifier".into(),
-            ));
-        }
-    };
-
-    // Validate signature length
-    if token.signature.len() != HMAC_SHA256_SIG_LEN {
-        return Err(ProtokenError::VerificationFailed(format!(
-            "invalid Groth16 signature: expected {} bytes, got {}",
-            HMAC_SHA256_SIG_LEN,
-            token.signature.len()
-        )));
-    }
-    let signature: [u8; 32] = token.signature.as_slice().try_into().map_err(|_| {
-        ProtokenError::VerificationFailed("invalid Groth16 signature length".into())
+    verifying_key.verify(&signing_input, &signature).map_err(|_| {
+        ProtokenError::VerificationFailed("ML-DSA-44 signature verification failed".into())
     })?;
 
-    // Validate proof is present
-    if token.proof.is_empty() {
-        return Err(ProtokenError::VerificationFailed(
-            "Groth16 token is missing proof".into(),
-        ));
-    }
-
-    // Verify the SNARK proof
-    crate::snark::verify(vk, key_hash, &signature, &token.proof, &token.payload_bytes)?;
-
-    check_temporal_claims(&payload.claims, now)?;
-
-    Ok(VerifiedClaims {
-        claims: payload.claims,
-        metadata: payload.metadata,
-    })
-}
-
-/// Verify a Groth16-Hybrid token (SHA-256 key hash + Poseidon MAC SNARK proof).
-///
-/// `vk` is the Groth16 SNARK verifying key from `snark::setup_hybrid()`.
-/// `token_bytes` is the serialized SignedToken wire bytes.
-/// `now` is the current Unix timestamp for expiry checking.
-pub fn verify_groth16_hybrid(
-    vk: &SnarkVerifyingKey,
-    token_bytes: &[u8],
-    now: u64,
-) -> Result<VerifiedClaims, ProtokenError> {
-    let token = deserialize_signed_token(token_bytes)?;
-    let payload = deserialize_payload(&token.payload_bytes)?;
-
-    if payload.metadata.algorithm != Algorithm::Groth16Hybrid {
-        return Err(ProtokenError::VerificationFailed(format!(
-            "expected Groth16Hybrid, got {:?}",
-            payload.metadata.algorithm
-        )));
-    }
-
-    let key_hash = match &payload.metadata.key_identifier {
-        KeyIdentifier::FullKeyHash(hash) => hash,
-        _ => {
-            return Err(ProtokenError::VerificationFailed(
-                "Groth16Hybrid token must use FullKeyHash key identifier".into(),
-            ));
-        }
-    };
-
-    if token.signature.len() != HMAC_SHA256_SIG_LEN {
-        return Err(ProtokenError::VerificationFailed(format!(
-            "invalid Groth16Hybrid signature: expected {} bytes, got {}",
-            HMAC_SHA256_SIG_LEN,
-            token.signature.len()
-        )));
-    }
-    let signature: [u8; 32] = token.signature.as_slice().try_into().map_err(|_| {
-        ProtokenError::VerificationFailed("invalid Groth16Hybrid signature length".into())
-    })?;
-
-    if token.proof.is_empty() {
-        return Err(ProtokenError::VerificationFailed(
-            "Groth16Hybrid token is missing proof".into(),
-        ));
-    }
-
-    crate::snark::verify_hybrid(vk, key_hash, &signature, &token.proof, &token.payload_bytes)?;
-
-    check_temporal_claims(&payload.claims, now)?;
-
-    Ok(VerifiedClaims {
-        claims: payload.claims,
-        metadata: payload.metadata,
-    })
+    finish_verification(token, now)
 }
 
 /// Check expires_at and not_before against current time.
@@ -366,6 +218,10 @@ fn check_temporal_claims(claims: &Claims, now: u64) -> Result<(), ProtokenError>
 mod tests {
     use super::*;
 
+    use crate::serialize::{
+        deserialize_signed_token, serialize_claims, serialize_signed_token,
+        serialize_signing_input,
+    };
     use crate::sign::{
         generate_ed25519_key, generate_mldsa44_key, mldsa44_key_hash, sign_ed25519, sign_hmac,
         sign_mldsa44,
@@ -381,12 +237,11 @@ mod tests {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let token_bytes = sign_hmac(key, claims).unwrap();
+        let token_bytes = sign_hmac(key, &claims).unwrap();
 
-        let result = verify_hmac(key, &token_bytes, 1700000000);
-        assert!(result.is_ok());
-        let verified = result.unwrap();
+        let verified = verify_hmac(key, &token_bytes, 1700000000).unwrap();
         assert_eq!(verified.claims.expires_at, u64::MAX);
+        assert_eq!(verified.algorithm, Algorithm::HmacSha256);
     }
 
     #[test]
@@ -397,7 +252,7 @@ mod tests {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let token_bytes = sign_hmac(key, claims).unwrap();
+        let token_bytes = sign_hmac(key, &claims).unwrap();
 
         let result = verify_hmac(wrong_key, &token_bytes, 0);
         assert!(result.is_err());
@@ -410,10 +265,27 @@ mod tests {
             expires_at: 1000,
             ..Default::default()
         };
-        let token_bytes = sign_hmac(key, claims).unwrap();
+        let token_bytes = sign_hmac(key, &claims).unwrap();
 
         let result = verify_hmac(key, &token_bytes, 2000);
         assert!(matches!(result, Err(ProtokenError::TokenExpired { .. })));
+    }
+
+    #[test]
+    fn test_verify_hmac_at_expiry_boundary() {
+        // now == expires_at is still valid; now == expires_at + 1 is not.
+        let key: &[u8] = TEST_HMAC_KEY;
+        let claims = Claims {
+            expires_at: 5000,
+            ..Default::default()
+        };
+        let token_bytes = sign_hmac(key, &claims).unwrap();
+
+        assert!(verify_hmac(key, &token_bytes, 5000).is_ok());
+        assert!(matches!(
+            verify_hmac(key, &token_bytes, 5001),
+            Err(ProtokenError::TokenExpired { .. })
+        ));
     }
 
     #[test]
@@ -423,9 +295,10 @@ mod tests {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let mut token_bytes = sign_hmac(key, claims).unwrap();
-        // Corrupt a byte in the payload area (after the proto3 envelope header)
-        token_bytes[5] ^= 0xFF;
+        let mut token_bytes = sign_hmac(key, &claims).unwrap();
+        // Corrupt a byte inside the payload field
+        let last = token_bytes.len() - 40;
+        token_bytes[last] ^= 0xFF;
 
         let result = verify_hmac(key, &token_bytes, 0);
         assert!(result.is_err());
@@ -438,7 +311,7 @@ mod tests {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let mut token_bytes = sign_hmac(key, claims).unwrap();
+        let mut token_bytes = sign_hmac(key, &claims).unwrap();
         let last = token_bytes.len() - 1;
         token_bytes[last] ^= 0xFF;
 
@@ -454,7 +327,21 @@ mod tests {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let token_bytes = sign_ed25519(&seed, claims, key_id).unwrap();
+        let token_bytes = sign_ed25519(&seed, &claims, key_id).unwrap();
+
+        let result = verify_ed25519(&pk, &token_bytes, 1700000000);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_ed25519_with_embedded_public_key() {
+        let (seed, pk) = generate_ed25519_key().unwrap();
+        let key_id = KeyIdentifier::PublicKey(pk.clone());
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let token_bytes = sign_ed25519(&seed, &claims, key_id).unwrap();
 
         let result = verify_ed25519(&pk, &token_bytes, 1700000000);
         assert!(result.is_ok());
@@ -468,10 +355,25 @@ mod tests {
             expires_at: 1000,
             ..Default::default()
         };
-        let token_bytes = sign_ed25519(&seed, claims, key_id).unwrap();
+        let token_bytes = sign_ed25519(&seed, &claims, key_id).unwrap();
 
         let result = verify_ed25519(&pk, &token_bytes, 2000);
         assert!(matches!(result, Err(ProtokenError::TokenExpired { .. })));
+    }
+
+    #[test]
+    fn test_verify_ed25519_wrong_key() {
+        let (seed, pk) = generate_ed25519_key().unwrap();
+        let (_seed2, pk2) = generate_ed25519_key().unwrap();
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let token_bytes = sign_ed25519(&seed, &claims, key_id).unwrap();
+
+        let result = verify_ed25519(&pk2, &token_bytes, 0);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -482,7 +384,7 @@ mod tests {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let mut token_bytes = sign_ed25519(&seed, claims, key_id).unwrap();
+        let mut token_bytes = sign_ed25519(&seed, &claims, key_id).unwrap();
         let last = token_bytes.len() - 1;
         token_bytes[last] ^= 0xFF;
 
@@ -499,7 +401,7 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_hmac(key, claims).unwrap();
+        let token_bytes = sign_hmac(key, &claims).unwrap();
 
         for i in 0..token_bytes.len() {
             let mut corrupted = token_bytes.clone();
@@ -523,7 +425,7 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_hmac(key, claims).unwrap();
+        let token_bytes = sign_hmac(key, &claims).unwrap();
 
         for i in 0..token_bytes.len() {
             let mut corrupted = token_bytes.clone();
@@ -548,7 +450,7 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_ed25519(&seed, claims, key_id).unwrap();
+        let token_bytes = sign_ed25519(&seed, &claims, key_id).unwrap();
 
         for i in 0..token_bytes.len() {
             let mut corrupted = token_bytes.clone();
@@ -571,7 +473,7 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_hmac(key, claims).unwrap();
+        let token_bytes = sign_hmac(key, &claims).unwrap();
 
         // Before not_before -> should fail
         let result = verify_hmac(key, &token_bytes, 3000);
@@ -581,12 +483,55 @@ mod tests {
         ));
 
         // At not_before -> should succeed
-        let result = verify_hmac(key, &token_bytes, 5000);
-        assert!(result.is_ok());
+        assert!(verify_hmac(key, &token_bytes, 5000).is_ok());
 
         // After not_before -> should succeed
-        let result = verify_hmac(key, &token_bytes, 6000);
-        assert!(result.is_ok());
+        assert!(verify_hmac(key, &token_bytes, 6000).is_ok());
+    }
+
+    #[test]
+    fn test_verify_rejects_wrong_algorithm_token() {
+        // A valid HMAC token must not verify as Ed25519 or ML-DSA-44 —
+        // the algorithm is bound into the envelope.
+        let key: &[u8] = TEST_HMAC_KEY;
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let token_bytes = sign_hmac(key, &claims).unwrap();
+
+        let (_seed, pk) = generate_ed25519_key().unwrap();
+        let result = verify_ed25519(&pk, &token_bytes, 1000);
+        assert!(
+            matches!(&result, Err(ProtokenError::VerificationFailed(m)) if m.contains("expected")),
+            "HMAC token must not pass Ed25519 verification, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_verify_rejects_algorithm_swap() {
+        // Take a valid HMAC token and rewrite its algorithm field to Ed25519.
+        // The signature covers the algorithm, so verification must fail even
+        // if everything else is intact.
+        let key: &[u8] = TEST_HMAC_KEY;
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let token_bytes = sign_hmac(key, &claims).unwrap();
+        let token = deserialize_signed_token(&token_bytes).unwrap();
+
+        let swapped = SignedToken {
+            algorithm: Algorithm::Ed25519,
+            ..token
+        };
+        let swapped_bytes = serialize_signed_token(&swapped);
+
+        // As an Ed25519 token, the 32-byte HMAC tag is not a valid signature length.
+        let (_seed, pk) = generate_ed25519_key().unwrap();
+        assert!(verify_ed25519(&pk, &swapped_bytes, 1000).is_err());
+        // And it no longer parses as an HMAC token.
+        assert!(verify_hmac(key, &swapped_bytes, 1000).is_err());
     }
 
     // ML-DSA-44 verification tests
@@ -599,7 +544,7 @@ mod tests {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let token_bytes = sign_mldsa44(&sk, claims, key_id).unwrap();
+        let token_bytes = sign_mldsa44(&sk, &claims, key_id).unwrap();
 
         let result = verify_mldsa44(&pk, &token_bytes, 1700000000);
         assert!(result.is_ok());
@@ -613,7 +558,7 @@ mod tests {
             expires_at: 1000,
             ..Default::default()
         };
-        let token_bytes = sign_mldsa44(&sk, claims, key_id).unwrap();
+        let token_bytes = sign_mldsa44(&sk, &claims, key_id).unwrap();
 
         let result = verify_mldsa44(&pk, &token_bytes, 2000);
         assert!(matches!(result, Err(ProtokenError::TokenExpired { .. })));
@@ -628,7 +573,7 @@ mod tests {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let token_bytes = sign_mldsa44(&sk1, claims, key_id).unwrap();
+        let token_bytes = sign_mldsa44(&sk1, &claims, key_id).unwrap();
 
         let result = verify_mldsa44(&pk2, &token_bytes, 0);
         assert!(result.is_err());
@@ -642,7 +587,7 @@ mod tests {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let mut token_bytes = sign_mldsa44(&sk, claims, key_id).unwrap();
+        let mut token_bytes = sign_mldsa44(&sk, &claims, key_id).unwrap();
         let last = token_bytes.len() - 1;
         token_bytes[last] ^= 0xFF;
 
@@ -658,7 +603,7 @@ mod tests {
             expires_at: u64::MAX,
             ..Default::default()
         };
-        let token_bytes = sign_mldsa44(&sk, claims, key_id).unwrap();
+        let token_bytes = sign_mldsa44(&sk, &claims, key_id).unwrap();
 
         let result = verify_mldsa44(&pk, &token_bytes, 0);
         assert!(result.is_ok());
@@ -674,7 +619,7 @@ mod tests {
             ..Default::default()
         };
 
-        let token_bytes = sign_mldsa44(&sk, claims, key_id).unwrap();
+        let token_bytes = sign_mldsa44(&sk, &claims, key_id).unwrap();
 
         // Before not_before -> should fail
         let result = verify_mldsa44(&pk, &token_bytes, 3000);
@@ -684,354 +629,7 @@ mod tests {
         ));
 
         // At not_before -> should succeed
-        let result = verify_mldsa44(&pk, &token_bytes, 5000);
-        assert!(result.is_ok());
-    }
-
-    // --- Mutation-testing-driven coverage additions ---
-
-    /// Build a token with key A's signature but key B's key_hash.
-    /// This isolates `verify_key_match` — the signature is valid but the
-    /// key identity check should fail first with `KeyHashMismatch`.
-    fn build_hmac_token_with_wrong_key_hash(sign_key: &[u8], verify_key: &[u8]) -> Vec<u8> {
-        // Manually build a payload that claims key_hash(verify_key) but sign with sign_key.
-        let payload = Payload {
-            metadata: Metadata {
-                version: Version::V0,
-                algorithm: Algorithm::HmacSha256,
-                key_identifier: KeyIdentifier::KeyHash(compute_key_hash(verify_key)),
-            },
-            claims: Claims {
-                expires_at: u64::MAX,
-                ..Default::default()
-            },
-        };
-        let payload_bytes = crate::serialize::serialize_payload(&payload);
-        let mut mac = Hmac::<Sha256>::new_from_slice(sign_key).unwrap();
-        mac.update(&payload_bytes);
-        let tag = mac.finalize().into_bytes();
-        crate::serialize::serialize_signed_token(&SignedToken {
-            payload_bytes,
-            signature: tag.to_vec(),
-            proof: Vec::new(),
-        })
-    }
-
-    #[test]
-    fn test_verify_key_match_rejects_mismatch() {
-        // verify_key_match should produce KeyHashMismatch specifically — not
-        // just any error — when the key hash doesn't match. This proves the
-        // key identity check is an independent defense layer, not shadowed by
-        // signature verification.
-        let key_a: &[u8] = TEST_HMAC_KEY;
-        let key_b: &[u8] = WRONG_HMAC_KEY;
-
-        // Token signed with key_a but claims key_b's hash. Verify with key_a.
-        // The signature IS valid for key_a, but key_hash in payload is key_b's.
-        let token = build_hmac_token_with_wrong_key_hash(key_a, key_b);
-        let result = verify_hmac(key_a, &token, 1000);
-        assert!(
-            matches!(result, Err(ProtokenError::KeyHashMismatch)),
-            "expected KeyHashMismatch, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn test_verify_key_match_accepts_match() {
-        // Positive case: key_hash matches, signature valid → Ok.
-        let key: &[u8] = TEST_HMAC_KEY;
-        let token = build_hmac_token_with_wrong_key_hash(key, key);
-        assert!(verify_hmac(key, &token, 1000).is_ok());
-    }
-
-    #[test]
-    fn test_verify_ed25519_key_hash_mismatch() {
-        // Sign with key A using key B's key hash; verify with key A.
-        // Signature is valid for A, but key identity check must fail.
-        let (seed_a, pk_a) = generate_ed25519_key().unwrap();
-        let (_seed_b, pk_b) = generate_ed25519_key().unwrap();
-        let claims = Claims {
-            expires_at: u64::MAX,
-            ..Default::default()
-        };
-        let token_bytes = sign_ed25519(
-            &seed_a,
-            claims,
-            KeyIdentifier::KeyHash(compute_key_hash(&pk_b)),
-        )
-        .unwrap();
-        let result = verify_ed25519(&pk_a, &token_bytes, 1000);
-        assert!(
-            matches!(result, Err(ProtokenError::KeyHashMismatch)),
-            "expected KeyHashMismatch, got {result:?}"
-        );
-    }
-
-    // Groth16-Poseidon verification tests
-
-    fn groth16_test_token() -> (crate::snark::SnarkVerifyingKey, Vec<u8>, [u8; 32]) {
-        let (pk, vk) = crate::snark::setup().unwrap();
-        let key = [0x42u8; 32];
-        let claims = Claims {
-            expires_at: u64::MAX,
-            ..Default::default()
-        };
-        let token_bytes = crate::sign::sign_groth16(&pk, &key, claims).unwrap();
-        (vk, token_bytes, key)
-    }
-
-    #[test]
-    fn test_verify_groth16_valid() {
-        let (vk, token_bytes, _key) = groth16_test_token();
-        let result = verify_groth16(&vk, &token_bytes, 1700000000);
-        assert!(result.is_ok());
-        let verified = result.unwrap();
-        assert_eq!(verified.metadata.algorithm, Algorithm::Groth16Poseidon);
-    }
-
-    #[test]
-    fn test_verify_groth16_expired() {
-        let (pk, vk) = crate::snark::setup().unwrap();
-        let key = [0x42u8; 32];
-        let claims = Claims {
-            expires_at: 1000,
-            ..Default::default()
-        };
-        let token_bytes = crate::sign::sign_groth16(&pk, &key, claims).unwrap();
-        let result = verify_groth16(&vk, &token_bytes, 2000);
-        assert!(matches!(result, Err(ProtokenError::TokenExpired { .. })));
-    }
-
-    #[test]
-    fn test_verify_groth16_not_before() {
-        let (pk, vk) = crate::snark::setup().unwrap();
-        let key = [0x42u8; 32];
-        let claims = Claims {
-            expires_at: u64::MAX,
-            not_before: 5000,
-            ..Default::default()
-        };
-        let token_bytes = crate::sign::sign_groth16(&pk, &key, claims).unwrap();
-
-        let result = verify_groth16(&vk, &token_bytes, 3000);
-        assert!(matches!(
-            result,
-            Err(ProtokenError::TokenNotYetValid { .. })
-        ));
-
-        let result = verify_groth16(&vk, &token_bytes, 5000);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_verify_groth16_corrupted_key_hash() {
-        let (vk, mut token_bytes, _key) = groth16_test_token();
-        // The key hash is inside the payload submessage. Find and corrupt it.
-        // The token structure: field 1 (payload LV), field 2 (sig LV), field 3 (proof LV).
-        // Corrupt a byte deep in the payload area where the key_hash lives.
-        // key_hash is 32 bytes after algorithm+key_id_type fields in the payload.
-        // We corrupt byte at offset ~10 which is inside the payload.
-        token_bytes[10] ^= 0x01;
-        let result = verify_groth16(&vk, &token_bytes, 1700000000);
-        assert!(
-            result.is_err(),
-            "corrupted key hash should fail verification"
-        );
-    }
-
-    #[test]
-    fn test_verify_groth16_corrupted_signature() {
-        let (vk, token_bytes, _key) = groth16_test_token();
-        let token = crate::serialize::deserialize_signed_token(&token_bytes).unwrap();
-        // Corrupt the signature
-        let mut bad_sig = token.signature.clone();
-        bad_sig[0] ^= 0xFF;
-        let bad_token = crate::types::SignedToken {
-            payload_bytes: token.payload_bytes,
-            signature: bad_sig,
-            proof: token.proof,
-        };
-        let bad_bytes = crate::serialize::serialize_signed_token(&bad_token);
-        let result = verify_groth16(&vk, &bad_bytes, 1700000000);
-        assert!(
-            matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("proof verification failed")),
-            "corrupted signature should fail with proof verification error, got: {result:?}"
-        );
-    }
-
-    #[test]
-    fn test_verify_groth16_corrupted_proof() {
-        let (vk, token_bytes, _key) = groth16_test_token();
-        let token = crate::serialize::deserialize_signed_token(&token_bytes).unwrap();
-        // Corrupt the proof
-        let mut bad_proof = token.proof.clone();
-        bad_proof[0] ^= 0x01;
-        let bad_token = crate::types::SignedToken {
-            payload_bytes: token.payload_bytes,
-            signature: token.signature,
-            proof: bad_proof,
-        };
-        let bad_bytes = crate::serialize::serialize_signed_token(&bad_token);
-        let result = verify_groth16(&vk, &bad_bytes, 1700000000);
-        assert!(result.is_err(), "corrupted proof should fail verification");
-    }
-
-    #[test]
-    fn test_verify_groth16_truncated_proof() {
-        let (vk, token_bytes, _key) = groth16_test_token();
-        let token = crate::serialize::deserialize_signed_token(&token_bytes).unwrap();
-        // Truncate the proof
-        let bad_token = crate::types::SignedToken {
-            payload_bytes: token.payload_bytes,
-            signature: token.signature,
-            proof: token.proof[..64].to_vec(),
-        };
-        let bad_bytes = crate::serialize::serialize_signed_token(&bad_token);
-        let result = verify_groth16(&vk, &bad_bytes, 1700000000);
-        assert!(
-            matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("invalid Groth16 proof")),
-            "truncated proof should fail with invalid proof error, got: {result:?}"
-        );
-    }
-
-    #[test]
-    fn test_verify_groth16_empty_proof() {
-        let (vk, token_bytes, _key) = groth16_test_token();
-        let token = crate::serialize::deserialize_signed_token(&token_bytes).unwrap();
-        // Empty proof
-        let bad_token = crate::types::SignedToken {
-            payload_bytes: token.payload_bytes,
-            signature: token.signature,
-            proof: vec![],
-        };
-        let bad_bytes = crate::serialize::serialize_signed_token(&bad_token);
-        let result = verify_groth16(&vk, &bad_bytes, 1700000000);
-        assert!(
-            matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("missing proof")),
-            "empty proof should fail with missing proof error, got: {result:?}"
-        );
-    }
-
-    #[test]
-    fn test_verify_groth16_wrong_vk() {
-        let (_vk1, token_bytes, _key) = groth16_test_token();
-        // Generate a different VK (from a different trusted setup)
-        let (_pk2, vk2) = crate::snark::setup().unwrap();
-        let result = verify_groth16(&vk2, &token_bytes, 1700000000);
-        assert!(
-            matches!(&result, Err(ProtokenError::VerificationFailed(msg)) if msg.contains("proof verification failed")),
-            "wrong verifying key should fail, got: {result:?}"
-        );
-    }
-
-    #[test]
-    fn test_verify_groth16_with_full_claims() {
-        let (pk, vk) = crate::snark::setup().unwrap();
-        let key = [0x42u8; 32];
-        let claims = Claims {
-            expires_at: u64::MAX,
-            not_before: 1000,
-            issued_at: 1000,
-            subject: "snark-user".into(),
-            audience: "snark-service".into(),
-            scopes: vec!["admin".into(), "read".into(), "write".into()],
-        };
-        let token_bytes = crate::sign::sign_groth16(&pk, &key, claims.clone()).unwrap();
-        let result = verify_groth16(&vk, &token_bytes, 2000);
-        assert!(result.is_ok());
-        let verified = result.unwrap();
-        assert_eq!(verified.claims, claims);
-        assert_eq!(verified.metadata.algorithm, Algorithm::Groth16Poseidon);
-    }
-
-    // ---- Groth16Hybrid verify tests ----
-    //
-    // SHA-256 circuit needs a large stack in debug mode.
-
-    fn run_with_large_stack<F: FnOnce() + Send + 'static>(f: F) {
-        std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(f)
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    fn groth16_hybrid_test_token() -> (crate::snark::SnarkVerifyingKey, Vec<u8>) {
-        let (pk, vk) = crate::snark::setup_hybrid().unwrap();
-        let key = [0x42u8; 32];
-        let claims = Claims {
-            expires_at: 1800000000,
-            ..Default::default()
-        };
-        let token_bytes = crate::sign::sign_groth16_hybrid(&pk, &key, claims).unwrap();
-        (vk, token_bytes)
-    }
-
-    #[test]
-    fn test_verify_groth16_hybrid_valid() {
-        run_with_large_stack(|| {
-            let (vk, token_bytes) = groth16_hybrid_test_token();
-            let result = verify_groth16_hybrid(&vk, &token_bytes, 1700000000);
-            assert!(result.is_ok(), "hybrid verify failed: {result:?}");
-            let verified = result.unwrap();
-            assert_eq!(verified.metadata.algorithm, Algorithm::Groth16Hybrid);
-        });
-    }
-
-    #[test]
-    fn test_verify_groth16_hybrid_expired() {
-        run_with_large_stack(|| {
-            let (pk, vk) = crate::snark::setup_hybrid().unwrap();
-            let key = [0x42u8; 32];
-            let claims = Claims {
-                expires_at: 1000,
-                ..Default::default()
-            };
-            let token_bytes = crate::sign::sign_groth16_hybrid(&pk, &key, claims).unwrap();
-            let result = verify_groth16_hybrid(&vk, &token_bytes, 2000);
-            assert!(matches!(result, Err(ProtokenError::TokenExpired { .. })));
-        });
-    }
-
-    #[test]
-    fn test_verify_groth16_hybrid_corrupted_proof() {
-        run_with_large_stack(|| {
-            let (vk, token_bytes) = groth16_hybrid_test_token();
-            let token = crate::serialize::deserialize_signed_token(&token_bytes).unwrap();
-            let mut bad_proof = token.proof.clone();
-            bad_proof[0] ^= 0x01;
-            let bad_token = crate::types::SignedToken {
-                payload_bytes: token.payload_bytes,
-                signature: token.signature,
-                proof: bad_proof,
-            };
-            let bad_bytes = crate::serialize::serialize_signed_token(&bad_token);
-            let result = verify_groth16_hybrid(&vk, &bad_bytes, 1700000000);
-            assert!(result.is_err(), "corrupted proof should fail verification");
-        });
-    }
-
-    #[test]
-    fn test_verify_groth16_hybrid_with_full_claims() {
-        run_with_large_stack(|| {
-            let (pk, vk) = crate::snark::setup_hybrid().unwrap();
-            let key = [0x42u8; 32];
-            let claims = Claims {
-                expires_at: u64::MAX,
-                not_before: 1000,
-                issued_at: 1000,
-                subject: "hybrid-user".into(),
-                audience: "hybrid-service".into(),
-                scopes: vec!["admin".into(), "read".into()],
-            };
-            let token_bytes = crate::sign::sign_groth16_hybrid(&pk, &key, claims.clone()).unwrap();
-            let result = verify_groth16_hybrid(&vk, &token_bytes, 2000);
-            assert!(result.is_ok());
-            let verified = result.unwrap();
-            assert_eq!(verified.claims, claims);
-            assert_eq!(verified.metadata.algorithm, Algorithm::Groth16Hybrid);
-        });
+        assert!(verify_mldsa44(&pk, &token_bytes, 5000).is_ok());
     }
 
     #[test]
@@ -1047,11 +645,135 @@ mod tests {
             scopes: vec!["admin".into(), "read".into(), "write".into()],
         };
 
-        let token_bytes = sign_mldsa44(&sk, claims.clone(), key_id).unwrap();
-        let result = verify_mldsa44(&pk, &token_bytes, 2000);
-        assert!(result.is_ok());
-        let verified = result.unwrap();
+        let token_bytes = sign_mldsa44(&sk, &claims, key_id).unwrap();
+        let verified = verify_mldsa44(&pk, &token_bytes, 2000).unwrap();
         assert_eq!(verified.claims, claims);
-        assert_eq!(verified.metadata.algorithm, Algorithm::MlDsa44);
+        assert_eq!(verified.algorithm, Algorithm::MlDsa44);
+    }
+
+    /// Build a token with sign_key's signature but verify_key's key_hash.
+    /// This isolates `verify_key_match` — the signature is valid but the
+    /// key identity check should fail first with `KeyHashMismatch`.
+    fn build_hmac_token_with_key_hash_of(sign_key: &[u8], hash_key: &[u8]) -> Vec<u8> {
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(hash_key));
+        let payload = serialize_claims(&claims);
+        let signing_input =
+            serialize_signing_input(Version::V0, Algorithm::HmacSha256, &key_id, &payload);
+        let mut mac = Hmac::<Sha256>::new_from_slice(sign_key).unwrap();
+        mac.update(&signing_input);
+        let tag = mac.finalize().into_bytes();
+        serialize_signed_token(&SignedToken {
+            version: Version::V0,
+            algorithm: Algorithm::HmacSha256,
+            key_identifier: key_id,
+            payload,
+            signature: tag.to_vec(),
+        })
+    }
+
+    #[test]
+    fn test_verify_key_match_rejects_mismatch() {
+        // verify_key_match should produce KeyHashMismatch specifically — not
+        // just any error — when the key hash doesn't match. This proves the
+        // key identity check is an independent defense layer, not shadowed by
+        // signature verification.
+        let key_a: &[u8] = TEST_HMAC_KEY;
+        let key_b: &[u8] = WRONG_HMAC_KEY;
+
+        // Token signed with key_a but claims key_b's hash. Verify with key_a.
+        let token = build_hmac_token_with_key_hash_of(key_a, key_b);
+        let result = verify_hmac(key_a, &token, 1000);
+        assert!(
+            matches!(result, Err(ProtokenError::KeyHashMismatch)),
+            "expected KeyHashMismatch, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_verify_key_match_accepts_match() {
+        // Positive case: key_hash matches, signature valid → Ok.
+        let key: &[u8] = TEST_HMAC_KEY;
+        let token = build_hmac_token_with_key_hash_of(key, key);
+        assert!(verify_hmac(key, &token, 1000).is_ok());
+    }
+
+    #[test]
+    fn test_verify_ed25519_key_hash_mismatch() {
+        // Sign with key A using key B's key hash; verify with key A.
+        // Signature is valid for A, but key identity check must fail.
+        let (seed_a, pk_a) = generate_ed25519_key().unwrap();
+        let (_seed_b, pk_b) = generate_ed25519_key().unwrap();
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let token_bytes = sign_ed25519(
+            &seed_a,
+            &claims,
+            KeyIdentifier::KeyHash(compute_key_hash(&pk_b)),
+        )
+        .unwrap();
+        let result = verify_ed25519(&pk_a, &token_bytes, 1000);
+        assert!(
+            matches!(result, Err(ProtokenError::KeyHashMismatch)),
+            "expected KeyHashMismatch, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_verify_rejects_malleated_version_prefix() {
+        // Regression test: prepending an explicit version=0 field (bytes
+        // 0x08 0x00) once produced a byte-distinct token that still verified,
+        // because verification re-canonicalized the signing input. Both the
+        // decoder (rejects explicit defaults) and verification over the
+        // received wire prefix must reject it.
+        let key: &[u8] = TEST_HMAC_KEY;
+        let claims = Claims {
+            expires_at: u64::MAX,
+            ..Default::default()
+        };
+        let token_bytes = sign_hmac(key, &claims).unwrap();
+
+        let mut malleated = vec![0x08, 0x00];
+        malleated.extend_from_slice(&token_bytes);
+        assert!(
+            verify_hmac(key, &malleated, 1000).is_err(),
+            "byte-distinct token with explicit version=0 must not verify"
+        );
+    }
+
+    #[test]
+    fn test_verify_rejects_zero_expiry_claims() {
+        // A token whose payload has expires_at=0 (plus another claim so the
+        // payload is non-empty) must fail temporal validation.
+        let key: &[u8] = TEST_HMAC_KEY;
+        let claims = Claims {
+            issued_at: 1000,
+            ..Default::default()
+        };
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(key));
+        let payload = serialize_claims(&claims);
+        let signing_input =
+            serialize_signing_input(Version::V0, Algorithm::HmacSha256, &key_id, &payload);
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
+        mac.update(&signing_input);
+        let tag = mac.finalize().into_bytes();
+        let token_bytes = serialize_signed_token(&SignedToken {
+            version: Version::V0,
+            algorithm: Algorithm::HmacSha256,
+            key_identifier: key_id,
+            payload,
+            signature: tag.to_vec(),
+        });
+
+        let result = verify_hmac(key, &token_bytes, 1000);
+        assert!(
+            matches!(&result, Err(ProtokenError::VerificationFailed(m)) if m.contains("no expiry")),
+            "expected no-expiry error, got {result:?}"
+        );
     }
 }

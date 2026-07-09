@@ -18,11 +18,25 @@ use crate::types::*;
 /// A serialized signing key (symmetric or asymmetric).
 /// The `secret_key` field is wrapped in `Zeroizing` so it is automatically
 /// zeroed from memory when dropped.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SigningKey {
     pub algorithm: Algorithm,
     pub secret_key: Zeroizing<Vec<u8>>,
     pub public_key: Vec<u8>,
+}
+
+/// Manual Debug that redacts the secret key so it cannot leak into logs.
+impl std::fmt::Debug for SigningKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SigningKey")
+            .field("algorithm", &self.algorithm)
+            .field(
+                "secret_key",
+                &format_args!("[{} bytes redacted]", self.secret_key.len()),
+            )
+            .field("public_key", &self.public_key)
+            .finish()
+    }
 }
 
 /// A serialized verifying key (asymmetric only).
@@ -34,10 +48,7 @@ pub struct VerifyingKey {
 
 /// Extract the VerifyingKey from a SigningKey (asymmetric keys only).
 pub fn extract_verifying_key(sk: &SigningKey) -> Result<VerifyingKey, ProtokenError> {
-    if sk.algorithm == Algorithm::HmacSha256
-        || sk.algorithm == Algorithm::Groth16Poseidon
-        || sk.algorithm == Algorithm::Groth16Hybrid
-    {
+    if sk.algorithm == Algorithm::HmacSha256 {
         return Err(ProtokenError::MalformedEncoding(
             "symmetric algorithm; no verifying key to extract".into(),
         ));
@@ -107,26 +118,14 @@ pub fn deserialize_signing_key(data: &[u8]) -> Result<SigningKey, ProtokenError>
         match (field_number, wire_type) {
             (1, 0) => algorithm = proto3::read_u32(data, &mut pos)?,
             (2, 2) => {
-                let bytes = proto3::read_bytes_value(data, &mut pos)?;
-                if bytes.len() > MAX_SECRET_KEY_BYTES {
-                    return Err(ProtokenError::MalformedEncoding(format!(
-                        "secret key too large: {} bytes (max {})",
-                        bytes.len(),
-                        MAX_SECRET_KEY_BYTES
-                    )));
-                }
-                secret_key = bytes.to_vec();
+                secret_key =
+                    crate::serialize::read_bounded_bytes(data, &mut pos, MAX_SECRET_KEY_BYTES, "secret key")?
+                        .to_vec();
             }
             (3, 2) => {
-                let bytes = proto3::read_bytes_value(data, &mut pos)?;
-                if bytes.len() > MAX_PUBLIC_KEY_BYTES {
-                    return Err(ProtokenError::MalformedEncoding(format!(
-                        "public key too large: {} bytes (max {})",
-                        bytes.len(),
-                        MAX_PUBLIC_KEY_BYTES
-                    )));
-                }
-                public_key = bytes.to_vec();
+                public_key =
+                    crate::serialize::read_bounded_bytes(data, &mut pos, MAX_PUBLIC_KEY_BYTES, "public key")?
+                        .to_vec();
             }
             (_, _) => {
                 return Err(ProtokenError::MalformedEncoding(format!(
@@ -176,15 +175,9 @@ pub fn deserialize_verifying_key(data: &[u8]) -> Result<VerifyingKey, ProtokenEr
         match (field_number, wire_type) {
             (1, 0) => algorithm = proto3::read_u32(data, &mut pos)?,
             (2, 2) => {
-                let bytes = proto3::read_bytes_value(data, &mut pos)?;
-                if bytes.len() > MAX_PUBLIC_KEY_BYTES {
-                    return Err(ProtokenError::MalformedEncoding(format!(
-                        "public key too large: {} bytes (max {})",
-                        bytes.len(),
-                        MAX_PUBLIC_KEY_BYTES
-                    )));
-                }
-                public_key = bytes.to_vec();
+                public_key =
+                    crate::serialize::read_bounded_bytes(data, &mut pos, MAX_PUBLIC_KEY_BYTES, "public key")?
+                        .to_vec();
             }
             (_, _) => {
                 return Err(ProtokenError::MalformedEncoding(format!(
@@ -198,11 +191,7 @@ pub fn deserialize_verifying_key(data: &[u8]) -> Result<VerifyingKey, ProtokenEr
     let algorithm =
         Algorithm::from_byte(algo_byte).ok_or(ProtokenError::InvalidAlgorithm(algo_byte))?;
 
-    // Validate
-    if algorithm == Algorithm::HmacSha256
-        || algorithm == Algorithm::Groth16Poseidon
-        || algorithm == Algorithm::Groth16Hybrid
-    {
+    if algorithm == Algorithm::HmacSha256 {
         return Err(ProtokenError::MalformedEncoding(
             "symmetric algorithm cannot be a verifying key".into(),
         ));
@@ -262,30 +251,14 @@ fn validate_signing_key_sizes(
                 )));
             }
         }
-        Algorithm::Groth16Poseidon | Algorithm::Groth16Hybrid => {
-            // Groth16 uses a symmetric key (same as HMAC): at least 32 bytes.
-            if secret_key.len() < HMAC_MIN_KEY_LEN {
-                return Err(ProtokenError::MalformedEncoding(format!(
-                    "Groth16 symmetric key too short: {} bytes (minimum {})",
-                    secret_key.len(),
-                    HMAC_MIN_KEY_LEN
-                )));
-            }
-        }
     }
     Ok(())
 }
 
 fn validate_public_key_size(algorithm: Algorithm, public_key: &[u8]) -> Result<(), ProtokenError> {
-    let expected = match algorithm {
-        Algorithm::Ed25519 => ED25519_PUBLIC_KEY_LEN,
-        Algorithm::MlDsa44 => MLDSA44_PUBLIC_KEY_LEN,
-        Algorithm::HmacSha256 | Algorithm::Groth16Poseidon | Algorithm::Groth16Hybrid => {
-            return Err(ProtokenError::MalformedEncoding(
-                "symmetric algorithm has no public key".into(),
-            ));
-        }
-    };
+    let expected = algorithm.public_key_len().ok_or_else(|| {
+        ProtokenError::MalformedEncoding("symmetric algorithm has no public key".into())
+    })?;
     if public_key.len() != expected {
         return Err(ProtokenError::MalformedEncoding(format!(
             "{:?} public key must be {} bytes, got {}",
@@ -446,41 +419,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_zk_symmetric_verifying_key() {
-        // Groth16 algorithms cannot be VerifyingKey (symmetric).
-        // Exercises keys.rs:203/204 || branches. Must match the specific
-        // "cannot be a verifying key" message, not the validate_public_key_size
-        // "has no public key" message that would also fire as a fallback.
-        for alg in [4u32, 5u32] {
-            let mut data = Vec::new();
-            proto3::encode_uint32(1, alg, &mut data);
-            proto3::encode_bytes(2, &[0; 32], &mut data);
-            let err = deserialize_verifying_key(&data).unwrap_err();
-            assert!(
-                matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("cannot be a verifying key")),
-                "alg {alg} should hit the pre-validation symmetric check, got {err:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_extract_verifying_key_zk_symmetric_fails() {
-        // Exercises keys.rs:38/39 || branches.
-        for alg in [Algorithm::Groth16Poseidon, Algorithm::Groth16Hybrid] {
-            let sk = SigningKey {
-                algorithm: alg,
-                secret_key: Zeroizing::new(vec![0xAB; 32]),
-                public_key: vec![0xCD; 32], // non-empty — must hit the alg check, not empty-pk
-            };
-            let err = extract_verifying_key(&sk).unwrap_err();
-            assert!(
-                matches!(err, ProtokenError::MalformedEncoding(m) if m.contains("symmetric")),
-                "{alg:?} should be rejected as symmetric"
-            );
-        }
-    }
-
-    #[test]
     fn test_rejects_oversized_secret_key() {
         // Exercises MAX_SECRET_KEY_BYTES limit (4096).
         let mut data = Vec::new();
@@ -547,25 +485,9 @@ mod tests {
     }
 
     #[test]
-    fn test_signing_key_zk_symmetric_roundtrip() {
-        // Exercises Groth16 key size validation (keys.rs:267).
-        for alg in [Algorithm::Groth16Poseidon, Algorithm::Groth16Hybrid] {
-            let key = SigningKey {
-                algorithm: alg,
-                secret_key: Zeroizing::new(vec![0x42; 32]),
-                public_key: Vec::new(),
-            };
-            let bytes = serialize_signing_key(&key);
-            let decoded = deserialize_signing_key(&bytes).unwrap();
-            assert_eq!(key, decoded);
-        }
-    }
-
-    #[test]
-    fn test_rejects_short_zk_symmetric_key() {
-        // Exercises keys.rs:267 < HMAC_MIN_KEY_LEN for Groth16.
+    fn test_rejects_short_hmac_key() {
         let mut data = Vec::new();
-        proto3::encode_uint32(1, 4, &mut data); // Groth16Poseidon
+        proto3::encode_uint32(1, 1, &mut data); // HMAC
         proto3::encode_bytes(2, &[0; 16], &mut data); // too short
         assert!(deserialize_signing_key(&data).is_err());
     }

@@ -11,16 +11,13 @@ use protoken::keys::{
     deserialize_signing_key, deserialize_verifying_key, extract_verifying_key,
     serialize_signing_key, serialize_verifying_key, SigningKey as ProtoSigningKey,
 };
-use protoken::serialize::{deserialize_payload, deserialize_signed_token};
+use protoken::serialize::{deserialize_claims, deserialize_signed_token};
 use protoken::sign::{
     compute_key_hash, generate_ed25519_key, generate_hmac_key, generate_mldsa44_key,
-    mldsa44_key_hash, sign_ed25519, sign_groth16, sign_groth16_hybrid, sign_hmac, sign_mldsa44,
+    mldsa44_key_hash, sign_ed25519, sign_hmac, sign_mldsa44,
 };
-use protoken::snark;
-use protoken::types::{Algorithm, Claims, KeyIdentifier, Payload};
-use protoken::verify::{
-    verify_ed25519, verify_groth16, verify_groth16_hybrid, verify_hmac, verify_mldsa44,
-};
+use protoken::types::{Algorithm, Claims, KeyIdentifier};
+use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -34,7 +31,7 @@ const STYLES: Styles = Styles::styled()
 #[derive(Parser)]
 #[command(
     name = "protoken",
-    about = "Protobuf-inspired signed tokens",
+    about = "Protobuf-based signed tokens",
     flatten_help = true,
     styles = STYLES
 )]
@@ -47,7 +44,7 @@ struct Cli {
 enum Command {
     /// Generate a new signing key (base64-encoded SigningKey proto).
     GenerateKey {
-        /// Algorithm: "hmac", "ed25519" (default), "ml-dsa-44", "groth16", or "groth16-hybrid".
+        /// Algorithm: "hmac", "ed25519" (default), or "ml-dsa-44".
         #[arg(short, long, default_value = "ed25519")]
         algorithm: String,
     },
@@ -56,21 +53,6 @@ enum Command {
     GetVerifyingKey {
         /// Signing key file, or "-" for stdin.
         keyfile: String,
-    },
-
-    /// Run Groth16 trusted setup (one-time, produces proving + verifying keys).
-    SnarkSetup {
-        /// Circuit type: "groth16" (Poseidon-only) or "groth16-hybrid" (SHA-256 key hash + Poseidon MAC).
-        #[arg(short, long, default_value = "groth16")]
-        algorithm: String,
-
-        /// Output file for the proving key (base64-encoded).
-        #[arg(long, default_value = "snark-pk.b64")]
-        proving_key: String,
-
-        /// Output file for the verifying key (base64-encoded).
-        #[arg(long, default_value = "snark-vk.b64")]
-        verifying_key: String,
     },
 
     /// Sign a new token.
@@ -92,16 +74,11 @@ enum Command {
         /// Scope entries (repeatable, e.g. --scope read --scope write).
         #[arg(long)]
         scope: Vec<String>,
-
-        /// Groth16 proving key file (required for groth16 algorithm).
-        #[arg(long)]
-        proving_key: Option<String>,
     },
 
     /// Verify a signed token against a key and current time.
     Verify {
-        /// Key file (SigningKey for HMAC, VerifyingKey for asymmetric,
-        /// SNARK verifying key for Groth16).
+        /// Key file (SigningKey for HMAC, VerifyingKey for asymmetric).
         /// Use "-" for stdin, but then token must be given explicitly.
         keyfile: String,
 
@@ -130,19 +107,13 @@ fn main() {
     let result = match cli.command {
         Command::GenerateKey { algorithm } => cmd_generate_key(&algorithm),
         Command::GetVerifyingKey { keyfile } => cmd_get_verifying_key(&keyfile),
-        Command::SnarkSetup {
-            algorithm,
-            proving_key,
-            verifying_key,
-        } => cmd_snark_setup(&algorithm, &proving_key, &verifying_key),
         Command::Sign {
             keyfile,
             duration,
             subject,
             audience,
             scope,
-            proving_key,
-        } => cmd_sign(&keyfile, &duration, subject, audience, scope, proving_key),
+        } => cmd_sign(&keyfile, &duration, subject, audience, scope),
         Command::Verify {
             keyfile,
             token,
@@ -159,14 +130,11 @@ fn main() {
 
 fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
     let sk = match algorithm {
-        "hmac" => {
-            let secret_key = generate_hmac_key();
-            ProtoSigningKey {
-                algorithm: Algorithm::HmacSha256,
-                secret_key: Zeroizing::new(secret_key),
-                public_key: Vec::new(),
-            }
-        }
+        "hmac" => ProtoSigningKey {
+            algorithm: Algorithm::HmacSha256,
+            secret_key: Zeroizing::new(generate_hmac_key()),
+            public_key: Vec::new(),
+        },
         "ed25519" => {
             let (seed, pk) = generate_ed25519_key()?;
             ProtoSigningKey {
@@ -183,25 +151,9 @@ fn cmd_generate_key(algorithm: &str) -> Result<(), Box<dyn std::error::Error>> {
                 public_key: pk,
             }
         }
-        "groth16" => {
-            let secret_key = generate_hmac_key(); // same key format: random 32 bytes
-            ProtoSigningKey {
-                algorithm: Algorithm::Groth16Poseidon,
-                secret_key: Zeroizing::new(secret_key),
-                public_key: Vec::new(),
-            }
-        }
-        "groth16-hybrid" => {
-            let secret_key = generate_hmac_key();
-            ProtoSigningKey {
-                algorithm: Algorithm::Groth16Hybrid,
-                secret_key: Zeroizing::new(secret_key),
-                public_key: Vec::new(),
-            }
-        }
         _ => {
             return Err(format!(
-                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', 'ml-dsa-44', 'groth16', or 'groth16-hybrid')"
+                "unknown algorithm: {algorithm} (use 'hmac', 'ed25519', or 'ml-dsa-44')"
             )
             .into())
         }
@@ -219,57 +171,12 @@ fn cmd_get_verifying_key(keyfile: &str) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-/// Maximum SNARK key input size. Proving keys can be tens of MB.
-const MAX_SNARK_KEY_INPUT: u64 = 100_000_000; // 100 MB
-
-fn cmd_snark_setup(
-    algorithm: &str,
-    pk_path: &str,
-    vk_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let (pk, vk) = match algorithm {
-        "groth16" => {
-            eprintln!("Running Groth16-Poseidon trusted setup...");
-            snark::setup()?
-        }
-        "groth16-hybrid" => {
-            eprintln!("Running Groth16-Hybrid trusted setup (this may take a minute)...");
-            snark::setup_hybrid()?
-        }
-        _ => {
-            return Err(format!(
-                "unknown SNARK algorithm: {algorithm} (use 'groth16' or 'groth16-hybrid')"
-            )
-            .into())
-        }
-    };
-
-    let pk_bytes = snark::serialize_proving_key(&pk)?;
-    let vk_bytes = snark::serialize_verifying_key(&vk)?;
-
-    std::fs::write(pk_path, B64.encode(&pk_bytes))?;
-    std::fs::write(vk_path, B64.encode(&vk_bytes))?;
-
-    eprintln!(
-        "Proving key:   {} ({:.1} MB)",
-        pk_path,
-        pk_bytes.len() as f64 / 1_048_576.0
-    );
-    eprintln!(
-        "Verifying key: {} ({:.1} KB)",
-        vk_path,
-        vk_bytes.len() as f64 / 1024.0
-    );
-    Ok(())
-}
-
 fn cmd_sign(
     keyfile: &str,
     duration_str: &str,
     subject: Option<String>,
     audience: Option<String>,
     scopes: Vec<String>,
-    proving_key_file: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let key_bytes = read_keyfile(keyfile)?;
     let sk = deserialize_signing_key(&key_bytes)?;
@@ -283,11 +190,7 @@ fn cmd_sign(
         return Err("duration must be at least 1 second".into());
     }
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "system clock is set before Unix epoch (1970-01-01)")?
-        .as_secs();
-
+    let now = current_unix_time()?;
     let expires_at = now
         .checked_add(duration.as_secs())
         .ok_or("duration overflow")?;
@@ -302,37 +205,14 @@ fn cmd_sign(
     };
 
     let token_bytes = match sk.algorithm {
-        Algorithm::HmacSha256 => sign_hmac(&sk.secret_key, claims)?,
+        Algorithm::HmacSha256 => sign_hmac(&sk.secret_key, &claims)?,
         Algorithm::Ed25519 => {
             let key_id = KeyIdentifier::KeyHash(compute_key_hash(&sk.public_key));
-            sign_ed25519(&sk.secret_key, claims, key_id)?
+            sign_ed25519(&sk.secret_key, &claims, key_id)?
         }
         Algorithm::MlDsa44 => {
             let key_id = mldsa44_key_hash(&sk.public_key)?;
-            sign_mldsa44(&sk.secret_key, claims, key_id)?
-        }
-        Algorithm::Groth16Poseidon => {
-            let pk_file = proving_key_file
-                .ok_or("Groth16 signing requires --proving-key <file> (from snark-setup)")?;
-            let pk_bytes = read_snark_keyfile(&pk_file)?;
-            let pk = snark::deserialize_proving_key(&pk_bytes)?;
-            let key: [u8; 32] = sk.secret_key.as_slice().try_into().map_err(|_| {
-                format!("Groth16 key must be 32 bytes, got {}", sk.secret_key.len())
-            })?;
-            sign_groth16(&pk, &key, claims)?
-        }
-        Algorithm::Groth16Hybrid => {
-            let pk_file = proving_key_file
-                .ok_or("Groth16Hybrid signing requires --proving-key <file> (from snark-setup)")?;
-            let pk_bytes = read_snark_keyfile(&pk_file)?;
-            let pk = snark::deserialize_proving_key(&pk_bytes)?;
-            let key: [u8; 32] = sk.secret_key.as_slice().try_into().map_err(|_| {
-                format!(
-                    "Groth16Hybrid key must be 32 bytes, got {}",
-                    sk.secret_key.len()
-                )
-            })?;
-            sign_groth16_hybrid(&pk, &key, claims)?
+            sign_mldsa44(&sk.secret_key, &claims, key_id)?
         }
     };
 
@@ -351,33 +231,22 @@ fn cmd_verify(
 
     let key_bytes = read_keyfile(keyfile)?;
     let token_bytes = read_token_input(token_arg)?;
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "system clock is set before Unix epoch (1970-01-01)")?
-        .as_secs();
+    let now = current_unix_time()?;
 
     // Determine key type by trying each format:
     // 1. Proto VerifyingKey (Ed25519, ML-DSA-44)
     // 2. Proto SigningKey (HMAC)
-    // 3. SNARK VerifyingKey (Groth16)
     let verified = if let Ok(vk) = deserialize_verifying_key(&key_bytes) {
         match vk.algorithm {
             Algorithm::Ed25519 => verify_ed25519(&vk.public_key, &token_bytes, now)?,
             Algorithm::MlDsa44 => verify_mldsa44(&vk.public_key, &token_bytes, now)?,
-            Algorithm::HmacSha256 | Algorithm::Groth16Poseidon | Algorithm::Groth16Hybrid => {
+            Algorithm::HmacSha256 => {
                 return Err("symmetric algorithm; use the signing key to verify".into());
             }
         }
     } else if let Ok(sk) = deserialize_signing_key(&key_bytes) {
         match sk.algorithm {
             Algorithm::HmacSha256 => verify_hmac(&sk.secret_key, &token_bytes, now)?,
-            Algorithm::Groth16Poseidon | Algorithm::Groth16Hybrid => {
-                return Err(
-                    "use the SNARK verifying key (from snark-setup) to verify Groth16 tokens"
-                        .into(),
-                );
-            }
             _ => {
                 return Err(format!(
                     "expected an HMAC signing key or a verifying key, got {:?} signing key",
@@ -386,35 +255,15 @@ fn cmd_verify(
                 .into());
             }
         }
-    } else if let Ok(snark_vk) = snark::deserialize_verifying_key(&key_bytes) {
-        // Peek at the token's algorithm to dispatch to the correct verifier.
-        let token = deserialize_signed_token(&token_bytes)?;
-        let payload = deserialize_payload(&token.payload_bytes)?;
-        match payload.metadata.algorithm {
-            Algorithm::Groth16Poseidon => verify_groth16(&snark_vk, &token_bytes, now)?,
-            Algorithm::Groth16Hybrid => verify_groth16_hybrid(&snark_vk, &token_bytes, now)?,
-            other => {
-                return Err(format!(
-                    "SNARK verifying key given but token algorithm is {:?} (expected Groth16Poseidon or Groth16Hybrid)",
-                    other
-                ).into());
-            }
-        }
     } else {
-        return Err(
-            "could not parse key file as VerifyingKey, SigningKey, or SNARK VerifyingKey".into(),
-        );
+        return Err("could not parse key file as VerifyingKey or SigningKey".into());
     };
 
     if json {
         println!("{}", serde_json::to_string_pretty(&verified)?);
     } else {
-        let payload = Payload {
-            metadata: verified.metadata.clone(),
-            claims: verified.claims.clone(),
-        };
         println!("{}", "OK".green().bold());
-        print_payload_colored(&payload);
+        print_token_colored(verified.algorithm, &verified.key_identifier, &verified.claims);
     }
     Ok(())
 }
@@ -424,48 +273,42 @@ fn cmd_inspect(token_arg: Option<String>, json: bool) -> Result<(), Box<dyn std:
 
     match deserialize_signed_token(&token_bytes) {
         Ok(token) => {
-            let payload = deserialize_payload(&token.payload_bytes)?;
+            let claims = deserialize_claims(&token.payload)
+                .map_err(|e| format!("could not parse token payload as Claims: {e}"))?;
+
             if json {
-                let mut output = serde_json::json!({
+                let output = serde_json::json!({
                     "type": "SignedToken",
-                    "payload": payload,
+                    "algorithm": token.algorithm,
+                    "key_identifier": token.key_identifier,
+                    "claims": claims,
                     "signature_base64": B64.encode(&token.signature),
                     "total_bytes": token_bytes.len(),
                 });
-                if !token.proof.is_empty() {
-                    if let Some(obj) = output.as_object_mut() {
-                        obj.insert(
-                            "proof_base64".into(),
-                            serde_json::Value::String(B64.encode(&token.proof)),
-                        );
-                    }
-                }
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
-                print_payload_colored(&payload);
+                print_token_colored(token.algorithm, &token.key_identifier, &claims);
                 print_field("Signature", &B64.encode(&token.signature).magenta());
-                if !token.proof.is_empty() {
-                    print_field("Proof", &B64.encode(&token.proof).magenta());
-                }
                 print_field("Size", &format_size(token_bytes.len()).cyan());
             }
         }
-        Err(_) => match deserialize_payload(&token_bytes) {
-            Ok(payload) => {
+        // Not a SignedToken; try bare Claims bytes.
+        Err(token_err) => match deserialize_claims(&token_bytes) {
+            Ok(claims) => {
                 if json {
                     let output = serde_json::json!({
-                        "type": "Payload",
-                        "payload": payload,
+                        "type": "Claims",
+                        "claims": claims,
                         "total_bytes": token_bytes.len(),
                     });
                     println!("{}", serde_json::to_string_pretty(&output)?);
                 } else {
-                    print_payload_colored(&payload);
+                    print_claims_colored(&claims);
                     print_field("Size", &format_size(token_bytes.len()).cyan());
                 }
             }
-            Err(e) => {
-                return Err(format!("could not parse as SignedToken or Payload: {e}").into());
+            Err(_) => {
+                return Err(format!("could not parse as SignedToken ({token_err}) or Claims").into());
             }
         },
     }
@@ -479,17 +322,15 @@ fn print_field(label: &str, value: &dyn std::fmt::Display) {
     println!("  {:>12}  {}", label.bold(), value);
 }
 
-fn print_payload_colored(payload: &Payload) {
-    let algo_name = match payload.metadata.algorithm {
+fn print_token_colored(algorithm: Algorithm, key_identifier: &KeyIdentifier, claims: &Claims) {
+    let algo_name = match algorithm {
         Algorithm::HmacSha256 => "HMAC-SHA256",
         Algorithm::Ed25519 => "Ed25519",
         Algorithm::MlDsa44 => "ML-DSA-44",
-        Algorithm::Groth16Poseidon => "Groth16-Poseidon",
-        Algorithm::Groth16Hybrid => "Groth16-Hybrid",
     };
     print_field("Algorithm", &algo_name.green());
 
-    let key_id_str = match &payload.metadata.key_identifier {
+    let key_id_str = match key_identifier {
         KeyIdentifier::KeyHash(h) => format!("{} (key_hash)", B64.encode(h)),
         KeyIdentifier::PublicKey(pk) => {
             if pk.len() <= 32 {
@@ -502,34 +343,28 @@ fn print_payload_colored(payload: &Payload) {
                 )
             }
         }
-        KeyIdentifier::FullKeyHash(h) => format!("{} (full_key_hash)", B64.encode(h)),
     };
     print_field("Key ID", &key_id_str.magenta());
 
-    print_field(
-        "Expires",
-        &format_timestamp(payload.claims.expires_at).cyan(),
-    );
-    if payload.claims.not_before != 0 {
-        print_field(
-            "Not Before",
-            &format_timestamp(payload.claims.not_before).cyan(),
-        );
+    print_claims_colored(claims);
+}
+
+fn print_claims_colored(claims: &Claims) {
+    print_field("Expires", &format_timestamp(claims.expires_at).cyan());
+    if claims.not_before != 0 {
+        print_field("Not Before", &format_timestamp(claims.not_before).cyan());
     }
-    if payload.claims.issued_at != 0 {
-        print_field(
-            "Issued At",
-            &format_timestamp(payload.claims.issued_at).cyan(),
-        );
+    if claims.issued_at != 0 {
+        print_field("Issued At", &format_timestamp(claims.issued_at).cyan());
     }
-    if !payload.claims.subject.is_empty() {
-        print_field("Subject", &payload.claims.subject.green());
+    if !claims.subject.is_empty() {
+        print_field("Subject", &claims.subject.green());
     }
-    if !payload.claims.audience.is_empty() {
-        print_field("Audience", &payload.claims.audience.green());
+    if !claims.audience.is_empty() {
+        print_field("Audience", &claims.audience.green());
     }
-    if !payload.claims.scopes.is_empty() {
-        print_field("Scopes", &payload.claims.scopes.join(", ").green());
+    if !claims.scopes.is_empty() {
+        print_field("Scopes", &claims.scopes.join(", ").green());
     }
 }
 
@@ -550,13 +385,19 @@ fn format_size(bytes: usize) -> String {
 
 // --- I/O helpers ---
 
+fn current_unix_time() -> Result<u64, Box<dyn std::error::Error>> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock is set before Unix epoch (1970-01-01)")?
+        .as_secs())
+}
+
 /// Maximum key input size (base64-encoded). ML-DSA-44 SigningKey is ~5.2 KB base64.
 const MAX_KEY_INPUT: u64 = 100_000;
 
 /// Read a key from a file path or "-" for stdin. Decodes base64.
-/// The intermediate base64 string is zeroized on drop to avoid leaving
-/// key material in memory.
-fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+/// Both the base64 string and the decoded bytes are zeroized on drop.
+fn read_keyfile(path: &str) -> Result<Zeroizing<Vec<u8>>, Box<dyn std::error::Error>> {
     let raw: Zeroizing<String> = if path == "-" {
         let mut buf = String::new();
         io::stdin()
@@ -578,7 +419,7 @@ fn read_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         }
         Zeroizing::new(std::fs::read_to_string(path)?)
     };
-    decode_base64(raw.trim())
+    Ok(Zeroizing::new(decode_base64(raw.trim())?))
 }
 
 /// Maximum token input size (base64-encoded). 16 KB covers even ML-DSA-44 tokens with headroom.
@@ -602,21 +443,6 @@ fn read_token_input(token_arg: Option<String>) -> Result<Vec<u8>, Box<dyn std::e
         }
     };
     decode_base64(input.trim())
-}
-
-/// Read a SNARK key file (proving or verifying key). These can be large (~tens of MB).
-fn read_snark_keyfile(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let metadata = std::fs::metadata(path)?;
-    if metadata.len() > MAX_SNARK_KEY_INPUT {
-        return Err(format!(
-            "SNARK key file too large: {} bytes (max {})",
-            metadata.len(),
-            MAX_SNARK_KEY_INPUT
-        )
-        .into());
-    }
-    let raw = std::fs::read_to_string(path)?;
-    decode_base64(raw.trim())
 }
 
 /// Decode a base64 string (URL-safe no-pad or standard).

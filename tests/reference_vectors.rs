@@ -10,7 +10,7 @@
 
 use base64::Engine;
 use protoken::keys::{deserialize_signing_key, deserialize_verifying_key};
-use protoken::serialize::{deserialize_payload, deserialize_signed_token};
+use protoken::serialize::{deserialize_claims, deserialize_signed_token};
 use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -49,11 +49,11 @@ fn test_reference_hmac_exact_match() {
 
     // Deserialize and check claims
     let token = deserialize_signed_token(&token_bytes).unwrap();
-    let payload = deserialize_payload(&token.payload_bytes).unwrap();
-    assert_eq!(payload.claims.expires_at, 2087078400);
-    assert_eq!(payload.claims.subject, "ref:test-user");
-    assert_eq!(payload.claims.audience, "ref:test-service");
-    assert_eq!(payload.claims.scopes, vec!["read", "write"]);
+    let claims = deserialize_claims(&token.payload).unwrap();
+    assert_eq!(claims.expires_at, 2087078400);
+    assert_eq!(claims.subject, "ref:test-user");
+    assert_eq!(claims.audience, "ref:test-service");
+    assert_eq!(claims.scopes, vec!["read", "write"]);
 
     // Verify with the stored key
     let sk_bytes = B64
@@ -76,10 +76,10 @@ fn test_reference_ed25519_exact_match() {
 
     // Deserialize and check claims
     let token = deserialize_signed_token(&token_bytes).unwrap();
-    let payload = deserialize_payload(&token.payload_bytes).unwrap();
-    assert_eq!(payload.claims.expires_at, 2087078400);
-    assert_eq!(payload.claims.subject, "ref:test-user");
-    assert_eq!(payload.claims.scopes, vec!["read", "write"]);
+    let claims = deserialize_claims(&token.payload).unwrap();
+    assert_eq!(claims.expires_at, 2087078400);
+    assert_eq!(claims.subject, "ref:test-user");
+    assert_eq!(claims.scopes, vec!["read", "write"]);
 
     // Verify with the stored verifying key
     let vk_bytes = B64
@@ -102,9 +102,9 @@ fn test_reference_mldsa44_verifies() {
 
     // Deserialize and check claims
     let token = deserialize_signed_token(&token_bytes).unwrap();
-    let payload = deserialize_payload(&token.payload_bytes).unwrap();
-    assert_eq!(payload.claims.expires_at, 2087078400);
-    assert_eq!(payload.claims.subject, "ref:test-user");
+    let claims = deserialize_claims(&token.payload).unwrap();
+    assert_eq!(claims.expires_at, 2087078400);
+    assert_eq!(claims.subject, "ref:test-user");
 
     // Verify with the stored verifying key
     let vk_bytes = B64
@@ -138,8 +138,8 @@ fn test_reference_all_keys_deserialize() {
             .expect("bad token base64");
         let token = deserialize_signed_token(&token_bytes)
             .unwrap_or_else(|e| panic!("failed to deserialize token for {name}: {e}"));
-        let _payload = deserialize_payload(&token.payload_bytes)
-            .unwrap_or_else(|e| panic!("failed to deserialize payload for {name}: {e}"));
+        let _claims = deserialize_claims(&token.payload)
+            .unwrap_or_else(|e| panic!("failed to deserialize claims for {name}: {e}"));
 
         // Signing key should have non-empty secret_key
         assert!(!sk.secret_key.is_empty(), "{name}: empty secret_key");

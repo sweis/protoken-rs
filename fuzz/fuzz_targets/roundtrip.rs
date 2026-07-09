@@ -5,16 +5,16 @@ use protoken::keys::{
     serialize_verifying_key,
 };
 use protoken::serialize::{
-    deserialize_payload, deserialize_signed_token, serialize_payload, serialize_signed_token,
+    deserialize_claims, deserialize_signed_token, serialize_claims, serialize_signed_token,
 };
 
 fuzz_target!(|data: &[u8]| {
-    // If data parses as a valid payload, re-serializing must produce identical bytes.
-    if let Ok(payload) = deserialize_payload(data) {
-        let reserialized = serialize_payload(&payload);
+    // If data parses as valid Claims, re-serializing must produce identical bytes.
+    if let Ok(claims) = deserialize_claims(data) {
+        let reserialized = serialize_claims(&claims);
         assert_eq!(
             data, &reserialized[..],
-            "payload roundtrip mismatch: deserialize then serialize produced different bytes"
+            "claims roundtrip mismatch: deserialize then serialize produced different bytes"
         );
     }
 
