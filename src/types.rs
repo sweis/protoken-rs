@@ -248,7 +248,7 @@ pub const ED25519_PUBLIC_KEY_LEN: usize = 32;
 pub const HMAC_SHA256_SIG_LEN: usize = 32;
 pub const ED25519_SIG_LEN: usize = 64;
 pub const MLDSA44_PUBLIC_KEY_LEN: usize = 1312;
-pub const MLDSA44_SIGNING_KEY_LEN: usize = 2560;
+pub const MLDSA44_SEED_LEN: usize = 32;
 pub const MLDSA44_SIG_LEN: usize = 2420;
 
 #[cfg(test)]

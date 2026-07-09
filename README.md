@@ -168,7 +168,7 @@ message Claims {
 
 message SigningKey {
   uint32 algorithm = 1;
-  bytes secret_key = 2;    // HMAC: raw key (>=32 B); Ed25519: 32 B seed; ML-DSA-44: 2560 B
+  bytes secret_key = 2;    // HMAC: raw key (>=32 B); Ed25519/ML-DSA-44: 32 B seed
   bytes public_key = 3;    // Ed25519: 32 B; ML-DSA-44: 1312 B; empty for HMAC
 }
 
@@ -190,6 +190,9 @@ The signature is computed over the canonical encoding of envelope fields 1-5
 canonical, the signed bytes are exactly the token bytes minus the signature
 field. Binding the algorithm and key identifier into the signature prevents
 algorithm-confusion and key-substitution attacks.
+
+Signing is deterministic for all three algorithms; ML-DSA-44 uses the
+FIPS 204 deterministic variant with an empty context string.
 
 The 8-byte key hash is `SHA-256(key_material)[0..8]`. It is a key selection
 identifier, not a security binding: security rests on full signature
@@ -222,7 +225,7 @@ let claims = Claims {
     ..Default::default()
 };
 let key_id = KeyIdentifier::KeyHash(compute_key_hash(&public_key));
-let token_bytes = sign_ed25519(&seed, claims, key_id).unwrap();
+let token_bytes = sign_ed25519(&seed, &claims, key_id).unwrap();
 
 let now = 1799999000;
 let verified = verify_ed25519(&public_key, &token_bytes, now).unwrap();

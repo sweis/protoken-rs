@@ -52,7 +52,11 @@ pub fn serialize_claims(claims: &Claims) -> Vec<u8> {
 
 /// Read a varint field value, rejecting an explicit zero (canonical encoding
 /// omits default values, so a zero on the wire is non-canonical).
-fn read_nonzero_varint(data: &[u8], pos: &mut usize, field_name: &str) -> Result<u64, ProtokenError> {
+fn read_nonzero_varint(
+    data: &[u8],
+    pos: &mut usize,
+    field_name: &str,
+) -> Result<u64, ProtokenError> {
     let value = proto3::read_varint_value(data, pos)?;
     if value == 0 {
         return Err(ProtokenError::MalformedEncoding(format!(
@@ -275,17 +279,18 @@ pub(crate) fn deserialize_signed_token_at(
                 })?;
             }
             (4, 2) => {
-                key_id = read_bounded_bytes(data, &mut pos, MLDSA44_PUBLIC_KEY_LEN, "key_id")?
-                    .to_vec();
+                key_id =
+                    read_bounded_bytes(data, &mut pos, MLDSA44_PUBLIC_KEY_LEN, "key_id")?.to_vec();
             }
             (5, 2) => {
-                payload =
-                    Some(read_bounded_bytes(data, &mut pos, MAX_PAYLOAD_BYTES, "payload")?.to_vec());
+                payload = Some(
+                    read_bounded_bytes(data, &mut pos, MAX_PAYLOAD_BYTES, "payload")?.to_vec(),
+                );
             }
             (6, 2) => {
-                signature =
-                    Some(read_bounded_bytes(data, &mut pos, MAX_SIGNATURE_BYTES, "signature")?
-                        .to_vec());
+                signature = Some(
+                    read_bounded_bytes(data, &mut pos, MAX_SIGNATURE_BYTES, "signature")?.to_vec(),
+                );
                 // Everything before the signature field is the signed input.
                 signed_len = field_start;
             }
@@ -837,9 +842,7 @@ mod tests {
     fn test_rejects_explicit_zero_envelope_varints() {
         // algorithm=0 and key_id_type=0 encoded explicitly are non-canonical.
         for field in [2u32, 3] {
-            let mut bad = Vec::new();
-            bad.push((field << 3) as u8); // varint wire type
-            bad.push(0x00);
+            let bad = vec![(field << 3) as u8, 0x00]; // varint wire type, value 0
             let err = deserialize_signed_token(&bad).unwrap_err();
             assert!(
                 matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("zero")),

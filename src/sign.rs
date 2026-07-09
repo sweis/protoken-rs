@@ -1,8 +1,9 @@
 //! Token signing: HMAC-SHA256, Ed25519, and ML-DSA-44.
 
+use ed25519_dalek::Signer as _;
 use hmac::{Hmac, Mac};
 use ml_dsa::signature::Signer as _;
-use ml_dsa::{KeyGen, MlDsa44};
+use ml_dsa::MlDsa44;
 use sha2::{Digest, Sha256};
 
 use crate::error::ProtokenError;
@@ -76,27 +77,26 @@ pub fn sign_ed25519(
     Ok(append_signature(signing_input, &sig.to_bytes()))
 }
 
-/// Sign a token with ML-DSA-44.
+/// Sign a token with ML-DSA-44 (deterministic variant, empty context).
 /// Returns the serialized SignedToken wire bytes.
 ///
-/// `signing_key_bytes` is the raw 2,560-byte ML-DSA-44 signing key.
+/// `seed` is the raw 32-byte ML-DSA-44 private key seed.
 /// `key_id` must identify the corresponding public key (its hash or the key itself).
 pub fn sign_mldsa44(
-    signing_key_bytes: &[u8],
+    seed: &[u8],
     claims: &Claims,
     key_id: KeyIdentifier,
 ) -> Result<Vec<u8>, ProtokenError> {
     claims.validate()?;
 
-    let encoded: &ml_dsa::EncodedSigningKey<MlDsa44> =
-        signing_key_bytes.try_into().map_err(|_| {
-            ProtokenError::SigningFailed(format!(
-                "invalid ML-DSA-44 signing key: expected {} bytes, got {}",
-                MLDSA44_SIGNING_KEY_LEN,
-                signing_key_bytes.len()
-            ))
-        })?;
-    let signing_key = ml_dsa::SigningKey::<MlDsa44>::decode(encoded);
+    let seed_array: [u8; MLDSA44_SEED_LEN] = seed.try_into().map_err(|_| {
+        ProtokenError::SigningFailed(format!(
+            "invalid ML-DSA-44 seed: expected {} bytes, got {}",
+            MLDSA44_SEED_LEN,
+            seed.len()
+        ))
+    })?;
+    let signing_key = ml_dsa::SigningKey::<MlDsa44>::from_seed(&seed_array.into());
 
     let payload = serialize_claims(claims);
     let signing_input = serialize_signing_input(Version::V0, Algorithm::MlDsa44, &key_id, &payload);
@@ -128,13 +128,13 @@ pub fn generate_ed25519_key() -> Result<(Vec<u8>, Vec<u8>), ProtokenError> {
     Ok((seed, pk))
 }
 
-/// Generate a new ML-DSA-44 key pair, returning (signing_key_bytes, public_key_bytes).
+/// Generate a new ML-DSA-44 key pair, returning (seed, public_key_bytes).
 pub fn generate_mldsa44_key() -> Result<(Vec<u8>, Vec<u8>), ProtokenError> {
-    let mut rng = rand::rngs::OsRng;
-    let kp = MlDsa44::key_gen(&mut rng);
-    let sk_bytes = kp.signing_key().encode().to_vec();
-    let pk_bytes = kp.verifying_key().encode().to_vec();
-    Ok((sk_bytes, pk_bytes))
+    let mut seed = [0u8; MLDSA44_SEED_LEN];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+    let signing_key = ml_dsa::SigningKey::<MlDsa44>::from_seed(&seed.into());
+    let pk_bytes = signing_key.expanded_key().verifying_key().encode().to_vec();
+    Ok((seed.to_vec(), pk_bytes))
 }
 
 /// Generate a new HMAC key (32 bytes of cryptographically random data).
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn test_mldsa44_key_sizes() {
         let (sk, pk) = generate_mldsa44_key().unwrap();
-        assert_eq!(sk.len(), MLDSA44_SIGNING_KEY_LEN);
+        assert_eq!(sk.len(), MLDSA44_SEED_LEN);
         assert_eq!(pk.len(), MLDSA44_PUBLIC_KEY_LEN);
     }
 

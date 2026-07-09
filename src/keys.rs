@@ -2,7 +2,7 @@
 //!
 //! SigningKey proto3 fields:
 //!   uint32 algorithm = 1;   tag 0x08  (1=HMAC-SHA256, 2=Ed25519, 3=ML-DSA-44)
-//!   bytes secret_key = 2;   tag 0x12  (HMAC: raw key; Ed25519: 32B seed; ML-DSA-44: 2560B SK)
+//!   bytes secret_key = 2;   tag 0x12  (HMAC: raw key; Ed25519/ML-DSA-44: 32B seed)
 //!   bytes public_key = 3;   tag 0x1A  (Ed25519: 32B; ML-DSA-44: 1312B; empty for HMAC)
 //!
 //! VerifyingKey proto3 fields:
@@ -87,7 +87,7 @@ pub fn serialize_verifying_key(key: &VerifyingKey) -> Vec<u8> {
 
 // --- Deserialization ---
 
-/// Maximum allowed secret key size (ML-DSA-44 SK = 2560 bytes).
+/// Maximum allowed secret key size.
 const MAX_SECRET_KEY_BYTES: usize = 4096;
 
 /// Maximum allowed public key size (ML-DSA-44 PK = 1312 bytes).
@@ -118,14 +118,22 @@ pub fn deserialize_signing_key(data: &[u8]) -> Result<SigningKey, ProtokenError>
         match (field_number, wire_type) {
             (1, 0) => algorithm = proto3::read_u32(data, &mut pos)?,
             (2, 2) => {
-                secret_key =
-                    crate::serialize::read_bounded_bytes(data, &mut pos, MAX_SECRET_KEY_BYTES, "secret key")?
-                        .to_vec();
+                secret_key = crate::serialize::read_bounded_bytes(
+                    data,
+                    &mut pos,
+                    MAX_SECRET_KEY_BYTES,
+                    "secret key",
+                )?
+                .to_vec();
             }
             (3, 2) => {
-                public_key =
-                    crate::serialize::read_bounded_bytes(data, &mut pos, MAX_PUBLIC_KEY_BYTES, "public key")?
-                        .to_vec();
+                public_key = crate::serialize::read_bounded_bytes(
+                    data,
+                    &mut pos,
+                    MAX_PUBLIC_KEY_BYTES,
+                    "public key",
+                )?
+                .to_vec();
             }
             (_, _) => {
                 return Err(ProtokenError::MalformedEncoding(format!(
@@ -175,9 +183,13 @@ pub fn deserialize_verifying_key(data: &[u8]) -> Result<VerifyingKey, ProtokenEr
         match (field_number, wire_type) {
             (1, 0) => algorithm = proto3::read_u32(data, &mut pos)?,
             (2, 2) => {
-                public_key =
-                    crate::serialize::read_bounded_bytes(data, &mut pos, MAX_PUBLIC_KEY_BYTES, "public key")?
-                        .to_vec();
+                public_key = crate::serialize::read_bounded_bytes(
+                    data,
+                    &mut pos,
+                    MAX_PUBLIC_KEY_BYTES,
+                    "public key",
+                )?
+                .to_vec();
             }
             (_, _) => {
                 return Err(ProtokenError::MalformedEncoding(format!(
@@ -236,10 +248,10 @@ fn validate_signing_key_sizes(
             }
         }
         Algorithm::MlDsa44 => {
-            if secret_key.len() != MLDSA44_SIGNING_KEY_LEN {
+            if secret_key.len() != MLDSA44_SEED_LEN {
                 return Err(ProtokenError::MalformedEncoding(format!(
-                    "ML-DSA-44 signing key must be {} bytes, got {}",
-                    MLDSA44_SIGNING_KEY_LEN,
+                    "ML-DSA-44 seed must be {} bytes, got {}",
+                    MLDSA44_SEED_LEN,
                     secret_key.len()
                 )));
             }
@@ -303,7 +315,7 @@ mod tests {
     fn test_signing_key_mldsa44_roundtrip() {
         let key = SigningKey {
             algorithm: Algorithm::MlDsa44,
-            secret_key: Zeroizing::new(vec![0x03; MLDSA44_SIGNING_KEY_LEN]),
+            secret_key: Zeroizing::new(vec![0x03; MLDSA44_SEED_LEN]),
             public_key: vec![0x04; MLDSA44_PUBLIC_KEY_LEN],
         };
         let bytes = serialize_signing_key(&key);
@@ -490,5 +502,18 @@ mod tests {
         proto3::encode_uint32(1, 1, &mut data); // HMAC
         proto3::encode_bytes(2, &[0; 16], &mut data); // too short
         assert!(deserialize_signing_key(&data).is_err());
+    }
+
+    #[test]
+    fn test_signing_key_debug_redacts_secret() {
+        let sk = SigningKey {
+            algorithm: Algorithm::HmacSha256,
+            secret_key: Zeroizing::new(vec![0xAB; 32]),
+            public_key: Vec::new(),
+        };
+        let debug = format!("{sk:?}");
+        assert!(debug.contains("[32 bytes redacted]"), "got: {debug}");
+        assert!(debug.contains("HmacSha256"));
+        assert!(!debug.contains("171"), "secret byte leaked: {debug}");
     }
 }

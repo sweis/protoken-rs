@@ -38,7 +38,7 @@ message Claims {
 
 message SigningKey {
   uint32 algorithm = 1;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44
-  bytes secret_key = 2;    // HMAC: raw key (>=32 B); Ed25519: 32 B seed; ML-DSA-44: 2560 B
+  bytes secret_key = 2;    // HMAC: raw key (>=32 B); Ed25519/ML-DSA-44: 32 B seed
   bytes public_key = 3;    // Ed25519: 32 B; ML-DSA-44: 1312 B; empty for HMAC
 }
 
@@ -67,13 +67,13 @@ Canonical proto3 wire encoding with a custom ~360-line encoder/decoder (`src/pro
 See [notes/research-protobuf-determinism.md](notes/research-protobuf-determinism.md).
 
 ### Post-Quantum Signature: ML-DSA-44
-ML-DSA-44 (FIPS 204) chosen over SLH-DSA (huge signatures) and XMSS/LMS (stateful — incompatible with distributed token issuance). Stateless, ~200μs sign, 2,420 B signatures, 1,312 B public keys.
+ML-DSA-44 (FIPS 204) chosen over SLH-DSA (huge signatures) and XMSS/LMS (stateful — incompatible with distributed token issuance). Stateless, ~200μs sign, 2,420 B signatures, 1,312 B public keys. Private keys are stored as 32-byte seeds; signing uses the FIPS 204 deterministic variant with an empty context string, so all three algorithms sign deterministically.
 See [notes/research-pq-signatures.md](notes/research-pq-signatures.md).
 
 ### Dependencies: RustCrypto ecosystem
 - `ed25519-dalek` for Ed25519 (raw 32-byte seeds, no PKCS#8)
 - `hmac` + `sha2` for HMAC-SHA256 and SHA-256 key hashing
-- `ml-dsa` for ML-DSA-44, chosen over `fips204` crate (~1,100 dependents vs ~1)
+- `ml-dsa` (0.1.x) for ML-DSA-44, chosen over `fips204` crate (~1,100 dependents vs ~1)
 - `subtle` for constant-time comparisons
 - `rand` for key generation
 - `zeroize` for secret key memory wiping

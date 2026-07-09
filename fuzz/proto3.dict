@@ -1,30 +1,23 @@
-# Proto3 wire format tokens for protoken fuzzing
-# Field tags (field_number << 3 | wire_type)
+# Proto3 wire format tokens for protoken fuzzing.
+# Tags are (field_number << 3 | wire_type). The same tag bytes cover both the
+# SignedToken envelope (version, algorithm, key_id_type, key_id, payload,
+# signature) and the Claims payload (expires_at, not_before, issued_at,
+# subject, audience, scope).
+tag_field1_varint="\x08"
+tag_field2_varint="\x10"
+tag_field3_varint="\x18"
+tag_field4_len="\x22"
+tag_field5_len="\x2a"
+tag_field6_len="\x32"
 
-# SignedToken envelope
-"\x08"  # field 1 varint (version)
-"\x10"  # field 2 varint (algorithm)
-"\x18"  # field 3 varint (key_id_type)
-"\x22"  # field 4 LEN (key_id)
-"\x2a"  # field 5 LEN (payload)
-"\x32"  # field 6 LEN (signature)
+# Common varint values: algorithms 1-3, key id types 1-2, key/sig lengths.
+val_zero="\x00"
+val_one="\x01"
+val_two="\x02"
+val_three="\x03"
+len_key_hash="\x08"
+len_32="\x20"
+len_64="\x40"
 
-# Claims payload
-# "\x08" field 1 varint (expires_at) — same tag as envelope version
-# "\x10" field 2 varint (not_before)
-# "\x18" field 3 varint (issued_at)
-# "\x22" field 4 LEN (subject) — same tag as envelope key_id
-"\x2a"  # field 5 LEN (audience)
-"\x32"  # field 6 LEN (scope)
-
-# Common varint values
-"\x00"  # 0
-"\x01"  # 1 (HMAC-SHA256 / key_hash)
-"\x02"  # 2 (Ed25519 / public_key)
-"\x03"  # 3 (ML-DSA-44)
-"\x08"  # 8 (key_hash length)
-"\x20"  # 32 (HMAC sig / Ed25519 pubkey length)
-"\x40"  # 64 (Ed25519 sig length)
-
-# Timestamp varints (1700000000)
-"\x80\xe2\xcf\xaa\x06"
+# Timestamp varint (1700000000)
+timestamp="\x80\xe2\xcf\xaa\x06"

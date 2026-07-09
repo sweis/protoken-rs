@@ -7,6 +7,7 @@
 //! 4. Verify the signature over the envelope's signing input.
 //! 5. Only then parse the payload as Claims and check temporal validity.
 
+use ed25519_dalek::Verifier as _;
 use hmac::{Hmac, Mac};
 use ml_dsa::signature::Verifier as _;
 use ml_dsa::MlDsa44;
@@ -109,7 +110,7 @@ pub fn verify_hmac(
 
     let mut mac = Hmac::<Sha256>::new_from_slice(key)
         .map_err(|e| ProtokenError::VerificationFailed(format!("invalid HMAC key: {e}")))?;
-    mac.update(&signing_input);
+    mac.update(signing_input);
     mac.verify_slice(&token.signature)
         .map_err(|_| ProtokenError::VerificationFailed("HMAC verification failed".into()))?;
 
@@ -149,9 +150,11 @@ pub fn verify_ed25519(
     })?;
     let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
 
-    verifying_key.verify(&signing_input, &signature).map_err(|_| {
-        ProtokenError::VerificationFailed("Ed25519 signature verification failed".into())
-    })?;
+    verifying_key
+        .verify(signing_input, &signature)
+        .map_err(|_| {
+            ProtokenError::VerificationFailed("Ed25519 signature verification failed".into())
+        })?;
 
     finish_verification(token, now)
 }
@@ -184,9 +187,11 @@ pub fn verify_mldsa44(
             ProtokenError::VerificationFailed("invalid ML-DSA-44 signature encoding".into())
         })?;
 
-    verifying_key.verify(&signing_input, &signature).map_err(|_| {
-        ProtokenError::VerificationFailed("ML-DSA-44 signature verification failed".into())
-    })?;
+    verifying_key
+        .verify(signing_input, &signature)
+        .map_err(|_| {
+            ProtokenError::VerificationFailed("ML-DSA-44 signature verification failed".into())
+        })?;
 
     finish_verification(token, now)
 }
@@ -219,8 +224,7 @@ mod tests {
     use super::*;
 
     use crate::serialize::{
-        deserialize_signed_token, serialize_claims, serialize_signed_token,
-        serialize_signing_input,
+        deserialize_signed_token, serialize_claims, serialize_signed_token, serialize_signing_input,
     };
     use crate::sign::{
         generate_ed25519_key, generate_mldsa44_key, mldsa44_key_hash, sign_ed25519, sign_hmac,

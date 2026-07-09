@@ -263,7 +263,11 @@ fn cmd_verify(
         println!("{}", serde_json::to_string_pretty(&verified)?);
     } else {
         println!("{}", "OK".green().bold());
-        print_token_colored(verified.algorithm, &verified.key_identifier, &verified.claims);
+        print_token_colored(
+            verified.algorithm,
+            &verified.key_identifier,
+            &verified.claims,
+        );
     }
     Ok(())
 }
@@ -308,7 +312,9 @@ fn cmd_inspect(token_arg: Option<String>, json: bool) -> Result<(), Box<dyn std:
                 }
             }
             Err(_) => {
-                return Err(format!("could not parse as SignedToken ({token_err}) or Claims").into());
+                return Err(
+                    format!("could not parse as SignedToken ({token_err}) or Claims").into(),
+                );
             }
         },
     }
