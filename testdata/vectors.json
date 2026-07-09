@@ -3,88 +3,52 @@
   "generated_by": "gen_test_vectors",
   "vectors": [
     {
-      "expected_base64": "EAEYASIIAQIDBAUGBwgogOLPqgY",
-      "expected_len": 20,
+      "expected_base64": "CIDiz6oG",
+      "expected_len": 6,
       "input": {
-        "algorithm": 1,
-        "expires_at": 1700000000,
-        "key_id_base64": "AQIDBAUGBwg",
-        "key_id_type": 1
+        "expires_at": 1700000000
       },
-      "name": "payload_hmac_keyhash",
-      "type": "payload"
+      "name": "claims_minimal",
+      "type": "claims"
     },
     {
-      "expected_base64": "EAIYASIIqqqqqqqqqqoogKSn2gY",
-      "expected_len": 20,
+      "expected_base64": "CIDiz6oGEPCTz6oGGPCTz6oGIgp1c2VyOmFsaWNlKg9hcGkuZXhhbXBsZS5jb20",
+      "expected_len": 47,
       "input": {
-        "algorithm": 2,
-        "expires_at": 1800000000,
-        "key_id_base64": "qqqqqqqqqqo",
-        "key_id_type": 1
-      },
-      "name": "payload_ed25519_keyhash",
-      "type": "payload"
-    },
-    {
-      "expected_base64": "EAIYAiIgu7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7sogOb-iQc",
-      "expected_len": 44,
-      "input": {
-        "algorithm": 2,
-        "expires_at": 1900000000,
-        "key_id_base64": "u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7s",
-        "key_id_type": 2
-      },
-      "name": "payload_ed25519_pubkey",
-      "type": "payload"
-    },
-    {
-      "expected_base64": "EAEYASIIEREREREREREogOLPqgYw8JPPqgY48JPPqgZCCnVzZXI6YWxpY2VKD2FwaS5leGFtcGxlLmNvbQ",
-      "expected_len": 61,
-      "input": {
-        "algorithm": 1,
         "audience": "api.example.com",
         "expires_at": 1700000000,
         "issued_at": 1699990000,
-        "key_id_base64": "ERERERERERE",
-        "key_id_type": 1,
         "not_before": 1699990000,
         "subject": "user:alice"
       },
-      "name": "payload_hmac_full_claims",
-      "type": "payload"
+      "name": "claims_full",
+      "type": "claims"
     },
     {
-      "expected_base64": "EAEYASII__________8o____________AQ",
-      "expected_len": 25,
+      "expected_base64": "CP___________wE",
+      "expected_len": 11,
       "input": {
-        "algorithm": 1,
-        "expires_at": 18446744073709551615,
-        "key_id_base64": "__________8",
-        "key_id_type": 1
+        "expires_at": 18446744073709551615
       },
-      "name": "payload_hmac_max",
-      "type": "payload"
+      "name": "claims_max_expiry",
+      "type": "claims"
     },
     {
-      "expected_base64": "EAEYASIIIiIiIiIiIiIogOLPqgZSBWFkbWluUgRyZWFkUgV3cml0ZQ",
-      "expected_len": 40,
+      "expected_base64": "CIDiz6oGMgVhZG1pbjIEcmVhZDIFd3JpdGU",
+      "expected_len": 26,
       "input": {
-        "algorithm": 1,
         "expires_at": 1700000000,
-        "key_id_base64": "IiIiIiIiIiI",
-        "key_id_type": 1,
         "scopes": [
           "admin",
           "read",
           "write"
         ]
       },
-      "name": "payload_hmac_scopes",
-      "type": "payload"
+      "name": "claims_scopes",
+      "type": "claims"
     },
     {
-      "expected_base64": "ChQQARgBIghmsHh3jqsc1CiA4s-qBhIg_FZ5zp_Me8pY33q916M6rNNclfksiQSTnaWBrdeNkM4",
+      "expected_base64": "EAEYASIIZrB4d46rHNQqBgiA4s-qBjIgIvrlYqdlE6W7xSy4to34yLwLuoRCAgjhe9TpyVcDbyA",
       "expected_len": 56,
       "input": {
         "algorithm": "hmac",
@@ -96,7 +60,7 @@
       "type": "signed_token"
     },
     {
-      "expected_base64": "ChQQAhgBIghhulHJ2cOw9yiApKfaBhJAO1FmQzgooh6l1LRtCBsPbe4lMohhV9-zgo8uP1OcHbBMVgngyKvjBsqzGgzQyLmrZ7vfTGiiuBKekeox5t2IBQ",
+      "expected_base64": "EAIYASIIYbpRydnDsPcqBgiApKfaBjJAY6o9HUTzrNVdOaRPzOPoIeK2uV0NKFLVXWR8fPY9HQtfZAtG4HDms-wC4-mnZUklQGTvXjwI-BfGaFpzvBwvAw",
       "expected_len": 88,
       "input": {
         "algorithm": "ed25519",
@@ -109,7 +73,7 @@
       "type": "signed_token"
     },
     {
-      "expected_base64": "CiwQAhgCIiC1QJ-8F00jcoNzJqIhdKkS61okENNE1EE5z5U719uZ6CiApKfaBhJAuXkWYK8QpYpc_5Qav8ihop1x-gm0se0wza7Vu-GeG7okglb-f6nGaymlSSKEqH7urO-mYvWV7N63gv9njijHDw",
+      "expected_base64": "EAIYAiIgtUCfvBdNI3KDcyaiIXSpEutaJBDTRNRBOc-VO9fbmegqBgiApKfaBjJAzD45VWbhWZ2O5rHrQq3iEiyYHePy2P-kVXVwkiJx9pyYgyZm_1O9d1sciVoCJBFG91ME_kNzAYf2xA3XG4pPDw",
       "expected_len": 112,
       "input": {
         "algorithm": "ed25519",

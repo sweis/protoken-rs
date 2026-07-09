@@ -18,8 +18,8 @@ Benchmarks for protoken sign and verify operations across all three algorithms.
 | Algorithm | KeyHash token | PublicKey token |
 |---|---|---|
 | HMAC-SHA256 | ~56 B | n/a |
-| Ed25519 | ~88 B | ~120 B |
-| ML-DSA-44 | ~2,500 B | ~3,800 B |
+| Ed25519 | ~88 B | ~112 B |
+| ML-DSA-44 | ~2,450 B | ~3,760 B |
 
 ## Platform
 

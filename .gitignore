@@ -3,3 +3,9 @@
 /fuzz/corpus
 /fuzz/artifacts
 /mutants.out*
+
+# Local key/token experiment artifacts
+*.key
+*.b64
+/protoken
+/inspect

@@ -13,8 +13,8 @@ protoken = { path = ".." }
 serde_json = "1"
 
 [[bin]]
-name = "parse_payload"
-path = "fuzz_targets/parse_payload.rs"
+name = "parse_claims"
+path = "fuzz_targets/parse_claims.rs"
 test = false
 doc = false
 bench = false

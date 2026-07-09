@@ -38,7 +38,7 @@ fn main() {
     let hmac_key =
         hex::decode("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f").unwrap();
     let claims = reference_claims();
-    let hmac_token = sign_hmac(&hmac_key, claims.clone()).unwrap();
+    let hmac_token = sign_hmac(&hmac_key, &claims).unwrap();
     let hmac_sk = SigningKey {
         algorithm: Algorithm::HmacSha256,
         secret_key: Zeroizing::new(hmac_key.clone()),
@@ -69,7 +69,7 @@ fn main() {
     let claims = reference_claims();
     let ed25519_token = sign_ed25519(
         &ed25519_seed,
-        claims.clone(),
+        &claims,
         KeyIdentifier::KeyHash(ed25519_key_hash),
     )
     .unwrap();
@@ -97,11 +97,11 @@ fn main() {
     }));
 
     // === ML-DSA-44 ===
-    // ML-DSA-44 signing is non-deterministic, so we generate and freeze the token.
+    // Uses the deterministic signing variant; the seed is generated once and frozen.
     let (mldsa_sk_bytes, mldsa_pk_bytes) = generate_mldsa44_key().unwrap();
     let mldsa_key_hash = mldsa44_key_hash(&mldsa_pk_bytes).unwrap();
     let claims = reference_claims();
-    let mldsa_token = sign_mldsa44(&mldsa_sk_bytes, claims, mldsa_key_hash).unwrap();
+    let mldsa_token = sign_mldsa44(&mldsa_sk_bytes, &claims, mldsa_key_hash).unwrap();
     let mldsa_sk = SigningKey {
         algorithm: Algorithm::MlDsa44,
         secret_key: Zeroizing::new(mldsa_sk_bytes),
@@ -126,7 +126,7 @@ fn main() {
     }));
 
     let output = serde_json::json!({
-        "description": "Long-lived protoken reference vectors (expire 2036). Any change in HMAC/Ed25519 token_base64 indicates a wire format regression. ML-DSA-44 tokens are non-deterministic but must still verify.",
+        "description": "Long-lived protoken reference vectors (expire 2036). All algorithms sign deterministically; any change in token_base64 indicates a wire format regression.",
         "generated_by": "gen_reference_vectors",
         "vectors": vectors
     });
