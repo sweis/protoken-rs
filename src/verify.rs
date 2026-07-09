@@ -658,12 +658,12 @@ mod tests {
         let key_id = KeyIdentifier::KeyHash(compute_key_hash(hash_key));
         let payload = serialize_claims(&claims);
         let signing_input =
-            serialize_signing_input(Version::V0, Algorithm::HmacSha256, &key_id, &payload);
+            serialize_signing_input(Version::V1, Algorithm::HmacSha256, &key_id, &payload);
         let mut mac = Hmac::<Sha256>::new_from_slice(sign_key).unwrap();
         mac.update(&signing_input);
         let tag = mac.finalize().into_bytes();
         serialize_signed_token(&SignedToken {
-            version: Version::V0,
+            version: Version::V1,
             algorithm: Algorithm::HmacSha256,
             key_identifier: key_id,
             payload,
@@ -754,12 +754,12 @@ mod tests {
         let key_id = KeyIdentifier::KeyHash(compute_key_hash(key));
         let payload = serialize_claims(&claims);
         let signing_input =
-            serialize_signing_input(Version::V0, Algorithm::HmacSha256, &key_id, &payload);
+            serialize_signing_input(Version::V1, Algorithm::HmacSha256, &key_id, &payload);
         let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
         mac.update(&signing_input);
         let tag = mac.finalize().into_bytes();
         let token_bytes = serialize_signed_token(&SignedToken {
-            version: Version::V0,
+            version: Version::V1,
             algorithm: Algorithm::HmacSha256,
             key_identifier: key_id,
             payload,

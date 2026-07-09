@@ -82,7 +82,7 @@ These schemes are designed for firmware signing and CA certificates, not token i
 
 ## Decision: ML-DSA-44
 
-ML-DSA-44 is the only scheme that is simultaneously stateless, fast, NIST standardized, and well-supported in Rust. The main trade-off is token size (~2,500 B vs 56-88 B for HMAC/Ed25519).
+ML-DSA-44 is the only scheme that is simultaneously stateless, fast, NIST standardized, and well-supported in Rust. The main trade-off is token size (~2,500 B vs 58-90 B for HMAC/Ed25519).
 
 Implementation uses the `ml-dsa` crate (RustCrypto): ~1,100 dependents, 69K downloads, actively maintained with security hardening (Barrett reduction for timing side-channels). Neither `ml-dsa` nor `fips204` has been independently audited.
 

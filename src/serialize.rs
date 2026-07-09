@@ -4,7 +4,7 @@
 //! varints, default values omitted.
 //!
 //! SignedToken (envelope) proto3 fields:
-//!   uint32 version = 1;      tag 0x08 (reserved, always 0, omitted)
+//!   uint32 version = 1;      tag 0x08 (format version, always 1, required)
 //!   uint32 algorithm = 2;    tag 0x10
 //!   uint32 key_id_type = 3;  tag 0x18
 //!   bytes  key_id = 4;       tag 0x22
@@ -237,6 +237,7 @@ pub(crate) fn deserialize_signed_token_at(
         )));
     }
 
+    let mut version: Option<Version> = None;
     let mut algorithm: u64 = 0;
     let mut key_id_type: u64 = 0;
     let mut key_id: Vec<u8> = Vec::new();
@@ -259,11 +260,13 @@ pub(crate) fn deserialize_signed_token_at(
         last_field_number = field_number;
 
         match (field_number, wire_type) {
-            // Version can only legally be 0, and canonical encoding omits
-            // zero values, so an explicit version field is always invalid.
             (1, 0) => {
-                let v = proto3::decode_varint(data, &mut pos)?;
-                return Err(ProtokenError::InvalidVersion(proto3::to_u8(v, "version")?));
+                let v = read_nonzero_varint(data, &mut pos, "version")?;
+                let v = proto3::to_u8(v, "version")?;
+                if v != Version::V1.to_byte() {
+                    return Err(ProtokenError::InvalidVersion(v));
+                }
+                version = Some(Version::V1);
             }
             (2, 0) => algorithm = read_nonzero_varint(data, &mut pos, "algorithm")?,
             (3, 0) => key_id_type = read_nonzero_varint(data, &mut pos, "key_id_type")?,
@@ -290,6 +293,10 @@ pub(crate) fn deserialize_signed_token_at(
             }
         }
     }
+
+    let version = version.ok_or_else(|| {
+        ProtokenError::MalformedEncoding("missing version field in SignedToken".into())
+    })?;
 
     let algorithm = proto3::to_u8(algorithm, "algorithm")?;
     let algorithm =
@@ -335,7 +342,7 @@ pub(crate) fn deserialize_signed_token_at(
 
     Ok((
         SignedToken {
-            version: Version::V0,
+            version,
             algorithm,
             key_identifier,
             payload,
@@ -370,7 +377,7 @@ mod tests {
 
     fn sample_token_hmac() -> SignedToken {
         SignedToken {
-            version: Version::V0,
+            version: Version::V1,
             algorithm: Algorithm::HmacSha256,
             key_identifier: KeyIdentifier::KeyHash([
                 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
@@ -607,7 +614,7 @@ mod tests {
     #[test]
     fn test_signed_token_ed25519_pubkey_roundtrip() {
         let token = SignedToken {
-            version: Version::V0,
+            version: Version::V1,
             algorithm: Algorithm::Ed25519,
             key_identifier: KeyIdentifier::PublicKey(vec![0xBB; 32]),
             payload: serialize_claims(&sample_claims_full()),
@@ -621,7 +628,7 @@ mod tests {
     #[test]
     fn test_signed_token_mldsa44_pubkey_roundtrip() {
         let token = SignedToken {
-            version: Version::V0,
+            version: Version::V1,
             algorithm: Algorithm::MlDsa44,
             key_identifier: KeyIdentifier::PublicKey(vec![0xEE; MLDSA44_PUBLIC_KEY_LEN]),
             payload: serialize_claims(&sample_claims_minimal()),
@@ -637,18 +644,21 @@ mod tests {
         let token = sample_token_hmac();
         let wire = serialize_signed_token(&token);
 
-        // version=0 omitted; algorithm=1: tag 0x10, value 0x01
-        assert_eq!(wire[0], 0x10);
+        // version=1: tag 0x08, value 0x01
+        assert_eq!(wire[0], 0x08);
         assert_eq!(wire[1], 0x01);
-        // key_id_type=1: tag 0x18, value 0x01
-        assert_eq!(wire[2], 0x18);
+        // algorithm=1: tag 0x10, value 0x01
+        assert_eq!(wire[2], 0x10);
         assert_eq!(wire[3], 0x01);
+        // key_id_type=1: tag 0x18, value 0x01
+        assert_eq!(wire[4], 0x18);
+        assert_eq!(wire[5], 0x01);
         // key_id: tag 0x22, length 8
-        assert_eq!(wire[4], 0x22);
-        assert_eq!(wire[5], 0x08);
-        assert_eq!(&wire[6..14], &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(wire[6], 0x22);
+        assert_eq!(wire[7], 0x08);
+        assert_eq!(&wire[8..16], &[1, 2, 3, 4, 5, 6, 7, 8]);
         // payload: tag 0x2A
-        assert_eq!(wire[14], 0x2A);
+        assert_eq!(wire[16], 0x2A);
     }
 
     #[test]
@@ -677,6 +687,7 @@ mod tests {
     #[test]
     fn test_rejects_missing_payload() {
         let mut bad = Vec::new();
+        proto3::encode_uint32(1, 1, &mut bad); // version
         proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
@@ -691,6 +702,7 @@ mod tests {
     #[test]
     fn test_rejects_missing_signature() {
         let mut bad = Vec::new();
+        proto3::encode_uint32(1, 1, &mut bad); // version
         proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
@@ -706,6 +718,7 @@ mod tests {
     fn test_rejects_missing_key_id() {
         // key_id_type present but key_id absent (0 bytes != KEY_HASH_LEN).
         let mut bad = Vec::new();
+        proto3::encode_uint32(1, 1, &mut bad); // version
         proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(5, &serialize_claims(&sample_claims_minimal()), &mut bad);
@@ -722,6 +735,7 @@ mod tests {
     #[test]
     fn test_rejects_invalid_algorithm() {
         let mut bad = Vec::new();
+        proto3::encode_uint32(1, 1, &mut bad); // version
         proto3::encode_uint32(2, 255, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
@@ -751,6 +765,7 @@ mod tests {
     #[test]
     fn test_rejects_invalid_key_id_type() {
         let mut bad = Vec::new();
+        proto3::encode_uint32(1, 1, &mut bad); // version
         proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 9, &mut bad); // invalid key_id_type
         proto3::encode_bytes(4, &[0; 8], &mut bad);
@@ -766,6 +781,7 @@ mod tests {
     fn test_rejects_hmac_with_public_key_id() {
         // HMAC (algorithm=1) has no public key to embed.
         let mut bad = Vec::new();
+        proto3::encode_uint32(1, 1, &mut bad); // version
         proto3::encode_uint32(2, 1, &mut bad); // HMAC
         proto3::encode_uint32(3, 2, &mut bad); // public_key
         proto3::encode_bytes(4, &[0; 32], &mut bad);
@@ -780,6 +796,7 @@ mod tests {
     #[test]
     fn test_rejects_wrong_length_key_hash() {
         let mut bad = Vec::new();
+        proto3::encode_uint32(1, 1, &mut bad); // version
         proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 7], &mut bad); // 7 bytes instead of 8
@@ -797,6 +814,7 @@ mod tests {
     #[test]
     fn test_rejects_wrong_length_ed25519_public_key_id() {
         let mut bad = Vec::new();
+        proto3::encode_uint32(1, 1, &mut bad); // version
         proto3::encode_uint32(2, 2, &mut bad); // Ed25519
         proto3::encode_uint32(3, 2, &mut bad); // public_key
         proto3::encode_bytes(4, &[0; 31], &mut bad); // 31 bytes instead of 32
@@ -813,16 +831,61 @@ mod tests {
 
     #[test]
     fn test_rejects_explicit_version_zero() {
-        // Canonical encoding omits version=0; an explicit `08 00` prefix must
-        // be rejected. Otherwise two distinct byte strings would verify under
-        // one signature (token malleability).
+        // A zero varint is non-canonical; a `08 00` prefix must be rejected.
+        // Otherwise two distinct byte strings could verify under one
+        // signature (token malleability).
         let valid = serialize_signed_token(&sample_token_hmac());
         let mut malleated = vec![0x08, 0x00];
         malleated.extend_from_slice(&valid);
+        let err = deserialize_signed_token(&malleated).unwrap_err();
+        assert!(
+            matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("zero")),
+            "expected zero-value rejection, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_duplicate_version_prefix() {
+        // Prepending a second version field must fail the ascending-order
+        // check, so the byte-distinct token cannot verify.
+        let valid = serialize_signed_token(&sample_token_hmac());
+        let mut malleated = vec![0x08, 0x01];
+        malleated.extend_from_slice(&valid);
+        let err = deserialize_signed_token(&malleated).unwrap_err();
+        assert!(
+            matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("ascending")),
+            "expected ascending-order rejection, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_unknown_version() {
+        let mut bad = Vec::new();
+        proto3::encode_uint32(1, 2, &mut bad); // unknown version 2
+        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 8], &mut bad);
+        proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
+        proto3::encode_bytes(6, &[0; 32], &mut bad);
         assert!(matches!(
-            deserialize_signed_token(&malleated),
-            Err(ProtokenError::InvalidVersion(0))
+            deserialize_signed_token(&bad),
+            Err(ProtokenError::InvalidVersion(2))
         ));
+    }
+
+    #[test]
+    fn test_rejects_missing_version() {
+        let mut bad = Vec::new();
+        proto3::encode_uint32(2, 1, &mut bad); // no version field
+        proto3::encode_uint32(3, 1, &mut bad);
+        proto3::encode_bytes(4, &[0; 8], &mut bad);
+        proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
+        proto3::encode_bytes(6, &[0; 32], &mut bad);
+        let err = deserialize_signed_token(&bad).unwrap_err();
+        assert!(
+            matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("missing version")),
+            "expected missing version error, got {err:?}"
+        );
     }
 
     #[test]
@@ -877,6 +940,7 @@ mod tests {
         // Zero-length payload/signature fields are non-canonical (omitted when
         // empty), and must not satisfy the required-field checks.
         let mut bad = Vec::new();
+        proto3::encode_uint32(1, 1, &mut bad); // version
         proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
@@ -890,6 +954,7 @@ mod tests {
         );
 
         let mut bad = Vec::new();
+        proto3::encode_uint32(1, 1, &mut bad); // version
         proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
@@ -914,6 +979,7 @@ mod tests {
     #[test]
     fn test_rejects_duplicate_token_field() {
         let mut bad = Vec::new();
+        proto3::encode_uint32(1, 1, &mut bad); // version
         proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(2, 1, &mut bad); // duplicate algorithm
         assert!(deserialize_signed_token(&bad).is_err());
@@ -975,6 +1041,7 @@ mod tests {
     #[test]
     fn test_rejects_oversized_payload_inside_token() {
         let mut bad = Vec::new();
+        proto3::encode_uint32(1, 1, &mut bad); // version
         proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
@@ -986,6 +1053,7 @@ mod tests {
     #[test]
     fn test_accepts_max_size_payload_inside_token() {
         let mut data = Vec::new();
+        proto3::encode_uint32(1, 1, &mut data); // version
         proto3::encode_uint32(2, 1, &mut data);
         proto3::encode_uint32(3, 1, &mut data);
         proto3::encode_bytes(4, &[0; 8], &mut data);
@@ -998,6 +1066,7 @@ mod tests {
     #[test]
     fn test_rejects_oversized_signature_inside_token() {
         let mut bad = Vec::new();
+        proto3::encode_uint32(1, 1, &mut bad); // version
         proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
@@ -1009,6 +1078,7 @@ mod tests {
     #[test]
     fn test_accepts_max_size_signature() {
         let mut data = Vec::new();
+        proto3::encode_uint32(1, 1, &mut data); // version
         proto3::encode_uint32(2, 1, &mut data);
         proto3::encode_uint32(3, 1, &mut data);
         proto3::encode_bytes(4, &[0; 8], &mut data);
@@ -1021,6 +1091,7 @@ mod tests {
     #[test]
     fn test_rejects_oversized_key_id() {
         let mut bad = Vec::new();
+        proto3::encode_uint32(1, 1, &mut bad); // version
         proto3::encode_uint32(2, 3, &mut bad); // ML-DSA-44
         proto3::encode_uint32(3, 2, &mut bad); // public_key
         proto3::encode_bytes(4, &vec![0; MLDSA44_PUBLIC_KEY_LEN + 1], &mut bad);

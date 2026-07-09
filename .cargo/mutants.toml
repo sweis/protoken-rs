@@ -18,8 +18,8 @@ exclude_re = [
     'proto3\.rs.*replace \| with \^ in encode_varint',
     # (field << 3) | wire_type — low 3 bits always 0 after shift
     'proto3\.rs.*replace \| with \^ in encode_tag',
-    # Version::to_byte only has V0 = 0
-    'types\.rs.*replace Version::to_byte -> u8 with 0',
+    # Version::to_byte only has V1 = 1, so a constant body is equivalent
+    'types\.rs.*replace Version::to_byte -> u8 with 1',
 ]
 
 # Give each mutant test run some headroom in case the machine is loaded.

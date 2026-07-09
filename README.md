@@ -6,8 +6,8 @@ Compact, signed binary tokens using canonical proto3 wire encoding. Encoding is 
 
 Supports three algorithms:
 
-- **HMAC-SHA256** -- symmetric MAC, ~56-byte tokens
-- **Ed25519** -- asymmetric signature, ~88-byte tokens
+- **HMAC-SHA256** -- symmetric MAC, ~58-byte tokens
+- **Ed25519** -- asymmetric signature, ~90-byte tokens
 - **ML-DSA-44** -- post-quantum signature (FIPS 204), ~2,500-byte tokens
 
 ## Build
@@ -71,7 +71,7 @@ Example output from `inspect --json` (no key needed):
     "scopes": ["read", "write"]
   },
   "signature_base64": "HGsm4IgMB8uDg...",
-  "total_bytes": 142
+  "total_bytes": 144
 }
 ```
 
@@ -149,7 +149,7 @@ tokens -- so the envelope can carry other message types.
 
 ```proto
 message SignedToken {
-  uint32 version = 1;      // reserved, always 0 (omitted on wire)
+  uint32 version = 1;      // format version, always 1, required
   uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44
   uint32 key_id_type = 3;  // 1 = key_hash, 2 = public_key
   bytes  key_id = 4;       // 8 B (key_hash) or public key (Ed25519: 32 B, ML-DSA-44: 1312 B)
@@ -205,9 +205,9 @@ Keys used with protoken should not be reused to sign other formats.
 
 | Configuration | Total |
 |---|---|
-| HMAC + key_hash (minimal) | ~56 B |
-| Ed25519 + key_hash (minimal) | ~88 B |
-| Ed25519 + embedded public key | ~112 B |
+| HMAC + key_hash (minimal) | ~58 B |
+| Ed25519 + key_hash (minimal) | ~90 B |
+| Ed25519 + embedded public key | ~114 B |
 | ML-DSA-44 + key_hash (minimal) | ~2,450 B |
 | ML-DSA-44 + embedded public key | ~3,760 B |
 

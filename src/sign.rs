@@ -52,7 +52,7 @@ pub fn sign_hmac(key: &[u8], claims: &Claims) -> Result<Vec<u8>, ProtokenError> 
     let key_id = KeyIdentifier::KeyHash(compute_key_hash(key));
     let payload = serialize_claims(claims);
     let signing_input =
-        serialize_signing_input(Version::V0, Algorithm::HmacSha256, &key_id, &payload);
+        serialize_signing_input(Version::V1, Algorithm::HmacSha256, &key_id, &payload);
 
     let mut mac = Hmac::<Sha256>::new_from_slice(key)
         .map_err(|e| ProtokenError::SigningFailed(format!("invalid HMAC key: {e}")))?;
@@ -77,7 +77,7 @@ pub fn sign_ed25519(
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_array);
 
     let payload = serialize_claims(claims);
-    let signing_input = serialize_signing_input(Version::V0, Algorithm::Ed25519, &key_id, &payload);
+    let signing_input = serialize_signing_input(Version::V1, Algorithm::Ed25519, &key_id, &payload);
     let sig = signing_key.sign(&signing_input);
 
     Ok(append_signature(signing_input, &sig.to_bytes()))
@@ -98,7 +98,7 @@ pub fn sign_mldsa44(
     let signing_key = ml_dsa::SigningKey::<MlDsa44>::from_seed(&seed_array.into());
 
     let payload = serialize_claims(claims);
-    let signing_input = serialize_signing_input(Version::V0, Algorithm::MlDsa44, &key_id, &payload);
+    let signing_input = serialize_signing_input(Version::V1, Algorithm::MlDsa44, &key_id, &payload);
     let sig = signing_key
         .try_sign(&signing_input)
         .map_err(|e| ProtokenError::SigningFailed(format!("ML-DSA-44 signing failed: {e}")))?;
@@ -150,7 +150,7 @@ mod tests {
         let token = deserialize_signed_token(&token_bytes).unwrap();
         let decoded = deserialize_claims(&token.payload).unwrap();
 
-        assert_eq!(token.version, Version::V0);
+        assert_eq!(token.version, Version::V1);
         assert_eq!(token.algorithm, Algorithm::HmacSha256);
         assert_eq!(decoded.expires_at, 1700000000);
 
@@ -259,7 +259,7 @@ mod tests {
         let token = deserialize_signed_token(&token_bytes).unwrap();
         let decoded = deserialize_claims(&token.payload).unwrap();
 
-        assert_eq!(token.version, Version::V0);
+        assert_eq!(token.version, Version::V1);
         assert_eq!(token.algorithm, Algorithm::HmacSha256);
         assert_eq!(decoded, claims);
     }
@@ -279,7 +279,7 @@ mod tests {
         let token = deserialize_signed_token(&token_bytes).unwrap();
         let decoded = deserialize_claims(&token.payload).unwrap();
 
-        assert_eq!(token.version, Version::V0);
+        assert_eq!(token.version, Version::V1);
         assert_eq!(token.algorithm, Algorithm::Ed25519);
         assert_eq!(decoded, claims);
     }
@@ -327,7 +327,7 @@ mod tests {
         let token = deserialize_signed_token(&token_bytes).unwrap();
         let decoded = deserialize_claims(&token.payload).unwrap();
 
-        assert_eq!(token.version, Version::V0);
+        assert_eq!(token.version, Version::V1);
         assert_eq!(token.algorithm, Algorithm::MlDsa44);
         assert_eq!(decoded, claims);
     }

@@ -1,11 +1,11 @@
 use crate::error::ProtokenError;
 use serde::Serialize;
 
-/// Token format version.
+/// Token format version. Nonzero so it always appears on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[repr(u8)]
 pub enum Version {
-    V0 = 0,
+    V1 = 1,
 }
 
 impl Version {
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn test_version_to_byte() {
-        assert_eq!(Version::V0.to_byte(), 0);
+        assert_eq!(Version::V1.to_byte(), 1);
     }
 
     #[test]

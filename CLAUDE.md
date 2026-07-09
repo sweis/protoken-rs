@@ -19,7 +19,7 @@ Protokens are designed to be a simple, fast replacement for JWTs, ad hoc tokens,
 ### Proto3 Schema
 ```proto
 message SignedToken {
-  uint32 version = 1;      // reserved, always 0 (omitted on wire)
+  uint32 version = 1;      // format version, always 1, required
   uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44
   uint32 key_id_type = 3;  // 1 = key_hash, 2 = public_key
   bytes  key_id = 4;       // 8 B (key_hash) or public key (Ed25519: 32 B, ML-DSA-44: 1312 B)
@@ -49,7 +49,7 @@ message VerifyingKey {
 ```
 
 7. Canonical encoding rules: fields in ascending order, minimal varints, default values (0/empty) omitted, no unknown or duplicate fields. Repeated fields (scope) appear consecutively, sorted lexicographically, no duplicates. Decoders reject non-canonical input.
-8. The version field is reserved and always 0. It will not appear on the wire until we finalize the format.
+8. The version field is 1 and always present on the wire (nonzero, so canonical encoding never omits it). Parsers reject any other value; future format revisions bump it.
 9. The signature is computed over the canonical encoding of envelope fields 1-5. Because the encoding is canonical, the signed bytes are exactly the token bytes minus the trailing signature field. This binds the algorithm and key identifier into the signature, preventing algorithm-confusion and key-substitution attacks.
 10. Verification order: parse envelope (structure and size checks) → check algorithm matches the key → constant-time compare key identifier → verify signature → parse payload as Claims → check temporal claims. Payload bytes are not interpreted before the signature verifies.
 
@@ -113,5 +113,5 @@ See [notes/research-prior-art.md](notes/research-prior-art.md) for a comparison 
 - `exp`, `nbf`, `iat` are universal temporal claims
 - `iss`, `sub`, `aud` are the core identity triple
 - Binary encoding (CWT ~194B) significantly beats JSON (JWT ~300-400B)
-- Our 56-88 byte tokens are competitive with the most compact formats
+- Our 58-90 byte tokens are competitive with the most compact formats
 - Protoken's single-algorithm approach avoids JWT's algorithm confusion attacks
