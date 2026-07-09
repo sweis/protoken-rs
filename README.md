@@ -1,6 +1,6 @@
 # protoken-rs: Experimental Protobuf-based tokens in Rust
 
-Compact, signed binary tokens using canonical proto3 wire encoding. Encoding is deterministic with our own serializer, and decoding can use standard protobuf deserialization.
+Compact, signed binary tokens using canonical proto3 wire encoding.
 
 **Warning**: This code is experimental and not ready for production. It is mostly AI generated and has not had human review.
 
