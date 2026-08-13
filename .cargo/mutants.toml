@@ -1,9 +1,11 @@
 # cargo-mutants configuration for protoken
 #
-# main.rs is the CLI binary and has no unit tests — excluded from mutation.
+# main.rs is the CLI binary and the Python bindings are a thin conversion
+# layer; neither has Rust unit tests, so they are excluded from mutation.
 
 exclude_globs = [
     "src/main.rs",
+    "bindings/**",
 ]
 
 additional_cargo_test_args = [

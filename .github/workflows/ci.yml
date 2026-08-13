@@ -8,94 +8,54 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
 
 jobs:
-  # Detect which files changed to conditionally run jobs
-  changes:
-    name: Detect Changes
-    runs-on: ubuntu-latest
-    outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      deps: ${{ steps.filter.outputs.deps }}
-      tests: ${{ steps.filter.outputs.tests }}
-      snark: ${{ steps.filter.outputs.snark }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            rust:
-              - '**/*.rs'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - '**/Cargo.toml'
-            deps:
-              - 'Cargo.lock'
-              - 'Cargo.toml'
-              - '**/Cargo.toml'
-            tests:
-              - '**/*.rs'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - '**/Cargo.toml'
-              - 'testdata/**'
-            snark:
-              - 'src/snark.rs'
-
   test:
     name: Test
-    needs: changes
-    if: ${{ needs.changes.outputs.tests == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --lib --tests -- --skip snark
+      - run: cargo test
+      # The library must build for users who disable the CLI.
+      - run: cargo check --no-default-features
+      # Stored vectors must be reproducible from the generators.
+      - run: cargo run --example gen_test_vectors | diff - testdata/vectors.json
+      - run: cargo run --example gen_reference_vectors | diff - testdata/reference_vectors.json
 
-  test-snark:
-    name: Test (SNARK)
-    needs: changes
-    if: ${{ needs.changes.outputs.snark == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --lib snark::tests -- --test-threads=1
-        env:
-          RUST_MIN_STACK: 67108864
-
-  clippy:
-    name: Clippy
-    needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+  lint:
+    name: Clippy and rustfmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-
-  fmt:
-    name: Format
-    needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+          components: clippy, rustfmt
       - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --no-default-features --lib -- -D warnings
+      - run: cargo check --manifest-path fuzz/Cargo.toml
 
   audit:
     name: Audit
-    needs: changes
-    if: ${{ needs.changes.outputs.deps == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install cargo-audit
+      - run: cargo install --locked cargo-audit
       - run: cargo audit
+
+  python:
+    name: Python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # pip builds the extension with maturin as the PEP 517 backend.
+      - run: pip install pytest ./bindings/python
+      - run: pytest
+        working-directory: bindings/python

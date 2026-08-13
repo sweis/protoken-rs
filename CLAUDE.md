@@ -51,7 +51,7 @@ message VerifyingKey {
 7. Canonical encoding rules: fields in ascending order, minimal varints, default values (0/empty) omitted, no unknown or duplicate fields. Repeated fields (scope) appear consecutively, sorted lexicographically, no duplicates. Decoders reject non-canonical input.
 8. The version field is reserved and always 0. It will not appear on the wire until we finalize the format.
 9. The signature is computed over the canonical encoding of envelope fields 1-5. Because the encoding is canonical, the signed bytes are exactly the token bytes minus the trailing signature field. This binds the algorithm and key identifier into the signature, preventing algorithm-confusion and key-substitution attacks.
-10. Verification order: parse envelope (structure and size checks) → check algorithm matches the key → constant-time compare key identifier → verify signature → parse payload as Claims → check temporal claims. Payload bytes are not interpreted before the signature verifies.
+10. Verification order: parse envelope (structure and size checks) → check algorithm matches the key → constant-time compare key identifier → verify signature → parse payload as Claims → `Claims::validate()` → check temporal claims. Payload bytes are not interpreted before the signature verifies.
 
 ## Decisions
 
@@ -63,27 +63,38 @@ Chose Ed25519 over P-256: deterministic nonces (eliminates nonce-reuse key compr
 See [notes/research-p256-vs-ed25519.md](notes/research-p256-vs-ed25519.md).
 
 ### Canonical Proto3 Serialization
-Canonical proto3 wire encoding with a custom ~360-line encoder/decoder (`src/proto3.rs`). This produces valid proto3 that any library can decode, while guaranteeing deterministic output.
+Canonical proto3 wire encoding with a small custom encoder/decoder (`src/proto3.rs`). This produces valid proto3 that any library can decode, while guaranteeing deterministic output.
 See [notes/research-protobuf-determinism.md](notes/research-protobuf-determinism.md).
 
 ### Post-Quantum Signature: ML-DSA-44
-ML-DSA-44 (FIPS 204) chosen over SLH-DSA (huge signatures) and XMSS/LMS (stateful — incompatible with distributed token issuance). Stateless, ~200μs sign, 2,420 B signatures, 1,312 B public keys. Private keys are stored as 32-byte seeds; signing uses the FIPS 204 deterministic variant with an empty context string, so all three algorithms sign deterministically.
+ML-DSA-44 (FIPS 204) chosen over SLH-DSA (huge signatures) and XMSS/LMS (stateful — incompatible with distributed token issuance). Stateless, sub-millisecond signing (see PERFORMANCE.md; the cost varies per message because of rejection sampling), 2,420 B signatures, 1,312 B public keys. Private keys are stored as 32-byte seeds; signing uses the FIPS 204 deterministic variant with an empty context string, so all three algorithms sign deterministically.
 See [notes/research-pq-signatures.md](notes/research-pq-signatures.md).
 
 ### Dependencies: RustCrypto ecosystem
-- `ed25519-dalek` for Ed25519 (raw 32-byte seeds, no PKCS#8)
-- `hmac` + `sha2` for HMAC-SHA256 and SHA-256 key hashing
-- `ml-dsa` (0.1.x) for ML-DSA-44, chosen over `fips204` crate (~1,100 dependents vs ~1)
-- `subtle` for constant-time comparisons
-- `rand` for key generation
-- `zeroize` for secret key memory wiping
-- `clap` (derive) for CLI, `serde`/`serde_json` for JSON, `humantime`, `base64`, `thiserror`
+- `ed25519-dalek` 3 for Ed25519 (raw 32-byte seeds, no PKCS#8); verification uses `verify_strict`
+- `hmac` 0.13 + `sha2` 0.11 for HMAC-SHA256 and SHA-256 key hashing
+- `ml-dsa` (0.1.x) for ML-DSA-44, chosen over `fips204` crate (~1,100 dependents vs ~1); built with its `zeroize` feature and without `pkcs8`/`rand_core`
+- All of the above share one `digest`/`signature` generation, so no crate appears twice in the tree
+- `getrandom` for key generation (`rand` was only used for `OsRng`; `getrandom` is already in the tree and reports RNG failure as an error instead of panicking)
+- `subtle` for constant-time comparisons, `zeroize` for secret wiping
+- `serde` (Claims and Algorithm derive both directions), `base64`, `thiserror`
+- CLI only, behind the default `cli` feature: `clap` (derive), `colored`, `humantime`, `serde_json`. Library users and the Python bindings build with `default-features = false`.
+- `base64` stays on 0.22: 0.23 adds default-on unsafe SIMD code that buys nothing for token-sized inputs.
+
+### Key API: `SigningKey` and `VerifyingKey`
+`keys.rs` owns algorithm dispatch: `SigningKey::generate/from_secret_key/sign/sign_with_key_id/verify/verifying_key` and `VerifyingKey::verify`, plus `from_bytes`/`to_bytes`. `from_secret_key` is the one place the "derive the public key from the secret" recipe lives; `generate` is 32 random bytes fed into it. The fields stay public for tests and struct literals, so the methods that hand out the public key check its length and `validate()` checks the full derivation. `SigningKey`'s `PartialEq` compares the secret in constant time. The `sign` and `verify` modules keep the raw-key-material functions underneath. The CLI, examples, integration tests, and Python bindings all go through the key types so the dispatch exists in one place. `Algorithm` has `Display`/`FromStr`/serde using one set of names (`hmac-sha256`, `ed25519`, `ml-dsa-44`) shared by the CLI flag, JSON output, vector files, and Python.
 
 ### Key Serialization: Proto3
-All key types use canonical proto3 encoding (same as the token format). Ed25519 uses raw 32-byte seeds (not PKCS#8 DER). SigningKey includes the public key for asymmetric algorithms so `extract_verifying_key()` can derive the VerifyingKey without re-deriving from secret material. CLI stores keys as base64-encoded proto bytes. See `src/keys.rs`.
+All key types use canonical proto3 encoding (same as the token format). Ed25519 uses raw 32-byte seeds (not PKCS#8 DER). SigningKey stores the public key so `verifying_key()` does not touch secret material; decoding a SigningKey re-derives the public key from the seed and rejects a mismatch, so a corrupted key file cannot issue tokens its own verifying key rejects. HMAC signing keys must not carry a public key. Decoding an Ed25519 VerifyingKey rejects invalid curve points. CLI stores keys as base64-encoded proto bytes.
+
+### Structural Decoding vs. Semantic Validation
+`deserialize_claims` enforces canonical form and size limits only. The semantic rules (`expires_at` set, `not_before <= expires_at`, no duplicate scopes) live in `Claims::validate()`, which signing applies before encoding and verification applies after the signature check (`finish_verification`). Keeping them out of the decoder lets `inspect` and Python's `inspect_token` display a token from another issuer even when its claims are unusable, which is what those diagnostic tools are for. Both vector generators use fixed seeds, so `make vectors-check` (also run in CI) proves the stored vectors are reproducible; regenerate them only for an intentional format change.
 
 ### Secret Key Zeroization
-`SigningKey.secret_key` uses `Zeroizing<Vec<u8>>` so secret key material is automatically zeroed from memory when dropped. The CLI also zeroizes key material read from files or stdin.
+`SigningKey.secret_key` uses `Zeroizing<Vec<u8>>`, `serialize_signing_key` returns `Zeroizing<Vec<u8>>`, seeds copied to the stack during signing are `Zeroizing` arrays, and the `ed25519-dalek`/`ml-dsa` key objects zeroize themselves. The CLI reads key input into a single full-size zeroizing buffer (growing a buffer would leave un-zeroized partial copies), decodes it into a zeroizing buffer, and `deserialize_verifying_key` keeps field 2 in a zeroizing buffer until the key is accepted, because `verify` tries the verifying-key decoder first even when handed a signing key. Python `bytes` cannot be zeroized; the bindings document this.
+
+### Python Bindings: PyO3 + maturin
+`bindings/python` is a workspace member producing the `protoken._protoken` abi3 extension (Python 3.10+), wrapped by a small pure-Python package with type stubs. PyO3 was chosen over UniFFI (heavier, aimed at Kotlin/Swift too) and a hand-written C ABI (needs `unsafe`, which this crate denies). The binding only converts types and errors; every parser and check is the Rust one. Its tests re-verify and re-sign the stored reference vectors, which doubles as an interop test with the CLI. Token problems raise `VerificationFailed` (or `TokenExpired`/`TokenNotYetValid`); key and claims problems raise the base `ProtokenError`.
 
 ### Key Hash Collision Resistance
 The 8-byte key hash (SHA-256[0..8]) gives ~2^32 collision resistance at the birthday bound. It is a key *identifier* for key selection, not a security binding. Security relies on full signature verification. Documented in the code and README.
@@ -94,17 +105,20 @@ Keys used with protoken should not sign other formats. The signing input has no 
 ## Implementation Status
 
 - `src/types.rs` - Core types (Version, Algorithm, KeyIdType, KeyIdentifier, Claims, SignedToken) and size limits
-- `src/proto3.rs` - Canonical proto3 wire encoder/decoder
-- `src/serialize.rs` - Serialization for Claims and the SignedToken envelope, including the signing-input construction
-- `src/keys.rs` - Proto3 key serialization (SigningKey, VerifyingKey) with validation
-- `src/sign.rs` - HMAC-SHA256, Ed25519, and ML-DSA-44 signing; key generation; key hashing
-- `src/verify.rs` - Verification with algorithm and key checks, signature verification, expiry and not_before checking
-- `src/main.rs` - CLI tool with `generate-key`, `get-verifying-key`, `sign`, `verify`, `inspect` commands
+- `src/proto3.rs` - Canonical proto3 wire encoder/decoder, plus the canonical-form helpers (field order, non-zero/non-empty values, bounded lengths) that the message decoders are built from
+- `src/serialize.rs` - Serialization for Claims and the SignedToken envelope, and the signing-input construction
+- `src/keys.rs` - SigningKey and VerifyingKey: proto3 serialization, validation, and generate/sign/verify dispatch
+- `src/sign.rs` - HMAC-SHA256, Ed25519, and ML-DSA-44 signing on raw key material; key generation; public key derivation; key hashing
+- `src/verify.rs` - Verification on raw key material: algorithm, key identity, and signature length checks, signature verification, expiry and not_before checking
+- `src/main.rs` - CLI (`cli` feature) with `generate-key`, `get-verifying-key`, `sign`, `verify`, `inspect` commands
 - `src/error.rs` - Error types
-- `tests/` - Test vector and reference vector regression tests
-- `testdata/` - Stored vectors; regenerate with `cargo run --example gen_test_vectors > testdata/vectors.json` (and `gen_reference_vectors`)
-- `fuzz/` - cargo-fuzz targets: parse_claims, parse_signed_token, parse_keys, roundtrip, exercise_token
-- `benches/` - Criterion benchmarks; results in PERFORMANCE.md
+- `src/lib.rs` - Re-exports the key types, Claims, Algorithm, and ProtokenError at the crate root; doctest shows the intended usage
+- `tests/` - Test vector and reference vector regression tests (vector files are deserialized into typed structs via serde)
+- `testdata/` - Stored vectors; `make vectors-check` verifies them, `make vectors` regenerates them
+- `bindings/python/` - PyO3 bindings, Python package, stubs, and pytest suite (`make python` inside a virtualenv)
+- `fuzz/` - cargo-fuzz targets: parse_claims, parse_signed_token, parse_keys, roundtrip, exercise_token, verify_token. `make fuzz` first seeds the corpus from the reference vectors (`examples/gen_fuzz_seeds.rs`); without seeds the fuzzers cannot construct an acceptable asymmetric signing key
+- `benches/` - Criterion benchmarks (sign, verify, keygen, envelope parse); results in PERFORMANCE.md
+- No LICENSE file exists yet even though the README refers to one
 - `notes/` - Research documents (prior art, Ed25519 vs P-256, protobuf determinism, post-quantum, ML-DSA key formats, subject identifiers)
 
 ## Research Prior Art

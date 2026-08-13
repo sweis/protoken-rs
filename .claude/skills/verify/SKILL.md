@@ -33,10 +33,22 @@ $BIN inspect $(cat token.b64) --json               # no key needed
 - `--scope x --scope x` (duplicate) → rejected at sign time.
 - `sign key 0s` → rejected ("duration must be at least 1 second").
 - `verify -` with no token argument → clean usage error.
+- `inspect CICD0f-vBw` (expires_at in year 10000) → prints raw epoch seconds, exit 0, no panic.
+- `inspect GAE` (payload with only issued_at) → shown with "Expires (not set...)", exit 0.
+- A key file written as *padded* base64 (either alphabet) → accepted by `sign`/`verify`.
+
+## Also check
+
+- `make vectors-check`: both generators are deterministic and must reproduce
+  `testdata/*.json` exactly. Only run `make vectors` for an intentional wire-format change.
+- Python bindings, if `bindings/python` or the library API changed: create a venv
+  (`python3 -m venv --system-site-packages <scratch>/venv`, activate it), then
+  `cd bindings/python && maturin develop && pytest`. The pytest suite re-verifies and
+  re-signs the reference vectors, so it also proves CLI/Python interop.
 
 ## Gotchas
 
 - `$TMPDIR` may be unset in the sandbox shell; use the session scratchpad path explicitly.
-- Wire-format changes require regenerating stored vectors:
-  `cargo run --example gen_test_vectors > testdata/vectors.json` and
-  `cargo run --example gen_reference_vectors > testdata/reference_vectors.json`.
+- In a worktree session, compound shell commands with redirects may be refused;
+  put the CLI flow in a small script under the scratchpad and run that instead.
+- `maturin develop` leaves `_protoken.abi3.so` in the source tree; it is gitignored.
