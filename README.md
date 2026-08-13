@@ -288,7 +288,3 @@ make fuzz TARGET=parse_claims        # or: parse_signed_token, roundtrip,
 bytes. `verify_token` runs every verifier over the input and, when the input
 is valid Claims, signs and verifies it with each algorithm; it is slower than
 the parsers because it exercises real signing.
-
-## License
-
-See [LICENSE](LICENSE) for details.

@@ -118,7 +118,7 @@ Keys used with protoken should not sign other formats. The signing input has no 
 - `bindings/python/` - PyO3 bindings, Python package, stubs, and pytest suite (`make python` inside a virtualenv)
 - `fuzz/` - cargo-fuzz targets: parse_claims, parse_signed_token, parse_keys, roundtrip, exercise_token, verify_token. `make fuzz` first seeds the corpus from the reference vectors (`examples/gen_fuzz_seeds.rs`); without seeds the fuzzers cannot construct an acceptable asymmetric signing key
 - `benches/` - Criterion benchmarks (sign, verify, keygen, envelope parse); results in PERFORMANCE.md
-- No LICENSE file exists yet even though the README refers to one
+- There is deliberately no LICENSE file or license metadata yet; do not add one or refer to one
 - `notes/` - Research documents (prior art, Ed25519 vs P-256, protobuf determinism, post-quantum, ML-DSA key formats, subject identifiers)
 
 ## Research Prior Art
