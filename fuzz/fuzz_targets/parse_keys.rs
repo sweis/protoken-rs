@@ -1,14 +1,18 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use protoken::keys::{deserialize_signing_key, deserialize_verifying_key, extract_verifying_key};
+use protoken::{SigningKey, VerifyingKey};
 
+// Key decoding must never panic. Anything that decodes must also survive the
+// operations a caller would perform on it.
 fuzz_target!(|data: &[u8]| {
-    // Fuzz SigningKey deserialization
-    if let Ok(sk) = deserialize_signing_key(data) {
-        // If it parses, extracting a verifying key should not panic
-        let _ = extract_verifying_key(&sk);
+    if let Ok(sk) = SigningKey::from_bytes(data) {
+        let _ = sk.verifying_key();
+        let _ = sk.key_identifier(protoken::KeyIdType::KeyHash);
+        let _ = sk.key_identifier(protoken::KeyIdType::PublicKey);
+        let _ = format!("{sk:?}");
     }
-
-    // Fuzz VerifyingKey deserialization
-    let _ = deserialize_verifying_key(data);
+    if let Ok(vk) = VerifyingKey::from_bytes(data) {
+        let _ = vk.key_hash();
+        let _ = vk.verify(data, 0);
+    }
 });

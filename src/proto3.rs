@@ -1,34 +1,20 @@
 //! Minimal proto3 wire format encoder/decoder.
 //!
-//! Produces canonical encoding per our rules:
-//! - Fields in ascending field-number order
-//! - Minimal varint encoding (no zero-padding)
-//! - Default values (0, empty bytes) omitted
+//! The encoders produce, and the decoding helpers enforce, canonical form:
+//! - Fields in ascending field-number order (a repeated field is consecutive)
+//! - Minimal varint encoding
+//! - Default values (0, empty bytes) omitted, so explicit defaults are rejected
 //! - No unknown fields
 //!
-//! All field numbers are <= 15, so tags are single bytes.
+//! The message-specific decoders in `serialize` and `keys` are built from
+//! these helpers. All field numbers are <= 15, so tags are single bytes.
 
 use crate::error::ProtokenError;
 
-// --- Shared helpers ---
-
-/// Convert a u32 to u8, rejecting values > 255 to prevent truncation.
-pub fn to_u8(v: u32, field_name: &str) -> Result<u8, ProtokenError> {
-    u8::try_from(v).map_err(|_| {
-        ProtokenError::MalformedEncoding(format!("{field_name} value {v} exceeds u8 range"))
-    })
-}
-
-/// Read a varint that must fit in a u32. Rejects values > u32::MAX.
-pub fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32, ProtokenError> {
-    let v = read_varint_value(data, pos)?;
-    u32::try_from(v)
-        .map_err(|_| ProtokenError::MalformedEncoding(format!("varint value {v} exceeds u32::MAX")))
-}
-
-// Wire types
-const WIRE_VARINT: u32 = 0;
-const WIRE_LEN: u32 = 2;
+/// Wire type for varint fields (uint32, uint64).
+pub const WIRE_VARINT: u32 = 0;
+/// Wire type for length-delimited fields (bytes, string, submessages).
+pub const WIRE_LEN: u32 = 2;
 
 // --- Encoding ---
 
@@ -145,9 +131,13 @@ pub fn decode_tag(data: &[u8], pos: &mut usize) -> Result<(u32, u32), ProtokenEr
     Ok((field_number, wire_type))
 }
 
-/// Read a varint field value (caller already consumed the tag).
-pub fn read_varint_value(data: &[u8], pos: &mut usize) -> Result<u64, ProtokenError> {
-    decode_varint(data, pos)
+/// Read a varint field value that must fit in a u8, such as an enum-like
+/// uint32 field (caller already consumed the tag).
+pub fn read_u8_value(data: &[u8], pos: &mut usize, field_name: &str) -> Result<u8, ProtokenError> {
+    let v = decode_varint(data, pos)?;
+    u8::try_from(v).map_err(|_| {
+        ProtokenError::MalformedEncoding(format!("{field_name} value {v} exceeds u8 range"))
+    })
 }
 
 /// Read a length-delimited field value (caller already consumed the tag).
@@ -174,6 +164,94 @@ pub fn read_bytes_value<'a>(data: &'a [u8], pos: &mut usize) -> Result<&'a [u8],
     let start = *pos;
     *pos += len;
     Ok(&data[start..*pos])
+}
+
+// --- Canonical-form helpers shared by the message decoders ---
+
+fn zero_value_error(field_name: &str) -> ProtokenError {
+    ProtokenError::MalformedEncoding(format!(
+        "{field_name} is zero (canonical encoding omits default values)"
+    ))
+}
+
+/// Read a varint field value, rejecting an explicit zero (canonical encoding
+/// omits default values, so a zero on the wire is non-canonical).
+pub fn read_nonzero_varint(
+    data: &[u8],
+    pos: &mut usize,
+    field_name: &str,
+) -> Result<u64, ProtokenError> {
+    match decode_varint(data, pos)? {
+        0 => Err(zero_value_error(field_name)),
+        value => Ok(value),
+    }
+}
+
+/// Read an enum-like uint32 field into a u8, rejecting an explicit zero.
+pub fn read_nonzero_u8(
+    data: &[u8],
+    pos: &mut usize,
+    field_name: &str,
+) -> Result<u8, ProtokenError> {
+    match read_u8_value(data, pos, field_name)? {
+        0 => Err(zero_value_error(field_name)),
+        value => Ok(value),
+    }
+}
+
+/// Error for a message that ends before a required field.
+pub fn missing_field(field_name: &str, message_name: &str) -> ProtokenError {
+    ProtokenError::MalformedEncoding(format!("missing {field_name} field in {message_name}"))
+}
+
+/// Error for a field that canonical encoding does not permit at this point:
+/// unknown number, wrong wire type, or a duplicate of a non-repeated field.
+pub fn unexpected_field(field_number: u32, wire_type: u32, message_name: &str) -> ProtokenError {
+    ProtokenError::MalformedEncoding(format!(
+        "unexpected field {field_number} (wire type {wire_type}) in {message_name}"
+    ))
+}
+
+/// Read the next field tag and enforce ascending field order. `repeated` is
+/// the one field number that may appear more than once in a row.
+pub fn next_field(
+    data: &[u8],
+    pos: &mut usize,
+    last_field_number: &mut u32,
+    repeated: Option<u32>,
+) -> Result<(u32, u32), ProtokenError> {
+    let (field_number, wire_type) = decode_tag(data, pos)?;
+    let is_repeat = field_number == *last_field_number;
+    if field_number < *last_field_number || (is_repeat && repeated != Some(field_number)) {
+        return Err(ProtokenError::MalformedEncoding(format!(
+            "fields not in ascending order: field {field_number} after {last_field_number}"
+        )));
+    }
+    *last_field_number = field_number;
+    Ok((field_number, wire_type))
+}
+
+/// Read a length-delimited field value, rejecting empty values (canonical
+/// encoding omits empty fields) and enforcing a maximum length.
+pub fn read_bounded_bytes<'a>(
+    data: &'a [u8],
+    pos: &mut usize,
+    max_len: usize,
+    field_name: &str,
+) -> Result<&'a [u8], ProtokenError> {
+    let bytes = read_bytes_value(data, pos)?;
+    if bytes.is_empty() {
+        return Err(ProtokenError::MalformedEncoding(format!(
+            "{field_name} is empty (canonical encoding omits empty fields)"
+        )));
+    }
+    if bytes.len() > max_len {
+        return Err(ProtokenError::MalformedEncoding(format!(
+            "{field_name} too long: {} bytes (max {max_len})",
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -318,19 +396,89 @@ mod tests {
     }
 
     #[test]
-    fn test_to_u8_rejects_large_value() {
-        assert!(to_u8(256, "test").is_err());
-        assert_eq!(to_u8(255, "test").unwrap(), 255);
-        assert_eq!(to_u8(0, "test").unwrap(), 0);
+    fn test_read_u8_value_bounds() {
+        for (value, ok) in [(0u64, true), (255, true), (256, false), (u64::MAX, false)] {
+            let mut buf = Vec::new();
+            encode_varint(value, &mut buf);
+            let mut pos = 0;
+            let result = read_u8_value(&buf, &mut pos, "test");
+            assert_eq!(result.is_ok(), ok, "value {value}: {result:?}");
+            if ok {
+                assert_eq!(result.unwrap() as u64, value);
+                assert_eq!(pos, buf.len());
+            }
+        }
+        let err = read_u8_value(&[0x80, 0x02], &mut 0, "algorithm").unwrap_err();
+        assert!(
+            matches!(&err, ProtokenError::MalformedEncoding(m) if m == "algorithm value 256 exceeds u8 range"),
+            "got {err:?}"
+        );
+    }
+
+    /// Decode all tags in `tags` with `next_field`, returning the field numbers.
+    fn field_numbers(tags: &[u8], repeated: Option<u32>) -> Result<Vec<u32>, ProtokenError> {
+        let mut pos = 0;
+        let mut last = 0;
+        let mut seen = Vec::new();
+        // Every input tag is a single byte, so exactly one call per byte.
+        for expected_pos in 1..=tags.len() {
+            let (field, _wire_type) = next_field(tags, &mut pos, &mut last, repeated)?;
+            assert_eq!(pos, expected_pos, "next_field must consume the tag");
+            seen.push(field);
+        }
+        Ok(seen)
     }
 
     #[test]
-    fn test_read_u32_rejects_large_value() {
-        // Varint encoding of u32::MAX + 1.
-        let mut buf = Vec::new();
-        encode_varint(u32::MAX as u64 + 1, &mut buf);
-        let mut pos = 0;
-        assert!(read_u32(&buf, &mut pos).is_err());
+    fn test_next_field_order_rules() {
+        // Tags for fields 1, 2, 6 (varint wire type): 0x08, 0x10, 0x30.
+        assert_eq!(field_numbers(&[0x08, 0x10, 0x30], None).unwrap(), [1, 2, 6]);
+        // Descending is rejected regardless of the repeated field.
+        assert!(field_numbers(&[0x10, 0x08], None).is_err());
+        assert!(field_numbers(&[0x30, 0x08], Some(6)).is_err());
+        // A repeat is only allowed for the designated repeated field.
+        assert!(field_numbers(&[0x08, 0x08], None).is_err());
+        assert!(field_numbers(&[0x08, 0x08], Some(6)).is_err());
+        assert_eq!(
+            field_numbers(&[0x30, 0x30, 0x30], Some(6)).unwrap(),
+            [6, 6, 6]
+        );
+        // Once a later field appears, the repeated field may not come back.
+        assert!(field_numbers(&[0x30, 0x38, 0x30], Some(6)).is_err());
+    }
+
+    #[test]
+    fn test_nonzero_readers_reject_explicit_zero() {
+        assert!(matches!(
+            read_nonzero_varint(&[0x00], &mut 0, "f"),
+            Err(ProtokenError::MalformedEncoding(m)) if m.starts_with("f is zero")
+        ));
+        assert_eq!(read_nonzero_varint(&[0x01], &mut 0, "f").unwrap(), 1);
+        assert!(matches!(
+            read_nonzero_u8(&[0x00], &mut 0, "f"),
+            Err(ProtokenError::MalformedEncoding(m)) if m.starts_with("f is zero")
+        ));
+        assert_eq!(read_nonzero_u8(&[0x07], &mut 0, "f").unwrap(), 7);
+        assert!(read_nonzero_u8(&[0x80, 0x02], &mut 0, "f").is_err());
+    }
+
+    #[test]
+    fn test_read_bounded_bytes_limits() {
+        // Length prefix followed by payload.
+        assert_eq!(
+            read_bounded_bytes(&[0x02, b'h', b'i'], &mut 0, 2, "f").unwrap(),
+            b"hi"
+        );
+        assert!(matches!(
+            read_bounded_bytes(&[0x00], &mut 0, 2, "f"),
+            Err(ProtokenError::MalformedEncoding(m)) if m.contains("empty")
+        ));
+        assert!(matches!(
+            read_bounded_bytes(&[0x03, b'a', b'b', b'c'], &mut 0, 2, "f"),
+            Err(ProtokenError::MalformedEncoding(m)) if m.contains("too long")
+        ));
+        // Truncated payload is caught by read_bytes_value.
+        assert!(read_bounded_bytes(&[0x05, b'a'], &mut 0, 8, "f").is_err());
     }
 
     #[test]

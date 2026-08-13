@@ -8,11 +8,20 @@ pub enum ProtokenError {
     #[error("invalid algorithm: {0}")]
     InvalidAlgorithm(u8),
 
+    #[error("unknown algorithm name: {0:?} (expected hmac-sha256, ed25519, or ml-dsa-44)")]
+    UnknownAlgorithmName(String),
+
     #[error("invalid key identifier type: {0}")]
     InvalidKeyIdType(u8),
 
     #[error("invalid key length: expected {expected} bytes, got {actual}")]
     InvalidKeyLength { expected: usize, actual: usize },
+
+    #[error("invalid key: {0}")]
+    InvalidKey(String),
+
+    #[error("random number generator failed: {0}")]
+    RngFailed(String),
 
     #[error("signing failed: {0}")]
     SigningFailed(String),

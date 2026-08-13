@@ -1,31 +1,54 @@
+[workspace]
+members = ["bindings/python"]
+# The fuzz crate is a standalone cargo-fuzz project with its own lockfile.
+exclude = ["fuzz"]
+
 [package]
 name = "protoken"
 version = "0.1.0"
 edition = "2021"
-description = "Protobuf-inspired signed tokens — a minimal, fast alternative to JWTs"
+rust-version = "1.85"
+description = "Protobuf-based signed tokens: a minimal, fast alternative to JWTs"
+repository = "https://github.com/sweis/protoken-rs"
+readme = "README.md"
+categories = ["authentication", "cryptography", "encoding"]
+keywords = ["token", "jwt", "protobuf", "ed25519", "ml-dsa"]
+
+[features]
+default = ["cli"]
+# Dependencies used only by the `protoken` binary. Library users can disable
+# them with `default-features = false`.
+cli = ["dep:clap", "dep:colored", "dep:humantime", "dep:serde_json"]
+
+[[bin]]
+name = "protoken"
+required-features = ["cli"]
 
 [dependencies]
 # Crypto (RustCrypto ecosystem)
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-hmac = "0.12"
-sha2 = "0.10"
+ed25519-dalek = "3"
+hmac = { version = "0.13", features = ["zeroize"] }
+sha2 = { version = "0.11", default-features = false }
 subtle = "2"
-ml-dsa = { version = "0.1", features = ["rand_core"] }
-rand = "0.8"
+ml-dsa = { version = "0.1", default-features = false, features = ["alloc", "zeroize"] }
+getrandom = "0.4"
 zeroize = "1"
 
-# Serialization & CLI
-clap = { version = "4", features = ["derive"] }
+# Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-humantime = "2"
 base64 = "0.22"
-colored = "2"
 thiserror = "2"
+
+# CLI (optional, see the `cli` feature)
+clap = { version = "4", features = ["derive"], optional = true }
+colored = { version = "3", optional = true }
+humantime = { version = "2", optional = true }
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 hex = "0.4"
+serde_json = "1"
 
 [[bench]]
 name = "protoken_bench"

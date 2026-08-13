@@ -51,9 +51,10 @@
       "expected_base64": "EAEYASIIZrB4d46rHNQqBgiA4s-qBjIgIvrlYqdlE6W7xSy4to34yLwLuoRCAgjhe9TpyVcDbyA",
       "expected_len": 56,
       "input": {
-        "algorithm": "hmac",
+        "algorithm": "hmac-sha256",
         "expires_at": 1700000000,
         "key_hash_base64": "ZrB4d46rHNQ",
+        "key_id_type": "key_hash",
         "signing_key_base64": "CAESM3Byb3Rva2VuLXRlc3QtdmVjdG9yLWtleS1kby1ub3QtdXNlLWluLXByb2R1Y3Rpb24hIQ"
       },
       "name": "signed_hmac",
@@ -78,6 +79,7 @@
       "input": {
         "algorithm": "ed25519",
         "expires_at": 1800000000,
+        "key_hash_base64": "YbpRydnDsPc",
         "key_id_type": "public_key",
         "signing_key_base64": "CAISIDzEvslh0L9CilijI4EpkuqM2AOBSHHuiyR33DNirEYZGiC1QJ-8F00jcoNzJqIhdKkS61okENNE1EE5z5U719uZ6A"
       },
