@@ -4,14 +4,37 @@ Benchmarks for protoken sign and verify operations across all three algorithms.
 
 ## Summary
 
+Measured 2026-08-13 through `SigningKey::sign` / `SigningKey::verify`,
+averaged over 64 different messages per benchmark.
+
 | Operation | Time | Ops/sec |
 |---|---|---|
-| HMAC-SHA256 sign | ~352 ns | ~2,840,000 |
-| HMAC-SHA256 verify | ~432 ns | ~2,310,000 |
-| Ed25519 sign | ~37.8 µs | ~26,400 |
-| Ed25519 verify | ~42.1 µs | ~23,700 |
-| ML-DSA-44 sign | ~202 µs | ~4,940 |
-| ML-DSA-44 verify | ~119 µs | ~8,400 |
+| HMAC-SHA256 sign | ~344 ns | ~2,900,000 |
+| HMAC-SHA256 verify | ~409 ns | ~2,440,000 |
+| Ed25519 sign | ~31.1 µs | ~32,200 |
+| Ed25519 verify (strict) | ~50.6 µs | ~19,800 |
+| ML-DSA-44 sign | ~467 µs | ~2,140 |
+| ML-DSA-44 verify | ~92.4 µs | ~10,800 |
+| HMAC-SHA256 keygen | ~360 ns | |
+| Ed25519 keygen | ~15.1 µs | |
+| ML-DSA-44 keygen | ~150 µs | |
+| Parse ML-DSA-44 envelope (no crypto) | ~137 ns | |
+
+Notes:
+
+- ML-DSA-44 signing uses rejection sampling, and the number of rejections is
+  fixed for a given key and message. Timing one fixed message reports an
+  arbitrary point of a wide distribution; single-message runs on this machine
+  ranged from ~450 µs to ~1 ms. The 202 µs recorded earlier was a
+  single-message measurement on a different CPU. The benchmark now rotates
+  through 64 messages, so the sign numbers are means and are not directly
+  comparable with the earlier CSV row.
+- The signing API takes the 32-byte seed, so every ML-DSA-44 signature also
+  pays the ~150 µs key expansion shown in the keygen row. A caller signing at
+  high volume would benefit from an API that keeps the expanded key; the
+  format does not need to change for that.
+- Ed25519 verification uses `verify_strict`, which adds a small-order check on
+  top of standard verification.
 
 ## Token Sizes
 
@@ -23,7 +46,7 @@ Benchmarks for protoken sign and verify operations across all three algorithms.
 
 ## Platform
 
-- **CPU**: Intel (Granite Rapids family, model 207), 16 cores
+- **CPU**: Intel Xeon Platinum 8488C (Sapphire Rapids) for the summary table above; the 2026-02 CSV row was measured on a Granite Rapids machine
 - **OS**: Linux x86_64
 - **Rust**: edition 2021, optimized release build
 - **Tooling**: [Criterion.rs](https://github.com/bheisler/criterion.rs) 0.8

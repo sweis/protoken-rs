@@ -4,6 +4,13 @@
 /fuzz/artifacts
 /mutants.out*
 
+# Python bindings build products (maturin develop, pytest, venvs)
+*.so
+__pycache__/
+.pytest_cache/
+.venv/
+/bindings/python/target
+
 # Local key/token experiment artifacts
 *.key
 *.b64

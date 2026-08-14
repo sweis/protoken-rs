@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "protoken"
+version = "0.1.0"
+description = "Compact signed tokens (HMAC-SHA256, Ed25519, ML-DSA-44) using canonical proto3 encoding"
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security :: Cryptography",
+]
+
+[project.urls]
+Repository = "https://github.com/sweis/protoken-rs"
+
+[tool.maturin]
+module-name = "protoken._protoken"
+python-source = "python"
+strip = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

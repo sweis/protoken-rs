@@ -1,65 +1,85 @@
 #![allow(clippy::expect_used)]
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use protoken::sign::{
-    compute_key_hash, generate_ed25519_key, generate_mldsa44_key, mldsa44_key_hash, sign_ed25519,
-    sign_hmac, sign_mldsa44,
-};
-use protoken::types::{Claims, KeyIdentifier};
-use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
+use protoken::serialize::deserialize_signed_token;
+use protoken::{Algorithm, Claims, SigningKey};
+
+const NOW: u64 = 1_000_000;
+
+/// Number of distinct messages each sign/verify benchmark cycles through.
+///
+/// ML-DSA signing uses rejection sampling, and the number of rejections is
+/// fixed for a given (key, message), so timing one message repeatedly reports
+/// an arbitrary point of a wide distribution. Rotating through many messages
+/// reports the mean instead. The same inputs are used for every algorithm.
+const MESSAGES: usize = 64;
 
 fn make_claims() -> Claims {
     Claims {
         expires_at: u64::MAX,
-        not_before: 0,
-        issued_at: 1_000_000,
-        subject: String::new(),
-        audience: String::new(),
-        scopes: Vec::new(),
+        issued_at: NOW,
+        ..Default::default()
     }
 }
 
-fn bench_hmac(c: &mut Criterion) {
-    let key = [0xABu8; 32];
-    let claims = make_claims();
-    let token = sign_hmac(&key, &claims).expect("sign");
+fn varied_claims() -> Vec<Claims> {
+    (0..MESSAGES)
+        .map(|i| Claims {
+            subject: format!("user:{i}"),
+            ..make_claims()
+        })
+        .collect()
+}
 
-    c.bench_function("hmac_sign", |b| {
-        b.iter(|| sign_hmac(&key, &claims).expect("sign"));
-    });
-    c.bench_function("hmac_verify", |b| {
-        b.iter(|| verify_hmac(&key, &token, 1_000_000).expect("verify"));
+/// Benchmark names match the columns in PERFORMANCE.md and scripts/bench-to-csv.sh.
+fn bench_name(algorithm: Algorithm) -> &'static str {
+    match algorithm {
+        Algorithm::HmacSha256 => "hmac",
+        Algorithm::Ed25519 => "ed25519",
+        Algorithm::MlDsa44 => "mldsa44",
+    }
+}
+
+fn bench_sign_verify(c: &mut Criterion) {
+    let claims = varied_claims();
+    for algorithm in Algorithm::ALL {
+        let name = bench_name(algorithm);
+        let key = SigningKey::generate(algorithm).expect("keygen");
+        let tokens: Vec<Vec<u8>> = claims
+            .iter()
+            .map(|claims| key.sign(claims).expect("sign"))
+            .collect();
+
+        c.bench_function(&format!("{name}_sign"), |b| {
+            let mut inputs = claims.iter().cycle();
+            b.iter(|| key.sign(inputs.next().expect("cycle")).expect("sign"));
+        });
+        c.bench_function(&format!("{name}_verify"), |b| {
+            let mut inputs = tokens.iter().cycle();
+            b.iter(|| {
+                key.verify(inputs.next().expect("cycle"), NOW)
+                    .expect("verify")
+            });
+        });
+    }
+}
+
+fn bench_keygen(c: &mut Criterion) {
+    for algorithm in Algorithm::ALL {
+        let name = bench_name(algorithm);
+        c.bench_function(&format!("{name}_keygen"), |b| {
+            b.iter(|| SigningKey::generate(algorithm).expect("keygen"));
+        });
+    }
+}
+
+fn bench_parse(c: &mut Criterion) {
+    let key = SigningKey::generate(Algorithm::MlDsa44).expect("keygen");
+    let token = key.sign(&make_claims()).expect("sign");
+    c.bench_function("parse_mldsa44_envelope", |b| {
+        b.iter(|| deserialize_signed_token(&token).expect("parse"));
     });
 }
 
-fn bench_ed25519(c: &mut Criterion) {
-    let (seed, pk) = generate_ed25519_key().expect("keygen");
-    let key_id = KeyIdentifier::KeyHash(compute_key_hash(&pk));
-
-    let claims = make_claims();
-    let token = sign_ed25519(&seed, &claims, key_id.clone()).expect("sign");
-
-    c.bench_function("ed25519_sign", |b| {
-        b.iter(|| sign_ed25519(&seed, &claims, key_id.clone()).expect("sign"));
-    });
-    c.bench_function("ed25519_verify", |b| {
-        b.iter(|| verify_ed25519(&pk, &token, 1_000_000).expect("verify"));
-    });
-}
-
-fn bench_mldsa44(c: &mut Criterion) {
-    let (sk, pk) = generate_mldsa44_key().expect("keygen");
-    let key_id = mldsa44_key_hash(&pk).expect("hash");
-    let claims = make_claims();
-    let token = sign_mldsa44(&sk, &claims, key_id.clone()).expect("sign");
-
-    c.bench_function("mldsa44_sign", |b| {
-        b.iter(|| sign_mldsa44(&sk, &claims, key_id.clone()).expect("sign"));
-    });
-    c.bench_function("mldsa44_verify", |b| {
-        b.iter(|| verify_mldsa44(&pk, &token, 1_000_000).expect("verify"));
-    });
-}
-
-criterion_group!(benches, bench_hmac, bench_ed25519, bench_mldsa44);
+criterion_group!(benches, bench_sign_verify, bench_keygen, bench_parse);
 criterion_main!(benches);

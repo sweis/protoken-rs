@@ -26,10 +26,17 @@
 //! algorithm and key identifier into the signature.
 
 use crate::error::ProtokenError;
-use crate::proto3;
+use crate::proto3::{
+    self, missing_field, next_field, read_bounded_bytes, read_nonzero_u8, read_nonzero_varint,
+    unexpected_field, WIRE_LEN, WIRE_VARINT,
+};
 use crate::types::*;
 
 /// Serialize Claims into canonical proto3 bytes.
+///
+/// Scopes are sorted on output. Call `Claims::validate()` first if the claims
+/// come from an untrusted source; this function does not reject duplicates or
+/// oversized fields.
 #[must_use]
 pub fn serialize_claims(claims: &Claims) -> Vec<u8> {
     let mut buf = Vec::with_capacity(32);
@@ -40,9 +47,8 @@ pub fn serialize_claims(claims: &Claims) -> Vec<u8> {
     proto3::encode_bytes(4, claims.subject.as_bytes(), &mut buf);
     proto3::encode_bytes(5, claims.audience.as_bytes(), &mut buf);
 
-    // Repeated field 6: scopes, sorted for canonical encoding
-    let mut sorted_scopes: Vec<&str> = claims.scopes.iter().map(|s| s.as_str()).collect();
-    sorted_scopes.sort();
+    let mut sorted_scopes: Vec<&str> = claims.scopes.iter().map(String::as_str).collect();
+    sorted_scopes.sort_unstable();
     for scope in sorted_scopes {
         proto3::encode_bytes(6, scope.as_bytes(), &mut buf);
     }
@@ -50,43 +56,10 @@ pub fn serialize_claims(claims: &Claims) -> Vec<u8> {
     buf
 }
 
-/// Read a varint field value, rejecting an explicit zero (canonical encoding
-/// omits default values, so a zero on the wire is non-canonical).
-fn read_nonzero_varint(
-    data: &[u8],
-    pos: &mut usize,
-    field_name: &str,
-) -> Result<u64, ProtokenError> {
-    let value = proto3::read_varint_value(data, pos)?;
-    if value == 0 {
-        return Err(ProtokenError::MalformedEncoding(format!(
-            "{field_name} is zero (canonical encoding omits default values)"
-        )));
-    }
-    Ok(value)
-}
-
-/// Read a length-delimited field value, rejecting empty values (canonical
-/// encoding omits empty fields) and enforcing a maximum length.
-pub(crate) fn read_bounded_bytes<'a>(
-    data: &'a [u8],
-    pos: &mut usize,
-    max_len: usize,
-    field_name: &str,
-) -> Result<&'a [u8], ProtokenError> {
-    let bytes = proto3::read_bytes_value(data, pos)?;
-    if bytes.is_empty() {
-        return Err(ProtokenError::MalformedEncoding(format!(
-            "{field_name} is empty (canonical encoding omits empty fields)"
-        )));
-    }
-    if bytes.len() > max_len {
-        return Err(ProtokenError::MalformedEncoding(format!(
-            "{field_name} too long: {} bytes (max {max_len})",
-            bytes.len()
-        )));
-    }
-    Ok(bytes)
+/// Read an `algorithm` field. Shared by the token and key decoders.
+pub(crate) fn read_algorithm(data: &[u8], pos: &mut usize) -> Result<Algorithm, ProtokenError> {
+    let byte = read_nonzero_u8(data, pos, "algorithm")?;
+    Algorithm::from_byte(byte).ok_or(ProtokenError::InvalidAlgorithm(byte))
 }
 
 /// Decode a length-limited UTF-8 string field.
@@ -101,65 +74,64 @@ fn read_claim_string<'a>(
 }
 
 /// Deserialize Claims from canonical proto3 bytes.
+///
+/// This enforces canonical form and the size limits, but not the semantic
+/// rules (`expires_at` set, `not_before <= expires_at`), so diagnostic tools
+/// can still display such payloads. Verification applies `Claims::validate()`
+/// after the signature check.
 pub fn deserialize_claims(data: &[u8]) -> Result<Claims, ProtokenError> {
     if data.is_empty() {
         return Err(ProtokenError::MalformedEncoding("empty claims".into()));
     }
     if data.len() > MAX_PAYLOAD_BYTES {
         return Err(ProtokenError::MalformedEncoding(format!(
-            "claims too large: {} bytes (max {})",
-            data.len(),
-            MAX_PAYLOAD_BYTES
+            "claims too large: {} bytes (max {MAX_PAYLOAD_BYTES})",
+            data.len()
         )));
     }
 
+    const SCOPE_FIELD: u32 = 6;
     let mut claims = Claims::default();
-
     let mut pos = 0;
-    let mut last_field_number = 0u32;
+    let mut last_field_number = 0;
 
     while pos < data.len() {
-        let (field_number, wire_type) = proto3::decode_tag(data, &mut pos)?;
-
-        // Enforce ascending field order (canonical encoding).
-        // Field 6 (scope) is repeated, so consecutive 6s are allowed.
-        if field_number < last_field_number
-            || (field_number == last_field_number && field_number != 6)
-        {
-            return Err(ProtokenError::MalformedEncoding(format!(
-                "fields not in ascending order: field {field_number} after {last_field_number}"
-            )));
-        }
-        last_field_number = field_number;
-
+        let (field_number, wire_type) =
+            next_field(data, &mut pos, &mut last_field_number, Some(SCOPE_FIELD))?;
         match (field_number, wire_type) {
-            (1, 0) => claims.expires_at = read_nonzero_varint(data, &mut pos, "expires_at")?,
-            (2, 0) => claims.not_before = read_nonzero_varint(data, &mut pos, "not_before")?,
-            (3, 0) => claims.issued_at = read_nonzero_varint(data, &mut pos, "issued_at")?,
-            (4, 2) => claims.subject = read_claim_string(data, &mut pos, "subject")?.to_string(),
-            (5, 2) => claims.audience = read_claim_string(data, &mut pos, "audience")?.to_string(),
-            (6, 2) => {
-                let s = read_claim_string(data, &mut pos, "scope")?;
+            (1, WIRE_VARINT) => {
+                claims.expires_at = read_nonzero_varint(data, &mut pos, "expires_at")?;
+            }
+            (2, WIRE_VARINT) => {
+                claims.not_before = read_nonzero_varint(data, &mut pos, "not_before")?;
+            }
+            (3, WIRE_VARINT) => {
+                claims.issued_at = read_nonzero_varint(data, &mut pos, "issued_at")?;
+            }
+            (4, WIRE_LEN) => {
+                claims.subject = read_claim_string(data, &mut pos, "subject")?.to_string();
+            }
+            (5, WIRE_LEN) => {
+                claims.audience = read_claim_string(data, &mut pos, "audience")?.to_string();
+            }
+            (SCOPE_FIELD, WIRE_LEN) => {
+                let scope = read_claim_string(data, &mut pos, "scope")?;
                 if claims.scopes.len() >= MAX_SCOPES {
                     return Err(ProtokenError::MalformedEncoding(format!(
                         "too many scopes: max {MAX_SCOPES}"
                     )));
                 }
-                // Enforce sorted order without duplicates (canonical encoding)
+                // Canonical encoding: strictly ascending, which also rules out duplicates.
                 if let Some(prev) = claims.scopes.last() {
-                    if s <= prev.as_str() {
+                    if scope <= prev.as_str() {
                         return Err(ProtokenError::MalformedEncoding(format!(
-                            "scopes not in sorted order: {s:?} after {prev:?}"
+                            "scopes not in sorted order: {scope:?} after {prev:?}"
                         )));
                     }
                 }
-                claims.scopes.push(s.to_string());
+                claims.scopes.push(scope.to_string());
             }
-            (_, _) => {
-                return Err(ProtokenError::MalformedEncoding(format!(
-                    "unexpected field {field_number} (wire type {wire_type}) in Claims"
-                )));
-            }
+            _ => return Err(unexpected_field(field_number, wire_type, "Claims")),
         }
     }
 
@@ -237,125 +209,97 @@ pub(crate) fn deserialize_signed_token_at(
         )));
     }
 
-    let mut algorithm: u32 = 0;
-    let mut key_id_type: u32 = 0;
-    let mut key_id: Vec<u8> = Vec::new();
-    let mut payload: Option<Vec<u8>> = None;
-    let mut signature: Option<Vec<u8>> = None;
-    let mut signed_len: usize = 0;
+    const MESSAGE: &str = "SignedToken";
+    let mut algorithm = None;
+    let mut key_id_type = None;
+    let mut key_id: &[u8] = &[];
+    let mut payload = None;
+    // The signature and the offset at which its field starts.
+    let mut signature: Option<(&[u8], usize)> = None;
 
     let mut pos = 0;
-    let mut last_field_number = 0u32;
+    let mut last_field_number = 0;
 
     while pos < data.len() {
         let field_start = pos;
-        let (field_number, wire_type) = proto3::decode_tag(data, &mut pos)?;
-
-        if field_number <= last_field_number {
-            return Err(ProtokenError::MalformedEncoding(format!(
-                "fields not in ascending order: field {field_number} after {last_field_number}"
-            )));
-        }
-        last_field_number = field_number;
-
+        let (field_number, wire_type) = next_field(data, &mut pos, &mut last_field_number, None)?;
         match (field_number, wire_type) {
             // Version can only legally be 0, and canonical encoding omits
             // zero values, so an explicit version field is always invalid.
-            (1, 0) => {
-                let v = proto3::read_u32(data, &mut pos)?;
-                let v = proto3::to_u8(v, "version")?;
+            (1, WIRE_VARINT) => {
+                let v = proto3::read_u8_value(data, &mut pos, "version")?;
                 return Err(ProtokenError::InvalidVersion(v));
             }
-            (2, 0) => {
-                let v = read_nonzero_varint(data, &mut pos, "algorithm")?;
-                algorithm = u32::try_from(v).map_err(|_| {
-                    ProtokenError::MalformedEncoding("algorithm exceeds u32 range".into())
-                })?;
+            (2, WIRE_VARINT) => algorithm = Some(read_algorithm(data, &mut pos)?),
+            (3, WIRE_VARINT) => {
+                let byte = read_nonzero_u8(data, &mut pos, "key_id_type")?;
+                key_id_type =
+                    Some(KeyIdType::from_byte(byte).ok_or(ProtokenError::InvalidKeyIdType(byte))?);
             }
-            (3, 0) => {
-                let v = read_nonzero_varint(data, &mut pos, "key_id_type")?;
-                key_id_type = u32::try_from(v).map_err(|_| {
-                    ProtokenError::MalformedEncoding("key_id_type exceeds u32 range".into())
-                })?;
+            (4, WIRE_LEN) => {
+                key_id = read_bounded_bytes(data, &mut pos, MLDSA44_PUBLIC_KEY_LEN, "key_id")?;
             }
-            (4, 2) => {
-                key_id =
-                    read_bounded_bytes(data, &mut pos, MLDSA44_PUBLIC_KEY_LEN, "key_id")?.to_vec();
+            (5, WIRE_LEN) => {
+                payload = Some(read_bounded_bytes(
+                    data,
+                    &mut pos,
+                    MAX_PAYLOAD_BYTES,
+                    "payload",
+                )?);
             }
-            (5, 2) => {
-                payload = Some(
-                    read_bounded_bytes(data, &mut pos, MAX_PAYLOAD_BYTES, "payload")?.to_vec(),
-                );
+            (6, WIRE_LEN) => {
+                let sig = read_bounded_bytes(data, &mut pos, MAX_SIGNATURE_BYTES, "signature")?;
+                signature = Some((sig, field_start));
             }
-            (6, 2) => {
-                signature = Some(
-                    read_bounded_bytes(data, &mut pos, MAX_SIGNATURE_BYTES, "signature")?.to_vec(),
-                );
-                // Everything before the signature field is the signed input.
-                signed_len = field_start;
-            }
-            (_, _) => {
-                return Err(ProtokenError::MalformedEncoding(format!(
-                    "unexpected field {field_number} (wire type {wire_type}) in SignedToken"
-                )));
-            }
+            _ => return Err(unexpected_field(field_number, wire_type, MESSAGE)),
         }
     }
 
-    let version = Version::V0;
-
-    let algorithm = proto3::to_u8(algorithm, "algorithm")?;
-    let algorithm =
-        Algorithm::from_byte(algorithm).ok_or(ProtokenError::InvalidAlgorithm(algorithm))?;
-
-    let key_id_type = proto3::to_u8(key_id_type, "key_id_type")?;
-    let key_id_type =
-        KeyIdType::from_byte(key_id_type).ok_or(ProtokenError::InvalidKeyIdType(key_id_type))?;
-
-    let key_identifier = match key_id_type {
-        KeyIdType::KeyHash => {
-            if key_id.len() != KEY_HASH_LEN {
-                return Err(ProtokenError::InvalidKeyLength {
-                    expected: KEY_HASH_LEN,
-                    actual: key_id.len(),
-                });
-            }
-            let mut hash = [0u8; KEY_HASH_LEN];
-            hash.copy_from_slice(&key_id);
-            KeyIdentifier::KeyHash(hash)
-        }
-        KeyIdType::PublicKey => {
-            // Symmetric algorithms have no public key to embed.
-            let expected_len = algorithm
-                .public_key_len()
-                .ok_or(ProtokenError::InvalidKeyIdType(key_id_type.to_byte()))?;
-            if key_id.len() != expected_len {
-                return Err(ProtokenError::InvalidKeyLength {
-                    expected: expected_len,
-                    actual: key_id.len(),
-                });
-            }
-            KeyIdentifier::PublicKey(key_id)
-        }
-    };
-
-    let payload = payload.ok_or_else(|| {
-        ProtokenError::MalformedEncoding("missing payload field in SignedToken".into())
-    })?;
-    let signature = signature.ok_or_else(|| {
-        ProtokenError::MalformedEncoding("missing signature field in SignedToken".into())
-    })?;
+    let algorithm = algorithm.ok_or_else(|| missing_field("algorithm", MESSAGE))?;
+    let key_id_type = key_id_type.ok_or_else(|| missing_field("key_id_type", MESSAGE))?;
+    let key_identifier = key_identifier_from_wire(algorithm, key_id_type, key_id)?;
+    let payload = payload.ok_or_else(|| missing_field("payload", MESSAGE))?;
+    let (signature, signed_len) = signature.ok_or_else(|| missing_field("signature", MESSAGE))?;
 
     Ok((
         SignedToken {
-            version,
+            version: Version::V0,
             algorithm,
             key_identifier,
-            payload,
-            signature,
+            payload: payload.to_vec(),
+            signature: signature.to_vec(),
         },
         signed_len,
     ))
+}
+
+/// Build the key identifier from the decoded `key_id_type` and `key_id`
+/// fields, enforcing the length implied by the type and algorithm.
+fn key_identifier_from_wire(
+    algorithm: Algorithm,
+    key_id_type: KeyIdType,
+    key_id: &[u8],
+) -> Result<KeyIdentifier, ProtokenError> {
+    let length_error = |expected: usize| ProtokenError::InvalidKeyLength {
+        expected,
+        actual: key_id.len(),
+    };
+    match key_id_type {
+        KeyIdType::KeyHash => {
+            let hash = key_id.try_into().map_err(|_| length_error(KEY_HASH_LEN))?;
+            Ok(KeyIdentifier::KeyHash(hash))
+        }
+        KeyIdType::PublicKey => {
+            // Symmetric algorithms have no public key to embed.
+            let expected = algorithm
+                .public_key_len()
+                .ok_or(ProtokenError::InvalidKeyIdType(key_id_type.to_byte()))?;
+            if key_id.len() != expected {
+                return Err(length_error(expected));
+            }
+            Ok(KeyIdentifier::PublicKey(key_id.to_vec()))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -455,6 +399,30 @@ mod tests {
     #[test]
     fn test_deserialize_claims_empty() {
         assert!(deserialize_claims(&[]).is_err());
+    }
+
+    #[test]
+    fn test_deserialize_claims_decodes_semantically_invalid_payloads() {
+        // Canonical but missing expires_at: decodes (so `inspect` can show it),
+        // and validate() is what rejects it.
+        let mut data = Vec::new();
+        proto3::encode_uint64(3, 1700000000, &mut data); // issued_at only
+        let claims = deserialize_claims(&data).unwrap();
+        assert_eq!(claims.issued_at, 1700000000);
+        assert!(claims.validate().is_err());
+
+        let mut data = Vec::new();
+        proto3::encode_uint64(1, 1000, &mut data);
+        proto3::encode_uint64(2, 2000, &mut data); // not_before after expires_at
+        let claims = deserialize_claims(&data).unwrap();
+        assert!(claims.validate().is_err());
+    }
+
+    #[test]
+    fn test_deserialized_valid_claims_satisfy_validate() {
+        let bytes = serialize_claims(&sample_claims_full());
+        let decoded = deserialize_claims(&bytes).unwrap();
+        assert!(decoded.validate().is_ok());
     }
 
     #[test]
@@ -713,6 +681,24 @@ mod tests {
             matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("missing signature")),
             "expected missing signature error, got {err:?}"
         );
+    }
+
+    #[test]
+    fn test_rejects_missing_algorithm_and_key_id_type() {
+        // Only one of the two enum fields present in each case.
+        for (present_field, missing_name) in [(3u32, "algorithm"), (2, "key_id_type")] {
+            let mut bad = Vec::new();
+            proto3::encode_uint32(present_field, 1, &mut bad);
+            proto3::encode_bytes(4, &[0; 8], &mut bad);
+            proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
+            proto3::encode_bytes(6, &[0; 32], &mut bad);
+            let err = deserialize_signed_token(&bad).unwrap_err();
+            let expected = format!("missing {missing_name} field");
+            assert!(
+                matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains(&expected)),
+                "present={present_field}: got {err:?}"
+            );
+        }
     }
 
     #[test]

@@ -45,7 +45,7 @@ Example output from `verify` (keys and timestamps will differ):
 
 ```
 OK
-     Algorithm  Ed25519
+     Algorithm  ed25519
         Key ID  nsaAwNyxZac (key_hash)
        Expires  2026-02-24T23:21:39Z
     Not Before  2026-02-24T22:21:39Z
@@ -60,7 +60,7 @@ Example output from `inspect --json` (no key needed):
 ```json
 {
   "type": "SignedToken",
-  "algorithm": "Ed25519",
+  "algorithm": "ed25519",
   "key_identifier": { "type": "key_hash", "base64": "nsaAwNyxZac" },
   "claims": {
     "expires_at": 1771975299,
@@ -108,8 +108,8 @@ protoken verify my.pub <token>
 ### Other algorithms
 
 ```sh
-# HMAC-SHA256 (symmetric -- use signing key to verify)
-protoken generate-key -a hmac > hmac.key
+# HMAC-SHA256 (symmetric -- use signing key to verify); "hmac" is accepted as an alias
+protoken generate-key -a hmac-sha256 > hmac.key
 protoken sign hmac.key 4d | protoken verify hmac.key
 
 # ML-DSA-44 (post-quantum)
@@ -183,6 +183,10 @@ varints, default values omitted, no unknown or duplicate fields. Decoders
 reject non-canonical input. Output is valid proto3 that any protobuf library
 can decode.
 
+Loading a `SigningKey` re-derives the public key from the seed and rejects the
+key if the stored `public_key` differs. Loading an Ed25519 `VerifyingKey`
+rejects encodings that are not valid curve points.
+
 ### Signature construction
 
 The signature is computed over the canonical encoding of envelope fields 1-5
@@ -197,7 +201,9 @@ FIPS 204 deterministic variant with an empty context string.
 The 8-byte key hash is `SHA-256(key_material)[0..8]`. It is a key selection
 identifier, not a security binding: security rests on full signature
 verification. Verifiers additionally compare the key identifier against their
-own key in constant time before verifying the signature.
+own key in constant time before verifying the signature. Ed25519 uses strict
+verification (`verify_strict`), which also rejects small-order keys and
+signature components.
 
 Keys used with protoken should not be reused to sign other formats.
 
@@ -213,33 +219,54 @@ Keys used with protoken should not be reused to sign other formats.
 
 ## Library API
 
-```rust
-use protoken::sign::{generate_ed25519_key, compute_key_hash, sign_ed25519};
-use protoken::verify::verify_ed25519;
-use protoken::types::{Claims, KeyIdentifier};
+Add the crate with `default-features = false` to skip the CLI's dependencies.
 
-let (seed, public_key) = generate_ed25519_key().unwrap();
+```rust
+use protoken::{Algorithm, Claims, SigningKey, VerifyingKey};
+
+let key = SigningKey::generate(Algorithm::Ed25519)?;
 let claims = Claims {
     expires_at: 1800000000,
     subject: "user:alice".into(),
     ..Default::default()
 };
-let key_id = KeyIdentifier::KeyHash(compute_key_hash(&public_key));
-let token_bytes = sign_ed25519(&seed, &claims, key_id).unwrap();
+let token_bytes = key.sign(&claims)?;
 
+// Verifiers only need the serialized verifying key.
+let verifying_key = VerifyingKey::from_bytes(&key.verifying_key()?.to_bytes())?;
 let now = 1799999000;
-let verified = verify_ed25519(&public_key, &token_bytes, now).unwrap();
+let verified = verifying_key.verify(&token_bytes, now)?;
 assert_eq!(verified.claims.subject, "user:alice");
+```
+
+`SigningKey::sign_with_key_id(&claims, KeyIdType::PublicKey)` embeds the
+public key in the token instead of its hash. HMAC keys verify with
+`SigningKey::verify`. The `sign` and `verify` modules expose the same
+operations on raw key bytes, and `serialize` exposes the wire format.
+
+## Python
+
+`bindings/python` contains [PyO3](https://pyo3.rs) bindings with the same
+API shape (`SigningKey`, `VerifyingKey`, `Claims`, `inspect_token`), built
+with [maturin](https://www.maturin.rs). See
+[bindings/python/README.md](bindings/python/README.md).
+
+```python
+from protoken import Claims, SigningKey
+
+key = SigningKey.generate("ed25519")
+token = key.sign(Claims(expires_at=1_800_000_000, subject="user:alice"))
+key.verifying_key().verify(token).claims.subject   # 'user:alice'
 ```
 
 ## Test vectors
 
-Stored in `testdata/vectors.json` (wire format regression) and `testdata/reference_vectors.json` (long-lived keys and tokens expiring 2036). All binary data is URL-safe base64 (no padding).
-
-```sh
-cargo run --example gen_test_vectors > testdata/vectors.json
-cargo test
-```
+Stored in `testdata/vectors.json` (wire format regression) and
+`testdata/reference_vectors.json` (long-lived keys and tokens expiring 2036).
+All binary data is URL-safe base64 (no padding). Both files are generated from
+fixed seeds, so `make vectors-check` confirms the code still reproduces them
+exactly; `make vectors` rewrites them after an intentional format change. The
+Python tests also verify and re-sign the reference vectors.
 
 ## Benchmarks
 
@@ -253,13 +280,11 @@ See [PERFORMANCE.md](PERFORMANCE.md) for benchmark results.
 
 ```sh
 cargo install cargo-fuzz
-cargo fuzz run parse_claims
-cargo fuzz run parse_signed_token
-cargo fuzz run roundtrip
-cargo fuzz run parse_keys
-cargo fuzz run exercise_token
+make fuzz TARGET=parse_claims        # or: parse_signed_token, roundtrip,
+                                     # parse_keys, exercise_token, verify_token
 ```
 
-## License
-
-See [LICENSE](LICENSE) for details.
+`roundtrip` asserts that anything the decoders accept re-encodes to identical
+bytes. `verify_token` runs every verifier over the input and, when the input
+is valid Claims, signs and verifies it with each algorithm; it is slower than
+the parsers because it exercises real signing.
