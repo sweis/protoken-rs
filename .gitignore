@@ -3,6 +3,7 @@
 /fuzz/corpus
 /fuzz/artifacts
 /mutants.out*
+/lean/.lake
 
 # Python bindings build products (maturin develop, pytest, venvs)
 *.so

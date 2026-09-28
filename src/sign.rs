@@ -34,11 +34,18 @@ pub fn fill_random(dest: &mut [u8]) -> Result<(), ProtokenError> {
     getrandom::fill(dest).map_err(|e| ProtokenError::RngFailed(e.to_string()))
 }
 
-/// Check that an HMAC key meets the minimum length. Shared with verification.
+/// Check that an HMAC key is within the allowed lengths. Shared with
+/// verification. The upper bound keeps every usable key serializable.
 pub(crate) fn check_hmac_key_len(key: &[u8]) -> Result<(), ProtokenError> {
     if key.len() < HMAC_MIN_KEY_LEN {
         return Err(ProtokenError::InvalidKey(format!(
             "HMAC key too short: {} bytes (minimum {HMAC_MIN_KEY_LEN})",
+            key.len()
+        )));
+    }
+    if key.len() > HMAC_MAX_KEY_LEN {
+        return Err(ProtokenError::InvalidKey(format!(
+            "HMAC key too long: {} bytes (maximum {HMAC_MAX_KEY_LEN})",
             key.len()
         )));
     }
@@ -90,6 +97,13 @@ fn sign_claims(
 ) -> Result<Vec<u8>, ProtokenError> {
     claims.validate()?;
     let payload = serialize_claims(claims);
+    // Verifiers reject larger payloads, and valid claims can exceed the limit.
+    if payload.len() > MAX_PAYLOAD_BYTES {
+        return Err(ProtokenError::MalformedEncoding(format!(
+            "claims too large: {} bytes (max {MAX_PAYLOAD_BYTES})",
+            payload.len()
+        )));
+    }
     let signing_input = serialize_signing_input(Version::V0, algorithm, key_id, &payload);
     let signature = sign(&signing_input)?;
     Ok(append_signature(signing_input, &signature))
@@ -253,6 +267,58 @@ pub(crate) mod tests {
     fn test_sign_hmac_rejects_short_key() {
         let err = sign_hmac(b"too-short", &claims_expiring(1700000000)).unwrap_err();
         assert!(matches!(err, ProtokenError::InvalidKey(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn test_sign_hmac_key_length_upper_bound() {
+        let claims = claims_expiring(1700000000);
+        assert!(sign_hmac(&vec![0xAB; HMAC_MAX_KEY_LEN], &claims).is_ok());
+        let err = sign_hmac(&vec![0xAB; HMAC_MAX_KEY_LEN + 1], &claims).unwrap_err();
+        assert!(matches!(err, ProtokenError::InvalidKey(_)), "got {err:?}");
+    }
+
+    /// Claims with `count` scopes of the maximum length.
+    fn claims_with_long_scopes(count: usize) -> Claims {
+        Claims {
+            scopes: (0..count)
+                .map(|i| format!("{i:0>width$}", width = MAX_CLAIM_BYTES_LEN))
+                .collect(),
+            ..claims_expiring(u64::MAX)
+        }
+    }
+
+    #[test]
+    fn test_sign_rejects_valid_claims_larger_than_max_payload() {
+        // These pass validate() but no verifier would accept the payload.
+        let claims = claims_with_long_scopes(MAX_SCOPES);
+        assert!(claims.validate().is_ok());
+        assert!(serialize_claims(&claims).len() > MAX_PAYLOAD_BYTES);
+        for algorithm in Algorithm::ALL {
+            let err = SigningKey::generate(algorithm)
+                .unwrap()
+                .sign(&claims)
+                .unwrap_err();
+            assert!(
+                matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("claims too large")),
+                "{algorithm}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_largest_signable_claims_verify() {
+        // 15 scopes of 258 encoded bytes each, plus expires_at and a subject
+        // that fills the payload to exactly MAX_PAYLOAD_BYTES.
+        let mut claims = claims_with_long_scopes(15);
+        let used = serialize_claims(&claims).len();
+        claims.subject = "s".repeat(MAX_PAYLOAD_BYTES - used - 3);
+        assert_eq!(serialize_claims(&claims).len(), MAX_PAYLOAD_BYTES);
+        let key = SigningKey::generate(Algorithm::HmacSha256).unwrap();
+        let token = key.sign(&claims).unwrap();
+        assert_eq!(key.verify(&token, 0).unwrap().claims, claims);
+
+        claims.subject.push('s');
+        assert!(key.sign(&claims).is_err());
     }
 
     #[test]

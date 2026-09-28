@@ -46,6 +46,19 @@ jobs:
       - run: cargo install --locked cargo-audit
       - run: cargo audit
 
+  lean:
+    name: Lean proofs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Installs the toolchain pinned in lean/lean-toolchain and runs `lake build`.
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: lean
+          build-args: --wfail
+      - run: make lean-conformance
+
   python:
     name: Python bindings
     runs-on: ubuntu-latest

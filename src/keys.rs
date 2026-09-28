@@ -32,7 +32,7 @@ use crate::verify::{
 };
 
 /// Maximum secret_key field size accepted before algorithm-specific checks.
-const MAX_SECRET_KEY_BYTES: usize = 4096;
+const MAX_SECRET_KEY_BYTES: usize = HMAC_MAX_KEY_LEN;
 /// Maximum public_key field size accepted before algorithm-specific checks.
 const MAX_PUBLIC_KEY_BYTES: usize = 2048;
 
@@ -531,6 +531,14 @@ mod tests {
         assert!(matches!(
             SigningKey::from_secret_key(Algorithm::HmacSha256, Zeroizing::new(vec![0; 31])),
             Err(ProtokenError::InvalidKey(_))
+        ));
+        // A longer key could be built and used but not decoded again.
+        assert!(matches!(
+            SigningKey::from_secret_key(
+                Algorithm::HmacSha256,
+                Zeroizing::new(vec![0; HMAC_MAX_KEY_LEN + 1])
+            ),
+            Err(ProtokenError::InvalidKey(m)) if m.contains("too long")
         ));
         assert!(matches!(
             SigningKey::from_secret_key(Algorithm::Ed25519, Zeroizing::new(vec![0; 16])),
