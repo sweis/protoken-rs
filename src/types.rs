@@ -14,6 +14,8 @@ pub const MAX_PAYLOAD_BYTES: usize = 4096;
 pub const MAX_SIGNATURE_BYTES: usize = 2560;
 
 pub const HMAC_MIN_KEY_LEN: usize = 32;
+/// Also the largest `secret_key` field the SigningKey decoder accepts.
+pub const HMAC_MAX_KEY_LEN: usize = 4096;
 pub const HMAC_SHA256_SIG_LEN: usize = 32;
 pub const KEY_HASH_LEN: usize = 8;
 pub const ED25519_SEED_LEN: usize = 32;
