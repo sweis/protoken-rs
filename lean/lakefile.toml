@@ -1,0 +1,19 @@
+name = "protoken"
+version = "0.1.0"
+defaultTargets = ["Protoken", "Audit", "conformance"]
+
+# The model of the Rust library and the theorems about it.
+[[lean_lib]]
+name = "Protoken"
+
+# Fails to build if a headline theorem uses `sorry` or a non-standard axiom.
+[[lean_lib]]
+name = "Audit"
+
+# Replays Rust-generated cases through the model.
+[[lean_lib]]
+name = "Conformance"
+
+[[lean_exe]]
+name = "conformance"
+root = "Conformance.Main"

@@ -38,7 +38,7 @@ message Claims {
 
 message SigningKey {
   uint32 algorithm = 1;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44
-  bytes secret_key = 2;    // HMAC: raw key (>=32 B); Ed25519/ML-DSA-44: 32 B seed
+  bytes secret_key = 2;    // HMAC: raw key (32-4096 B); Ed25519/ML-DSA-44: 32 B seed
   bytes public_key = 3;    // Ed25519: 32 B; ML-DSA-44: 1312 B; empty for HMAC
 }
 
@@ -96,6 +96,16 @@ All key types use canonical proto3 encoding (same as the token format). Ed25519 
 ### Python Bindings: PyO3 + maturin
 `bindings/python` is a workspace member producing the `protoken._protoken` abi3 extension (Python 3.10+), wrapped by a small pure-Python package with type stubs. PyO3 was chosen over UniFFI (heavier, aimed at Kotlin/Swift too) and a hand-written C ABI (needs `unsafe`, which this crate denies). The binding only converts types and errors; every parser and check is the Rust one. Its tests re-verify and re-sign the stored reference vectors, which doubles as an interop test with the CLI. Token problems raise `VerificationFailed` (or `TokenExpired`/`TokenNotYetValid`); key and claims problems raise the base `ProtokenError`.
 
+### Producers Enforce the Decoders' Size Limits
+Anything the library produces must be accepted by its own decoders. `sign_claims` rejects a payload over `MAX_PAYLOAD_BYTES`, because `Claims::validate()` alone allows about 8 KB (32 scopes of 255 bytes). `check_hmac_key_len` enforces `HMAC_MAX_KEY_LEN`, which is also the decoder's `secret_key` field limit. The Lean round-trip theorems depend on both checks.
+
+### Formal Verification: Lean 4 Model plus Differential Test
+`lean/` holds a hand-written Lean 4 model of `proto3`, `types`, `serialize`, `sign`, `verify`, and `keys`, with proofs about the model. It uses only Lean's standard library (no Mathlib), so it builds in under a minute. The primitives are parameters of a `Crypto` structure and no theorem assumes unforgeability. See [lean/README.md](lean/README.md) for the theorems and their limits.
+- The proofs do not read the Rust source. `make lean-conformance` is what ties the model to the code, and it is a test, not a proof. **Any change to the logic in those modules needs the matching change in `lean/Protoken/`.** A changed limit, check, check order, or error variant should make the conformance run fail until the model follows.
+- `Audit.lean` fails the build on `sorry` or any axiom beyond `propext`, `Classical.choice`, and `Quot.sound`. Avoid `bv_decide` and `native_decide`, which add axioms that trust compiled code. Add new headline theorems to the audit list.
+- New size limits or ordering rules need cases on both sides of the boundary in `examples/gen_lean_cases.rs`. Random inputs rarely land on a boundary. Plant the bug in a scratch copy of the model to confirm the cases catch it.
+- Translating the Rust source with Aeneas/Charon would remove the gap between model and code. It has not been evaluated. It pins a specific Rust nightly and depends on Mathlib.
+
 ### Key Hash Collision Resistance
 The 8-byte key hash (SHA-256[0..8]) gives ~2^32 collision resistance at the birthday bound. It is a key *identifier* for key selection, not a security binding. Security relies on full signature verification. Documented in the code and README.
 
@@ -117,6 +127,7 @@ Keys used with protoken should not sign other formats. The signing input has no 
 - `testdata/` - Stored vectors; `make vectors-check` verifies them, `make vectors` regenerates them
 - `bindings/python/` - PyO3 bindings, Python package, stubs, and pytest suite (`make python` inside a virtualenv)
 - `fuzz/` - cargo-fuzz targets: parse_claims, parse_signed_token, parse_keys, roundtrip, exercise_token, verify_token. `make fuzz` first seeds the corpus from the reference vectors (`examples/gen_fuzz_seeds.rs`); without seeds the fuzzers cannot construct an acceptable asymmetric signing key
+- `lean/` - Lean 4 model, proofs, axiom audit, and conformance runner (`make lean`, `make lean-conformance`); `examples/gen_lean_cases.rs` generates the conformance cases
 - `benches/` - Criterion benchmarks (sign, verify, keygen, envelope parse); results in PERFORMANCE.md
 - There is deliberately no LICENSE file or license metadata yet; do not add one or refer to one
 - `notes/` - Research documents (prior art, Ed25519 vs P-256, protobuf determinism, post-quantum, ML-DSA key formats, subject identifiers)

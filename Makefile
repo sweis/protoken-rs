@@ -1,4 +1,4 @@
-.PHONY: all test fmt clippy check audit vectors vectors-check python mutants fuzz
+.PHONY: all test fmt clippy check audit vectors vectors-check python mutants fuzz lean lean-conformance
 
 # Run all static checks and tests
 all: check test
@@ -35,6 +35,18 @@ vectors-check:
 # (requires maturin and pytest)
 python:
 	cd bindings/python && maturin develop && pytest
+
+# Check the Lean proofs and the axiom audit (requires elan)
+lean:
+	cd lean && lake build --wfail
+
+# Replay Rust-generated cases through the Lean model. Example:
+#   make lean-conformance SEED=7
+SEED ?= 1
+lean-conformance:
+	cd lean && lake build conformance
+	cargo build -q --release --example gen_lean_cases
+	target/release/examples/gen_lean_cases $(SEED) | lean/.lake/build/bin/conformance
 
 # Mutation testing (requires `cargo install cargo-mutants`)
 mutants:

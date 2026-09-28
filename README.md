@@ -168,7 +168,7 @@ message Claims {
 
 message SigningKey {
   uint32 algorithm = 1;
-  bytes secret_key = 2;    // HMAC: raw key (>=32 B); Ed25519/ML-DSA-44: 32 B seed
+  bytes secret_key = 2;    // HMAC: raw key (32-4096 B); Ed25519/ML-DSA-44: 32 B seed
   bytes public_key = 3;    // Ed25519: 32 B; ML-DSA-44: 1312 B; empty for HMAC
 }
 
@@ -182,6 +182,8 @@ All messages use canonical proto3 encoding: fields in ascending order, minimal
 varints, default values omitted, no unknown or duplicate fields. Decoders
 reject non-canonical input. Output is valid proto3 that any protobuf library
 can decode.
+
+Serialized `Claims` may be at most 4096 bytes. Signing rejects larger claims.
 
 Loading a `SigningKey` re-derives the public key from the seed and rejects the
 key if the stored `public_key` differs. Loading an Ed25519 `VerifyingKey`
@@ -288,3 +290,21 @@ make fuzz TARGET=parse_claims        # or: parse_signed_token, roundtrip,
 bytes. `verify_token` runs every verifier over the input and, when the input
 is valid Claims, signs and verifies it with each algorithm; it is slower than
 the parsers because it exercises real signing.
+
+## Formal verification
+
+`lean/` holds a Lean 4 model of the parsers, serializers, key handling, and the
+sign and verify logic, with machine-checked proofs about it. Among them: decoders
+accept only canonical encodings, the signed bytes determine everything a verifier
+returns, no token is accepted under two algorithms, and every token that signing
+returns will verify.
+
+```sh
+make lean               # check the proofs (requires elan)
+make lean-conformance   # compare the model with the Rust library
+```
+
+The proofs are about a hand-written model, not the Rust source. A differential
+test over about 150,000 inputs ties the two together. The cryptographic primitives
+are assumed rather than verified. See [lean/README.md](lean/README.md) for the
+theorem list and the limits of what is proved.
