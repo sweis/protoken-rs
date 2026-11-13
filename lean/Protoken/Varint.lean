@@ -3,7 +3,7 @@ import Protoken.Basic
 /-!
 # Varints
 
-Model of `encode_varint` and `decode_varint` in `src/proto3.rs`, and the proof
+Model of `encode_varint` and `Reader::read_varint` in `src/proto3.rs`, and the proof
 that the decoder accepts exactly the encoder's output.
 -/
 
@@ -26,8 +26,8 @@ decreasing_by
   simp [UInt64.toNat_shiftRight, Nat.shiftRight_eq_div_pow]
   omega
 
-/-- The loop of `decode_varint`. `start` is the position of the first byte. -/
-def decodeVarintLoop (data : Bytes) (start pos : Nat) (value : UInt64) (shift : Nat) :
+/-- The loop of `Reader::read_varint`. -/
+def decodeVarintLoop (data : Bytes) (pos : Nat) (value : UInt64) (shift : Nat) :
     Result (UInt64 × Nat) :=
   if h : pos ≥ data.length then
     .error .malformedEncoding
@@ -41,21 +41,22 @@ def decodeVarintLoop (data : Bytes) (start pos : Nat) (value : UInt64) (shift : 
       let value := value ||| ((byte &&& 0x7F).toUInt64 <<< UInt64.ofNat shift)
       if byte &&& 0x80 == 0 then
         -- A trailing zero byte is a non-minimal encoding.
-        if byte == 0 && pos - start > 1 then
+        if byte == 0 && shift > 0 then
           .error .malformedEncoding
         else
           .ok (value, pos)
       else
         let shift := shift + 7
+        -- The end of `(0..64).step_by(7)`.
         if shift > 63 then
           .error .malformedEncoding
         else
-          decodeVarintLoop data start pos value shift
+          decodeVarintLoop data pos value shift
 termination_by data.length - pos
 
-/-- Models `decode_varint`. Returns the value and the new position. -/
+/-- Models `Reader::read_varint`. Returns the value and the new position. -/
 def decodeVarint (data : Bytes) (pos : Nat) : Result (UInt64 × Nat) :=
-  decodeVarintLoop data pos pos 0 0
+  decodeVarintLoop data pos 0 0
 
 theorem encodeVarint_length_pos (value : UInt64) : 0 < (encodeVarint value).length := by
   rw [encodeVarint]
@@ -69,11 +70,11 @@ def varintNat (n : Nat) : Bytes :=
   if n < 128 then [UInt8.ofNat n] else UInt8.ofNat (n % 128 + 128) :: varintNat (n / 128)
 
 theorem varintNat_of_lt {n : Nat} (h : n < 128) : varintNat n = [UInt8.ofNat n] := by
-  rw [varintNat, if_pos h]
+  rw [varintNat, ite_eq_left h]
 
 theorem varintNat_of_ge {n : Nat} (h : 128 ≤ n) :
     varintNat n = UInt8.ofNat (n % 128 + 128) :: varintNat (n / 128) := by
-  rw [varintNat, if_neg (by omega)]
+  rw [varintNat, ite_eq_right (by omega)]
 
 theorem low7_or_continue (value : UInt64) :
     (value.toUInt8 &&& 0x7F) ||| 0x80 = UInt8.ofNat (value.toNat % 128 + 128) := by
@@ -132,16 +133,16 @@ theorem or_shift_toNat (value : UInt64) (byte : UInt8) (shift : Nat) (hs : shift
     Nat.or_comm, Nat.mul_comm, ← Nat.two_pow_add_eq_or_of_lt hv, Nat.add_comm]
 
 /-- One iteration of the decoder loop, as a logical statement. -/
-theorem decodeVarintLoop_eq_ok_iff {data : Bytes} {start pos shift : Nat} {value v : UInt64}
+theorem decodeVarintLoop_eq_ok_iff {data : Bytes} {pos shift : Nat} {value v : UInt64}
     {pos' : Nat} :
-    decodeVarintLoop data start pos value shift = .ok (v, pos') ↔
+    decodeVarintLoop data pos value shift = .ok (v, pos') ↔
       ∃ h : pos < data.length,
         ¬(shift = 63 ∧ 1 < data[pos].toNat) ∧
-        ((data[pos].toNat < 128 ∧ ¬(data[pos].toNat = 0 ∧ pos + 1 - start > 1) ∧
+        ((data[pos].toNat < 128 ∧ ¬(data[pos].toNat = 0 ∧ shift > 0) ∧
             v = value ||| ((data[pos] &&& 0x7F).toUInt64 <<< UInt64.ofNat shift) ∧
             pos' = pos + 1) ∨
          (128 ≤ data[pos].toNat ∧ shift + 7 ≤ 63 ∧
-            decodeVarintLoop data start (pos + 1)
+            decodeVarintLoop data (pos + 1)
               (value ||| ((data[pos] &&& 0x7F).toUInt64 <<< UInt64.ofNat shift)) (shift + 7)
               = .ok (v, pos'))) := by
   rw [decodeVarintLoop]
@@ -157,23 +158,23 @@ theorem decodeVarintLoop_eq_ok_iff {data : Bytes} {start pos shift : Nat} {value
     · have h63' : shift = 63 ∧ 1 < data[pos].toNat := h63
       simp [h63, h63']
     · have h63' : ¬(shift = 63 ∧ 1 < data[pos].toNat) := h63
-      simp only [h63, if_false, h63', not_false_eq_true, true_and]
+      simp only [h63, ite_false, h63', not_false_eq_true, true_and]
       by_cases hb : data[pos].toNat < 128
-      · simp only [hb, if_true]
-        by_cases hz : data[pos].toNat = 0 ∧ pos + 1 - start > 1
+      · simp only [hb, ite_true]
+        by_cases hz : data[pos].toNat = 0 ∧ shift > 0
         · simp [hz]
-        · simp only [hz, if_false, not_false_eq_true, true_and, Except.ok.injEq, Prod.mk.injEq]
+        · simp only [hz, ite_false, not_false_eq_true, true_and, Except.ok.injEq, Prod.mk.injEq]
           constructor
           · rintro ⟨rfl, rfl⟩
             exact .inl ⟨rfl, rfl⟩
           · rintro (⟨rfl, rfl⟩ | ⟨h, _⟩)
             · exact ⟨rfl, rfl⟩
             · omega
-      · simp only [hb, if_false, false_and, false_or]
+      · simp only [hb, ite_false, false_and, false_or]
         by_cases hs : shift + 7 > 63
         · simp [hs]
           omega
-        · simp only [hs, if_false]
+        · simp only [hs, ite_false]
           constructor
           · intro h
             exact ⟨by omega, by omega, h⟩
@@ -197,16 +198,16 @@ theorem digit_fits {k d : Nat} (hk : k ≤ 9) (hd : d < 128) (h9 : k = 9 → d �
     calc d * 2 ^ (7 * k) ≤ 127 * 2 ^ 56 := Nat.mul_le_mul (by omega) h1
       _ < 2 ^ 64 := by omega
 
-theorem decodeVarintLoop_sound {data : Bytes} {start : Nat} {v : UInt64} {pos' : Nat} :
-    ∀ (j k pos : Nat) (value : UInt64), k + j = 9 → pos = start + k →
+theorem decodeVarintLoop_sound {data : Bytes} {v : UInt64} {pos' : Nat} :
+    ∀ (j k pos : Nat) (value : UInt64), k + j = 9 →
       value.toNat < 2 ^ (7 * k) →
-      decodeVarintLoop data start pos value (7 * k) = .ok (v, pos') →
+      decodeVarintLoop data pos value (7 * k) = .ok (v, pos') →
       ∃ n, v.toNat = value.toNat + n * 2 ^ (7 * k) ∧ (0 < k → n ≠ 0) ∧ pos < pos' ∧
         pos' ≤ data.length ∧ data.take pos' = data.take pos ++ varintNat n := by
   intro j
   induction j with
   | zero =>
-    intro k pos value hk hpos hv h
+    intro k pos value hk hv h
     obtain ⟨hlt, h63, h⟩ := decodeVarintLoop_eq_ok_iff.mp h
     have hfit := digit_fits (k := k) (d := data[pos].toNat % 128) (by omega) (by omega)
       (by omega)
@@ -216,7 +217,7 @@ theorem decodeVarintLoop_sound {data : Bytes} {start : Nat} {v : UInt64} {pos' :
       · rw [take_succ_eq _ _ hlt, varintNat_of_lt hb, UInt8.ofNat_toNat]
     · omega
   | succ j ih =>
-    intro k pos value hk hpos hv h
+    intro k pos value hk hv h
     obtain ⟨hlt, h63, h⟩ := decodeVarintLoop_eq_ok_iff.mp h
     have hfit := digit_fits (k := k) (d := data[pos].toNat % 128) (by omega) (by omega)
       (by omega)
@@ -230,7 +231,7 @@ theorem decodeVarintLoop_sound {data : Bytes} {start : Nat} {v : UInt64} {pos' :
       have hd : data[pos].toNat % 128 * 2 ^ (7 * k) ≤ 127 * 2 ^ (7 * k) :=
         Nat.mul_le_mul_right _ (by omega)
       obtain ⟨n, hn, hn0, hp1, hp2, htake⟩ :=
-        ih (k + 1) (pos + 1) _ (by omega) (by omega) (by rw [hstep, hpow]; omega) h
+        ih (k + 1) (pos + 1) _ (by omega) (by rw [hstep, hpow]; omega) h
       refine ⟨data[pos].toNat % 128 + 128 * n, ?_, by omega, by omega, hp2, ?_⟩
       · rw [hn, hstep, hpow, Nat.add_mul, Nat.mul_assoc, Nat.mul_left_comm, Nat.add_assoc]
       · have hn0 := hn0 (by omega)
@@ -247,23 +248,23 @@ theorem decodeVarint_sound {data : Bytes} {pos pos' : Nat} {v : UInt64}
     (h : decodeVarint data pos = .ok (v, pos')) :
     pos < pos' ∧ pos' ≤ data.length ∧ data.take pos' = data.take pos ++ encodeVarint v := by
   obtain ⟨n, hn, _, h1, h2, h3⟩ :=
-    decodeVarintLoop_sound 9 0 pos 0 (by omega) (by omega) (by simp) h
+    decodeVarintLoop_sound 9 0 pos 0 (by omega) (by simp) h
   have : n = v.toNat := by simpa using hn.symm
   subst this
   exact ⟨h1, h2, by rw [h3, encodeVarint_eq_varintNat]⟩
 
 /-! ## Completeness: every encoding is accepted -/
 
-theorem decodeVarintLoop_complete {data : Bytes} {start : Nat} :
-    ∀ (n k pos : Nat) (value : UInt64) (rest : Bytes), pos = start + k →
+theorem decodeVarintLoop_complete {data : Bytes} :
+    ∀ (n k pos : Nat) (value : UInt64) (rest : Bytes),
       value.toNat < 2 ^ (7 * k) → value.toNat + n * 2 ^ (7 * k) < 2 ^ 64 → (0 < k → n ≠ 0) →
       data.drop pos = varintNat n ++ rest →
-      decodeVarintLoop data start pos value (7 * k)
+      decodeVarintLoop data pos value (7 * k)
         = .ok (UInt64.ofNat (value.toNat + n * 2 ^ (7 * k)), pos + (varintNat n).length) := by
   intro n
   induction n using Nat.strongRecOn with
   | ind n ih =>
-    intro k pos value rest hpos hv hbound hn0 hdrop
+    intro k pos value rest hv hbound hn0 hdrop
     have hpowpos : 0 < 2 ^ (7 * k) := Nat.pow_pos (by omega)
     -- `k ≤ 9`, since a non-zero digit at position 10 or later overflows.
     have hk : k ≤ 9 := by
@@ -320,7 +321,7 @@ theorem decodeVarintLoop_complete {data : Bytes} {start : Nat} :
         subst this
         omega
       refine ⟨hlt, by omega, .inr ⟨by omega, by omega, ?_⟩⟩
-      have := ih (n / 128) (by omega) (k + 1) (pos + 1) _ rest (by omega)
+      have := ih (n / 128) (by omega) (k + 1) (pos + 1) _ rest
         (by rw [hstep, hpow, hmod]; omega) (by rw [hstep, hmod]; omega) (by omega) hdrop'
       rw [show 7 * k + 7 = 7 * (k + 1) by omega, this, hstep, hmod, hsplit]
       simp [Nat.add_assoc, Nat.add_comm]
@@ -331,7 +332,7 @@ theorem decodeVarint_complete {data : Bytes} {pos : Nat} {v : UInt64} {rest : By
     (h : data.drop pos = encodeVarint v ++ rest) :
     decodeVarint data pos = .ok (v, pos + (encodeVarint v).length) := by
   rw [encodeVarint_eq_varintNat] at h ⊢
-  have := decodeVarintLoop_complete (start := pos) v.toNat 0 pos 0 rest (by omega) (by simp)
+  have := decodeVarintLoop_complete v.toNat 0 pos 0 rest (by simp)
     (by simpa using v.toNat_lt) (by omega) h
   simpa [decodeVarint] using this
 

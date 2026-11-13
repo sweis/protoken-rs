@@ -133,7 +133,7 @@ fn test_signed_token_vectors_resign_and_verify() {
             ..Default::default()
         };
 
-        // Signing is deterministic for every algorithm, so re-signing must
+        // Signing is deterministic for these algorithms, so re-signing must
         // reproduce the stored token exactly.
         let token = key.sign_with_key_id(&claims, input.key_id_type).unwrap();
         assert_eq!(

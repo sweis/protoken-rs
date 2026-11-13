@@ -1,7 +1,7 @@
 # protoken for Python
 
 Python bindings for [protoken](../../README.md): compact signed tokens
-(HMAC-SHA256, Ed25519, ML-DSA-44) using canonical proto3 encoding. The
+(HMAC-SHA384, ML-DSA, SLH-DSA, FN-DSA) using canonical proto3 encoding. The
 bindings are a thin [PyO3](https://pyo3.rs) layer over the Rust library, so
 all parsing, validation, and cryptography is the same code the CLI uses.
 
@@ -26,7 +26,7 @@ stable ABI (`abi3`) and work on Python 3.10 and later.
 ```python
 from protoken import Claims, SigningKey, VerifyingKey, TokenExpired
 
-key = SigningKey.generate("ed25519")          # or "hmac-sha256", "ml-dsa-44"
+key = SigningKey.generate("ml-dsa-44")        # or any name in protoken.ALGORITHMS
 token = key.sign(Claims(
     expires_at=1_800_000_000,
     subject="user:alice",

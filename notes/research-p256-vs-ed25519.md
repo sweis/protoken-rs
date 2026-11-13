@@ -1,5 +1,7 @@
 # P-256 (ECDSA) vs Ed25519 (EdDSA) for Protoken Signed Tokens
 
+**Historical:** Ed25519 was removed in November 2026 in favor of post-quantum signatures only.
+
 Research comparing the two candidate asymmetric signature algorithms for protoken-rs,
 as referenced in CLAUDE.md Design Guideline #4.
 

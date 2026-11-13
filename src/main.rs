@@ -11,7 +11,7 @@ use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand};
 use colored::Colorize as _;
 
-use protoken::serialize::{deserialize_claims, deserialize_signed_token};
+use protoken::serialize::{deserialize_claims, deserialize_signed_token, MAX_SIGNED_TOKEN_BYTES};
 use protoken::{Algorithm, Claims, KeyIdentifier, SigningKey, VerifyingKey, Zeroizing};
 
 type CliResult = Result<(), Box<dyn Error>>;
@@ -27,11 +27,10 @@ const ACCEPT_PADDING: GeneralPurposeConfig =
 const B64_URL_SAFE_IN: GeneralPurpose = GeneralPurpose::new(&alphabet::URL_SAFE, ACCEPT_PADDING);
 const B64_STANDARD_IN: GeneralPurpose = GeneralPurpose::new(&alphabet::STANDARD, ACCEPT_PADDING);
 
-/// Maximum base64 key input size. An ML-DSA-44 SigningKey is ~1.8 KB of base64.
-const MAX_KEY_INPUT: usize = 100_000;
-/// Maximum base64 token input size. An ML-DSA-44 token with an embedded
-/// public key is ~5 KB of base64.
-const MAX_TOKEN_INPUT: usize = 16_384;
+/// The largest key, an FN-DSA-1024 SigningKey, is ~5.6 KB of base64.
+const MAX_KEY_INPUT: usize = 16_384;
+/// Base64 expands by 4/3; the rest leaves room for surrounding whitespace.
+const MAX_TOKEN_INPUT: usize = MAX_SIGNED_TOKEN_BYTES * 3 / 2;
 
 const STYLES: Styles = Styles::styled()
     .header(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
@@ -56,8 +55,9 @@ struct Cli {
 enum Command {
     /// Generate a new signing key (base64-encoded SigningKey proto).
     GenerateKey {
-        /// Algorithm: hmac-sha256 (or hmac), ed25519, or ml-dsa-44.
-        #[arg(short, long, default_value_t = Algorithm::Ed25519)]
+        /// hmac-sha384 (or hmac), ml-dsa-{44,65,87}, slh-dsa-sha2-{128s,192s,256s},
+        /// or fn-dsa-{512,1024} (experimental).
+        #[arg(short, long, default_value_t = Algorithm::MlDsa44)]
         algorithm: Algorithm,
     },
 
@@ -140,7 +140,7 @@ fn main() {
 
 fn cmd_generate_key(algorithm: Algorithm) -> CliResult {
     let key = SigningKey::generate(algorithm)?;
-    println!("{}", B64.encode(key.to_bytes()));
+    println!("{}", *Zeroizing::new(B64.encode(key.to_bytes())));
     Ok(())
 }
 
@@ -195,25 +195,24 @@ fn cmd_verify(keyfile: &str, token_arg: Option<String>, json: bool) -> CliResult
     let verified = match VerifyingKey::from_bytes(&key_bytes) {
         Ok(vk) => vk.verify(&token_bytes, now)?,
         Err(vk_err) => match SigningKey::from_bytes(&key_bytes) {
-            Ok(sk) if sk.algorithm.is_symmetric() => sk.verify(&token_bytes, now)?,
+            Ok(sk) if sk.algorithm().is_symmetric() => sk.verify(&token_bytes, now)?,
             Ok(sk) => {
                 return Err(format!(
                     "{} signing key given; verify with its verifying key (see get-verifying-key)",
-                    sk.algorithm
+                    sk.algorithm()
                 )
                 .into())
             }
-            Err(_) => {
-                return Err(format!(
-                    "could not parse key file as a VerifyingKey ({vk_err}) or an HMAC SigningKey"
+            Err(sk_err) => {
+                return Err(
+                    format!("not a VerifyingKey ({vk_err}) or a SigningKey ({sk_err})").into(),
                 )
-                .into())
             }
         },
     };
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&verified)?);
+        println!("{}", ascii_json(&verified)?);
     } else {
         println!("{}", "OK".green().bold());
         print_token(
@@ -240,7 +239,7 @@ fn cmd_inspect(token_arg: Option<String>, json: bool) -> CliResult {
                     "claims": claims,
                     "total_bytes": bytes.len(),
                 });
-                println!("{}", serde_json::to_string_pretty(&output)?);
+                println!("{}", ascii_json(&output)?);
             } else {
                 print_claims(&claims);
                 print_field("Size", &format_size(bytes.len()).cyan());
@@ -261,16 +260,29 @@ fn cmd_inspect(token_arg: Option<String>, json: bool) -> CliResult {
             "signature_base64": B64.encode(&token.signature),
             "total_bytes": bytes.len(),
         });
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        println!("{}", ascii_json(&output)?);
     } else {
         print_token(token.algorithm, &token.key_identifier, &claims);
-        print_field("Signature", &B64.encode(&token.signature).magenta());
+        print_field("Signature", &abbreviate(&token.signature).magenta());
         print_field("Size", &format_size(bytes.len()).cyan());
     }
     Ok(())
 }
 
 // --- Display helpers ---
+
+/// Pretty JSON with everything outside printable ASCII escaped. serde_json
+/// leaves DEL, C1 controls, and bidirectional overrides in strings as they are.
+fn ascii_json(value: &impl serde::Serialize) -> Result<String, Box<dyn Error>> {
+    let mut out = String::new();
+    for unit in serde_json::to_string_pretty(value)?.encode_utf16() {
+        match u8::try_from(unit) {
+            Ok(byte) if byte < 0x7F => out.push(byte.into()),
+            _ => write!(out, "\\u{unit:04x}")?,
+        }
+    }
+    Ok(out)
+}
 
 fn print_field(label: &str, value: &dyn std::fmt::Display) {
     println!("  {:>12}  {value}", label.bold());
@@ -282,20 +294,25 @@ fn print_token(algorithm: Algorithm, key_identifier: &KeyIdentifier, claims: &Cl
     print_claims(claims);
 }
 
-/// Long embedded public keys are abbreviated; `inspect --json` shows them in full.
 fn format_key_identifier(key_identifier: &KeyIdentifier) -> String {
-    const ABBREVIATE_OVER: usize = 32;
+    let bytes = abbreviate(key_identifier.as_bytes());
+    format!("{bytes} ({})", key_identifier.type_name())
+}
+
+/// Base64, cut short for long values; `--json` shows them in full.
+fn abbreviate(bytes: &[u8]) -> String {
+    const ABBREVIATE_OVER: usize = 64;
     const SHOWN_BYTES: usize = 24;
-    let bytes = key_identifier.as_bytes();
-    let type_name = key_identifier.type_name();
     match bytes.get(..SHOWN_BYTES) {
         Some(prefix) if bytes.len() > ABBREVIATE_OVER => {
-            format!("{}... ({type_name}, {} B)", B64.encode(prefix), bytes.len())
+            format!("{}... [{} B]", B64.encode(prefix), bytes.len())
         }
-        _ => format!("{} ({type_name})", B64.encode(bytes)),
+        _ => B64.encode(bytes),
     }
 }
 
+/// Claim strings are untrusted, so they are printed quoted and escaped to
+/// keep control sequences away from the terminal.
 fn print_claims(claims: &Claims) {
     // Only `inspect` can reach a payload without expires_at; verified tokens always have one.
     if claims.expires_at == 0 {
@@ -310,13 +327,13 @@ fn print_claims(claims: &Claims) {
         print_field("Issued At", &format_timestamp(claims.issued_at).cyan());
     }
     if !claims.subject.is_empty() {
-        print_field("Subject", &claims.subject.green());
+        print_field("Subject", &format!("{:?}", claims.subject).green());
     }
     if !claims.audience.is_empty() {
-        print_field("Audience", &claims.audience.green());
+        print_field("Audience", &format!("{:?}", claims.audience).green());
     }
     if !claims.scopes.is_empty() {
-        print_field("Scopes", &claims.scopes.join(", ").green());
+        print_field("Scopes", &format!("{:?}", claims.scopes).green());
     }
 }
 
@@ -383,7 +400,7 @@ fn read_encoded_input(
         let file = File::open(path).map_err(|e| format!("cannot open {what} file {path}: {e}"))?;
         read_bounded(file, max_len, what)?
     };
-    Ok(Zeroizing::new(decode_base64(text.trim())?))
+    decode_base64(text.trim())
 }
 
 fn read_key_bytes(path: &str) -> Result<Zeroizing<Vec<u8>>, Box<dyn Error>> {
@@ -395,19 +412,26 @@ fn read_signing_key(path: &str) -> Result<SigningKey, Box<dyn Error>> {
 }
 
 /// Token bytes from the argument if given, otherwise from stdin.
-fn read_token_input(token_arg: Option<String>) -> Result<Vec<u8>, Box<dyn Error>> {
+fn read_token_input(token_arg: Option<String>) -> Result<Zeroizing<Vec<u8>>, Box<dyn Error>> {
     match token_arg {
         Some(text) => decode_base64(text.trim()),
-        None => Ok(read_encoded_input("-", MAX_TOKEN_INPUT, "token")?.to_vec()),
+        None => read_encoded_input("-", MAX_TOKEN_INPUT, "token"),
     }
 }
 
-/// Decode base64 in either alphabet, with or without padding.
-fn decode_base64(input: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    B64_URL_SAFE_IN
-        .decode(input)
-        .or_else(|_| B64_STANDARD_IN.decode(input))
-        .map_err(|e| format!("could not decode base64: {e}").into())
+/// Decode base64 in either alphabet, with or without padding. The alphabet is
+/// chosen up front and the buffer is zeroized even if decoding fails partway.
+fn decode_base64(input: &str) -> Result<Zeroizing<Vec<u8>>, Box<dyn Error>> {
+    let engine = if input.contains(['+', '/']) {
+        B64_STANDARD_IN
+    } else {
+        B64_URL_SAFE_IN
+    };
+    let mut decoded = Zeroizing::new(Vec::new());
+    engine
+        .decode_vec(input, &mut decoded)
+        .map_err(|e| format!("could not decode base64: {e}"))?;
+    Ok(decoded)
 }
 
 #[cfg(test)]
@@ -445,7 +469,7 @@ mod tests {
         assert!(encodings.iter().any(|e| e.contains('-') || e.contains('_')));
         assert!(encodings.iter().any(|e| e.ends_with('=')));
         for encoding in &encodings {
-            assert_eq!(decode_base64(encoding).unwrap(), raw, "{encoding}");
+            assert_eq!(*decode_base64(encoding).unwrap(), raw, "{encoding}");
         }
         assert!(decode_base64("not base64!").is_err());
         // Mixing the alphabets is still rejected.
@@ -467,21 +491,25 @@ mod tests {
         let hash = KeyIdentifier::KeyHash([1; 8]);
         assert_eq!(format_key_identifier(&hash), "AQEBAQEBAQE (key_hash)");
 
-        let ed25519 = KeyIdentifier::PublicKey(vec![2; 32]);
-        let shown = format_key_identifier(&ed25519);
-        assert!(
-            shown.ends_with(" (public_key)") && !shown.contains("..."),
-            "{shown}"
+        let slh_dsa = KeyIdentifier::PublicKey(vec![0; 64]);
+        assert_eq!(
+            format_key_identifier(&slh_dsa),
+            format!("{} (public_key)", "A".repeat(86))
         );
 
-        let mldsa = KeyIdentifier::PublicKey(vec![3; 1312]);
-        let shown = format_key_identifier(&mldsa);
-        assert!(shown.ends_with("... (public_key, 1312 B)"), "{shown}");
+        let ml_dsa = KeyIdentifier::PublicKey(vec![0; 1312]);
         assert_eq!(
-            shown.find("...").unwrap(),
-            32,
-            "24 bytes encode to 32 chars"
+            format_key_identifier(&ml_dsa),
+            format!("{}... [1312 B] (public_key)", "A".repeat(32))
         );
+    }
+
+    #[test]
+    fn ascii_json_escapes_terminal_controls_and_roundtrips() {
+        let text = "a\u{1b}\u{7f}\u{9b}\u{202e}é𝄞~";
+        let json = ascii_json(&text).unwrap();
+        assert_eq!(json, r#""a\u001b\u007f\u009b\u202e\u00e9\ud834\udd1e~""#);
+        assert_eq!(serde_json::from_str::<String>(&json).unwrap(), text);
     }
 
     #[test]

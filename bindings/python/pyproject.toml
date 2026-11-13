@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "protoken"
 version = "0.1.0"
-description = "Compact signed tokens (HMAC-SHA256, Ed25519, ML-DSA-44) using canonical proto3 encoding"
+description = "Compact signed tokens (HMAC-SHA384, ML-DSA, SLH-DSA, FN-DSA) using canonical proto3 encoding"
 readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [

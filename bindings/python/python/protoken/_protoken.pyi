@@ -1,7 +1,17 @@
 from collections.abc import Sequence
 from typing import Any, Final, Literal
 
-Algorithm = Literal["hmac-sha256", "ed25519", "ml-dsa-44"]
+Algorithm = Literal[
+    "ml-dsa-44",
+    "ml-dsa-65",
+    "ml-dsa-87",
+    "hmac-sha384",
+    "slh-dsa-sha2-128s",
+    "slh-dsa-sha2-192s",
+    "slh-dsa-sha2-256s",
+    "fn-dsa-512",
+    "fn-dsa-1024",
+]
 KeyIdType = Literal["key_hash", "public_key"]
 
 ALGORITHMS: Final[tuple[Algorithm, ...]]
@@ -75,7 +85,7 @@ class VerifyingKey:
 
 class SigningKey:
     @staticmethod
-    def generate(algorithm: str = "ed25519") -> SigningKey: ...
+    def generate(algorithm: str = "ml-dsa-44") -> SigningKey: ...
     @staticmethod
     def from_bytes(data: bytes) -> SigningKey: ...
     def to_bytes(self) -> bytes: ...

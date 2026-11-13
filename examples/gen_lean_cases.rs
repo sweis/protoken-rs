@@ -8,29 +8,32 @@
 //! Usage: cargo run --release --example gen_lean_cases [seed] | (cd lean && lake exe conformance)
 //! (`make lean-conformance` runs this.)
 //!
-//! The output is a function of the seed, so a failure can be reproduced.
+//! The output is a function of the seed, so a failure can be reproduced. The
+//! exception is the signature bytes of FN-DSA tokens that the library signs.
+
+#[path = "common/fn_dsa_fixed.rs"]
+mod fn_dsa_fixed;
 
 use std::io::{BufWriter, Write};
 
 use base64::Engine as _;
-use ed25519_dalek::{Signer as _, Verifier as _};
-use hmac::{Hmac, KeyInit as _, Mac as _};
-use ml_dsa::MlDsa44;
+use fn_dsa::{SigningKey as _, VerifyingKey as _};
+use hmac::{Hmac, Mac as _};
+use ml_dsa::{KeyInit as _, MlDsa44, MlDsa65, MlDsa87, MlDsaParams, Signer as _, Verifier as _};
 use serde::Deserialize;
-use sha2::{Digest as _, Sha256};
+use sha2::{Digest as _, Sha256, Sha384};
+use slh_dsa::{ParameterSet, Sha2_128s, Sha2_192s, Sha2_256s};
 
-use protoken::keys::{deserialize_signing_key, deserialize_verifying_key};
-use protoken::proto3;
+use protoken::proto3::{self, Reader};
 use protoken::serialize::{
     append_signature, deserialize_claims, deserialize_signed_token, serialize_claims,
     serialize_signing_input,
 };
-use protoken::sign::{compute_key_hash, derive_public_key};
+use protoken::sign::compute_key_hash;
 use protoken::types::Version;
-use protoken::verify::{verify_ed25519, verify_hmac, verify_mldsa44};
 use protoken::{
     Algorithm, Claims, KeyIdType, KeyIdentifier, ProtokenError, SigningKey, VerifiedToken,
-    Zeroizing,
+    VerifyingKey, Zeroizing,
 };
 
 // --- Deterministic random numbers (SplitMix64) ---
@@ -76,6 +79,14 @@ fn hx(bytes: &[u8]) -> String {
         "-".into()
     } else {
         hex::encode(bytes)
+    }
+}
+
+fn bit(value: bool) -> &'static str {
+    if value {
+        "1"
+    } else {
+        "0"
     }
 }
 
@@ -129,13 +140,13 @@ fn render_claims(c: &Claims) -> String {
 }
 
 fn render_key_id(k: &KeyIdentifier) -> String {
-    format!("{}:{}", k.key_id_type().to_byte(), hx(k.as_bytes()))
+    format!("{}:{}", k.key_id_type() as u8, hx(k.as_bytes()))
 }
 
 fn render_verified(v: &VerifiedToken) -> String {
     format!(
         "{}:{}:{}",
-        v.algorithm.to_byte(),
+        v.algorithm as u8,
         render_key_id(&v.key_identifier),
         render_claims(&v.claims)
     )
@@ -223,67 +234,124 @@ fn first_len<'a>(fields: &[Field<'a>], number: u64) -> Option<(usize, &'a [u8])>
     })
 }
 
+fn key_algorithm(fields: &[Field]) -> Option<Algorithm> {
+    Algorithm::try_from(u8::try_from(first_varint(fields, 1)?).ok()?).ok()
+}
+
 // --- Direct calls to the primitives ---
 
-fn ed25519_point_valid(pk: &[u8]) -> bool {
-    <&[u8; 32]>::try_from(pk).is_ok_and(|b| ed25519_dalek::VerifyingKey::from_bytes(b).is_ok())
+/// Calls `$ml_dsa::<P>`, `$slh_dsa::<P>`, or `$fn_dsa(logn, ..)` for the algorithm's parameter set.
+macro_rules! dispatch {
+    ($algorithm:expr, $hmac:expr, $ml_dsa:ident, $slh_dsa:ident, $fn_dsa:ident, $($arg:expr),*) => {
+        match $algorithm {
+            Algorithm::HmacSha384 => $hmac,
+            Algorithm::MlDsa44 => $ml_dsa::<MlDsa44>($($arg),*),
+            Algorithm::MlDsa65 => $ml_dsa::<MlDsa65>($($arg),*),
+            Algorithm::MlDsa87 => $ml_dsa::<MlDsa87>($($arg),*),
+            Algorithm::SlhDsaSha2_128s => $slh_dsa::<Sha2_128s>($($arg),*),
+            Algorithm::SlhDsaSha2_192s => $slh_dsa::<Sha2_192s>($($arg),*),
+            Algorithm::SlhDsaSha2_256s => $slh_dsa::<Sha2_256s>($($arg),*),
+            Algorithm::FnDsa512 => $fn_dsa(9, $($arg),*),
+            Algorithm::FnDsa1024 => $fn_dsa(10, $($arg),*),
+        }
+    };
 }
 
-fn ed25519_verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
-    let Ok(bytes) = <&[u8; 32]>::try_from(pk) else {
-        return false;
-    };
-    let (Ok(key), Ok(sig)) = (
-        ed25519_dalek::VerifyingKey::from_bytes(bytes),
-        ed25519_dalek::Signature::from_slice(sig),
-    ) else {
-        return false;
-    };
-    key.verify_strict(msg, &sig).is_ok()
-}
-
-fn mldsa44_verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
-    let Ok(encoded) = <&ml_dsa::EncodedVerifyingKey<MlDsa44>>::try_from(pk) else {
-        return false;
-    };
-    let Ok(sig) = ml_dsa::Signature::<MlDsa44>::try_from(sig) else {
-        return false;
-    };
-    ml_dsa::VerifyingKey::<MlDsa44>::decode(encoded)
-        .verify(msg, &sig)
-        .is_ok()
+/// None if the primitive rejects the secret. HMAC is computed in Lean.
+fn raw_public_key(algorithm: Algorithm, secret: &[u8]) -> Option<Vec<u8>> {
+    fn ml_dsa<P: MlDsaParams>(secret: &[u8]) -> Option<Vec<u8>> {
+        let key = ml_dsa::SigningKey::<P>::new_from_slice(secret).ok()?;
+        Some(key.as_ref().encode().to_vec())
+    }
+    fn slh_dsa<P: ParameterSet>(secret: &[u8]) -> Option<Vec<u8>> {
+        let stored = slh_dsa::SigningKey::<P>::try_from(secret).ok()?;
+        let seeds: Vec<&[u8]> = secret.chunks(secret.len() / 4).collect();
+        let derived = slh_dsa::SigningKey::<P>::slh_keygen_internal(seeds[0], seeds[1], seeds[2]);
+        (derived == stored).then(|| derived.as_ref().to_vec())
+    }
+    fn fn_dsa(logn: u32, secret: &[u8]) -> Option<Vec<u8>> {
+        let key = fn_dsa::SigningKeyStandard::decode(secret).filter(|k| k.get_logn() == logn)?;
+        let mut pk = vec![0; fn_dsa::vrfy_key_size(logn)];
+        key.to_verifying_key(&mut pk);
+        let hash = fn_dsa::hashed_vrfykey_from_vrfykey(&pk);
+        (fn_dsa::hashed_vrfykey_from_signkey(secret) == hash).then_some(pk)
+    }
+    dispatch!(algorithm, None, ml_dsa, slh_dsa, fn_dsa, secret)
 }
 
 fn raw_sign(algorithm: Algorithm, secret: &[u8], msg: &[u8]) -> Vec<u8> {
-    match algorithm {
-        Algorithm::HmacSha256 => {
-            let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
-            mac.update(msg);
-            mac.finalize().into_bytes().to_vec()
-        }
-        Algorithm::Ed25519 => {
-            let seed: &[u8; 32] = secret.try_into().unwrap();
-            ed25519_dalek::SigningKey::from_bytes(seed)
-                .sign(msg)
-                .to_bytes()
-                .to_vec()
-        }
-        Algorithm::MlDsa44 => {
-            let seed: &[u8; 32] = secret.try_into().unwrap();
-            ml_dsa::SigningKey::<MlDsa44>::from_seed(seed.into())
-                .try_sign(msg)
-                .unwrap()
-                .encode()
-                .to_vec()
-        }
+    fn hmac(secret: &[u8], msg: &[u8]) -> Vec<u8> {
+        let mac = Hmac::<Sha384>::new_from_slice(secret).unwrap();
+        mac.chain_update(msg).finalize().into_bytes().to_vec()
     }
+    fn ml_dsa<P: MlDsaParams>(secret: &[u8], msg: &[u8]) -> Vec<u8> {
+        let key = ml_dsa::SigningKey::<P>::new_from_slice(secret).unwrap();
+        key.sign(msg).encode().to_vec()
+    }
+    fn slh_dsa<P: ParameterSet>(secret: &[u8], msg: &[u8]) -> Vec<u8> {
+        let key = slh_dsa::SigningKey::<P>::try_from(secret).unwrap();
+        key.sign(msg).to_vec()
+    }
+    fn fn_dsa(_logn: u32, secret: &[u8], msg: &[u8]) -> Vec<u8> {
+        fn_dsa_fixed::sign(secret, msg).unwrap()
+    }
+    dispatch!(
+        algorithm,
+        hmac(secret, msg),
+        ml_dsa,
+        slh_dsa,
+        fn_dsa,
+        secret,
+        msg
+    )
+}
+
+/// HMAC is computed in Lean.
+fn raw_verify(algorithm: Algorithm, pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+    fn ml_dsa<P: MlDsaParams>(pk: &[u8], msg: &[u8], sig: &[u8]) -> Option<()> {
+        let key = ml_dsa::VerifyingKey::<P>::new_from_slice(pk).ok()?;
+        key.verify(msg, &sig.try_into().ok()?).ok()
+    }
+    fn slh_dsa<P: ParameterSet>(pk: &[u8], msg: &[u8], sig: &[u8]) -> Option<()> {
+        let key = slh_dsa::VerifyingKey::<P>::try_from(pk).ok()?;
+        key.verify(msg, &sig.try_into().ok()?).ok()
+    }
+    dispatch!(
+        algorithm,
+        None,
+        ml_dsa,
+        slh_dsa,
+        fn_dsa_verify,
+        pk,
+        msg,
+        sig
+    )
+    .is_some()
+}
+
+fn fn_dsa_verify(logn: u32, pk: &[u8], msg: &[u8], sig: &[u8]) -> Option<()> {
+    let key = fn_dsa::VerifyingKeyStandard::decode(pk).filter(|_| u32::from(pk[0]) == logn)?;
+    key.verify(sig, &fn_dsa::DOMAIN_NONE, &fn_dsa::HASH_ID_RAW, msg)
+        .then_some(())
+}
+
+fn raw_public_key_valid(algorithm: Algorithm, pk: &[u8]) -> bool {
+    if is_fn_dsa(algorithm) {
+        fn_dsa::VerifyingKeyStandard::decode(pk).is_some()
+    } else {
+        is_slow(algorithm) || pk.len() <= 32 || pk[32..] != vec![0; pk.len() - 32]
+    }
+}
+
+fn is_fn_dsa(algorithm: Algorithm) -> bool {
+    algorithm.name().starts_with("fn-dsa")
 }
 
 // --- Input generators ---
 
 const INTERESTING_BYTES: &[u8] = &[
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x08, 0x0A, 0x10, 0x12, 0x18, 0x1A, 0x20, 0x22, 0x2A, 0x32, 0x38,
-    0x3A, 0x40, 0x7F, 0x80, 0x81, 0xFF,
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x10, 0x12, 0x18,
+    0x1A, 0x20, 0x22, 0x2A, 0x32, 0x38, 0x3A, 0x40, 0x7F, 0x80, 0x81, 0xFF,
 ];
 
 const INTERESTING_U64: &[u64] = &[
@@ -291,7 +359,9 @@ const INTERESTING_U64: &[u64] = &[
     1,
     2,
     3,
-    4,
+    6,
+    11,
+    12,
     127,
     128,
     255,
@@ -308,7 +378,7 @@ const INTERESTING_U64: &[u64] = &[
 ];
 
 const INTERESTING_LENGTHS: &[usize] = &[
-    0, 1, 2, 7, 8, 9, 31, 32, 33, 63, 64, 65, 127, 128, 254, 255, 256, 300,
+    0, 1, 2, 7, 8, 9, 31, 32, 33, 47, 48, 49, 63, 64, 65, 127, 128, 129, 254, 255, 256, 300,
 ];
 
 fn put_varint(mut value: u64, out: &mut Vec<u8>) {
@@ -610,8 +680,8 @@ impl<W: Write> Emitter<W> {
     }
 
     fn varint(&mut self, data: &[u8]) {
-        let mut pos = 0;
-        let result = proto3::decode_varint(data, &mut pos).map(|v| (v, pos));
+        let mut reader = Reader::new(data);
+        let result = reader.read_varint().map(|v| (v, reader.position()));
         self.line(&[
             "varint",
             &hx(data),
@@ -627,15 +697,19 @@ impl<W: Write> Emitter<W> {
 
     fn utf8(&mut self, data: &[u8]) {
         let valid = std::str::from_utf8(data).is_ok();
-        self.line(&["utf8", &hx(data), if valid { "1" } else { "0" }]);
+        self.line(&["utf8", &hx(data), bit(valid)]);
     }
 
     fn sha256(&mut self, data: &[u8]) {
         self.line(&["sha256", &hx(data), &hx(&Sha256::digest(data))]);
     }
 
+    fn sha384(&mut self, data: &[u8]) {
+        self.line(&["sha384", &hx(data), &hx(&Sha384::digest(data))]);
+    }
+
     fn hmac(&mut self, key: &[u8], data: &[u8]) {
-        let tag = raw_sign(Algorithm::HmacSha256, key, data);
+        let tag = raw_sign(Algorithm::HmacSha384, key, data);
         self.line(&["hmac", &hx(key), &hx(data), &hx(&tag)]);
     }
 
@@ -666,7 +740,7 @@ impl<W: Write> Emitter<W> {
         let rendered = render(&result, |t| {
             format!(
                 "{}:{}:{}:{}",
-                t.algorithm.to_byte(),
+                t.algorithm as u8,
                 render_key_id(&t.key_identifier),
                 hx(&t.payload),
                 hx(&t.signature)
@@ -679,8 +753,8 @@ impl<W: Write> Emitter<W> {
         let input = serialize_signing_input(Version::V0, algorithm, key_id, payload);
         self.line(&[
             "signinput",
-            &algorithm.to_byte().to_string(),
-            &key_id.key_id_type().to_byte().to_string(),
+            &(algorithm as u8).to_string(),
+            &(key_id.key_id_type() as u8).to_string(),
             &hx(key_id.as_bytes()),
             &hx(payload),
             &hx(&input),
@@ -689,57 +763,52 @@ impl<W: Write> Emitter<W> {
 
     fn signing_key(&mut self, data: &[u8]) {
         let fields = walk(data);
-        let algorithm = first_varint(&fields, 1)
-            .and_then(|v| u8::try_from(v).ok())
-            .and_then(Algorithm::from_byte);
-        let derived = match (algorithm, first_len(&fields, 2)) {
-            (Some(algorithm), Some((_, secret))) => {
-                derive_public_key(algorithm, secret).unwrap_or_default()
-            }
-            _ => Vec::new(),
-        };
-        let result = deserialize_signing_key(data);
+        let derived = key_algorithm(&fields)
+            .zip(first_len(&fields, 2))
+            .and_then(|(algorithm, (_, secret))| raw_public_key(algorithm, secret));
+        let result = SigningKey::from_bytes(data);
         let rendered = render(&result, |k| {
             format!(
                 "{}:{}:{}",
-                k.algorithm.to_byte(),
-                hx(&k.secret_key),
-                hx(&k.public_key)
+                k.algorithm() as u8,
+                hx(k.secret_key()),
+                hx(k.public_key())
             )
         });
-        self.line(&["sk", &hx(data), &hx(&derived), &rendered]);
+        let derived = derived.map_or("!".into(), |pk| hx(&pk));
+        self.line(&["sk", &hx(data), &derived, &rendered]);
     }
 
     fn verifying_key(&mut self, data: &[u8]) {
         let fields = walk(data);
-        let point = first_len(&fields, 2).is_some_and(|(_, pk)| ed25519_point_valid(pk));
-        let result = deserialize_verifying_key(data);
+        let valid = key_algorithm(&fields)
+            .zip(first_len(&fields, 2))
+            .is_some_and(|(algorithm, (_, pk))| raw_public_key_valid(algorithm, pk));
+        let result = VerifyingKey::from_bytes(data);
         let rendered = render(&result, |k| {
-            format!("{}:{}", k.algorithm.to_byte(), hx(&k.public_key))
+            format!("{}:{}", k.algorithm() as u8, hx(k.public_key()))
         });
-        self.line(&["vk", &hx(data), if point { "1" } else { "0" }, &rendered]);
+        self.line(&["vk", &hx(data), bit(valid), &rendered]);
     }
 
-    fn verify(&mut self, algorithm: Algorithm, key: &[u8], token: &[u8], now: u64) {
-        let fields = walk(token);
-        let signature_ok = first_len(&fields, 6).is_some_and(|(start, sig)| match algorithm {
-            Algorithm::HmacSha256 => false, // computed in Lean
-            Algorithm::Ed25519 => ed25519_verify(key, &token[..start], sig),
-            Algorithm::MlDsa44 => mldsa44_verify(key, &token[..start], sig),
-        });
-        let result = match algorithm {
-            Algorithm::HmacSha256 => verify_hmac(key, token, now),
-            Algorithm::Ed25519 => verify_ed25519(key, token, now),
-            Algorithm::MlDsa44 => verify_mldsa44(key, token, now),
+    /// Builds the verifier's key from `material`, then verifies.
+    fn verify(&mut self, algorithm: Algorithm, material: &[u8], token: &[u8], now: u64) {
+        let signature_ok = first_len(&walk(token), 6)
+            .is_some_and(|(start, sig)| raw_verify(algorithm, material, &token[..start], sig));
+        let result = if algorithm.is_symmetric() {
+            SigningKey::from_secret_key(algorithm, Zeroizing::new(material.to_vec()))
+                .and_then(|key| key.verify(token, now))
+        } else {
+            VerifyingKey::new(algorithm, material.to_vec()).and_then(|key| key.verify(token, now))
         };
         self.line(&[
             "verify",
-            &algorithm.to_byte().to_string(),
-            &hx(key),
+            &(algorithm as u8).to_string(),
+            &hx(material),
             &hx(token),
             &now.to_string(),
-            if ed25519_point_valid(key) { "1" } else { "0" },
-            if signature_ok { "1" } else { "0" },
+            bit(raw_public_key_valid(algorithm, material)),
+            bit(signature_ok),
             &render(&result, render_verified),
         ]);
     }
@@ -752,10 +821,10 @@ impl<W: Write> Emitter<W> {
         };
         self.line(&[
             "sign",
-            &key.algorithm.to_byte().to_string(),
-            &hx(&key.secret_key),
-            &hx(&key.public_key),
-            &id_type.to_byte().to_string(),
+            &(key.algorithm() as u8).to_string(),
+            &hx(key.secret_key()),
+            &hx(key.public_key()),
+            &(id_type as u8).to_string(),
             &render_claims(claims),
             &hx(&signature),
             &render(&result, |token| hx(token)),
@@ -781,11 +850,25 @@ fn boundary_times(rng: &mut Rng, claims: &Claims) -> u64 {
 }
 
 /// The key material a verifier holds for `key`.
-fn verifier_material(key: &SigningKey) -> Vec<u8> {
-    if key.algorithm.is_symmetric() {
-        key.secret_key.to_vec()
+fn verifier_material(key: &SigningKey) -> &[u8] {
+    if key.algorithm().is_symmetric() {
+        key.secret_key()
     } else {
-        key.public_key.clone()
+        key.public_key()
+    }
+}
+
+fn is_slow(algorithm: Algorithm) -> bool {
+    algorithm.name().starts_with("slh-dsa")
+}
+
+/// A random key. SLH-DSA signing takes about a second, so those keys are rare.
+fn pick_signer<'a>(rng: &mut Rng, keys: &'a [SigningKey]) -> &'a SigningKey {
+    loop {
+        let key = &keys[rng.below(keys.len())];
+        if !is_slow(key.algorithm()) || rng.chance(2) {
+            return key;
+        }
     }
 }
 
@@ -855,12 +938,13 @@ fn main() {
         e.utf8(&s);
     }
 
-    // The runner's own SHA-256 and HMAC.
-    for len in (0..200).chain([255, 256, 1000, 1312, 4096]) {
+    // The runner's own hashes and HMAC.
+    for len in (0..300).chain([1000, 1312, 4096]) {
         e.sha256(&rng.bytes(len));
+        e.sha384(&rng.bytes(len));
     }
-    for key_len in [0, 1, 31, 32, 33, 63, 64, 65, 100, 4096] {
-        for msg_len in [0, 1, 55, 56, 64, 300] {
+    for key_len in [0, 1, 47, 48, 49, 127, 128, 129, 200] {
+        for msg_len in [0, 1, 111, 112, 128, 300] {
             e.hmac(&rng.bytes(key_len), &rng.bytes(msg_len));
         }
     }
@@ -919,15 +1003,19 @@ fn main() {
         e.claims(&serialize_claims(claims));
     }
 
-    // Keys: two per algorithm, plus the stored reference keys.
+    // Keys: the stored reference keys, plus two per fast algorithm.
     let json = include_str!("../testdata/reference_vectors.json");
     let reference: VectorFile = serde_json::from_str(json).expect("reference vectors parse");
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let mut keys = Vec::new();
-    for algorithm in Algorithm::ALL {
+    for algorithm in Algorithm::ALL.into_iter().filter(|&a| !is_slow(a)) {
         for _ in 0..2 {
-            let secret = Zeroizing::new(rng.bytes(32));
-            keys.push(SigningKey::from_secret_key(algorithm, secret).unwrap());
+            let secret = if is_fn_dsa(algorithm) {
+                fn_dsa_fixed::secret_key(algorithm, &rng.bytes(32))
+            } else {
+                rng.bytes(algorithm.secret_key_len())
+            };
+            keys.push(SigningKey::from_secret_key(algorithm, Zeroizing::new(secret)).unwrap());
         }
     }
     let mut token_pool: Vec<Vec<u8>> = Vec::new();
@@ -935,8 +1023,8 @@ fn main() {
         let key = SigningKey::from_bytes(&b64.decode(&v.signing_key_base64).unwrap()).unwrap();
         let token = b64.decode(&v.token_base64).unwrap();
         e.verify(
-            key.algorithm,
-            &verifier_material(&key),
+            key.algorithm(),
+            verifier_material(&key),
             &token,
             2_000_000_000,
         );
@@ -953,32 +1041,27 @@ fn main() {
         .filter_map(|k| k.verifying_key().ok())
         .map(|k| k.to_bytes())
         .collect();
-    for len in [0, 1, 31, 32, 33, 64, 4095, 4096, 4097] {
-        let key = SigningKey {
-            algorithm: Algorithm::HmacSha256,
-            secret_key: Zeroizing::new(rng.bytes(len)),
-            public_key: Vec::new(),
-        };
-        signing_key_pool.push(key.to_bytes().to_vec());
-    }
-    // Every combination of algorithm byte, secret, and public key from small pools.
-    let public_pool: Vec<Vec<u8>> = keys
-        .iter()
-        .map(|k| k.public_key.clone())
-        .chain([
-            vec![2; 32],
-            vec![0; 32],
-            vec![1; 31],
-            vec![0; 1311],
-            vec![0; 2049],
-        ])
-        .collect();
-    for algorithm_byte in 0..=4u32 {
-        for key in &keys {
-            for public in &public_pool {
+    // Every combination of algorithm byte, secret, and public key from small
+    // pools, with lengths on each side of every key size and field limit.
+    let around = |lengths: &[usize]| -> Vec<Vec<u8>> {
+        let sizes = lengths.iter().flat_map(|&n| [n - 1, n, n + 1]);
+        sizes.map(|n| vec![7; n]).collect()
+    };
+    let mut secret_pool = around(&[1, 32, 48, 64, 96, 128, 1345, 2369]);
+    secret_pool.extend(keys.iter().map(|k| k.secret_key().to_vec()));
+    let mut public_pool = around(&[1, 32, 48, 64, 897, 1312, 1793, 1952, 2592]);
+    public_pool.extend([1312, 1952, 2592].map(|n| vec![0; n]));
+    public_pool.extend(keys.iter().map(|k| k.public_key().to_vec()));
+    for algorithm_byte in 0..=13 {
+        for secret in &secret_pool {
+            // Deriving an SLH-DSA public key is slow, so sample the pairs.
+            for public in public_pool
+                .iter()
+                .filter(|p| p.is_empty() || rng.chance(15))
+            {
                 let mut sk = Vec::new();
                 proto3::encode_uint32(1, algorithm_byte, &mut sk);
-                proto3::encode_bytes(2, &key.secret_key, &mut sk);
+                proto3::encode_bytes(2, secret, &mut sk);
                 proto3::encode_bytes(3, public, &mut sk);
                 signing_key_pool.push(sk);
             }
@@ -989,6 +1072,21 @@ fn main() {
             proto3::encode_bytes(2, public, &mut vk);
             verifying_key_pool.push(vk);
         }
+    }
+    // An FN-DSA key whose stored hash of the public key is wrong.
+    for key in keys.iter().filter(|k| is_fn_dsa(k.algorithm())) {
+        let mut bytes = key.to_bytes().to_vec();
+        let secret_end = bytes.len() - key.public_key().len() - 3;
+        bytes[secret_end - 1] ^= 1;
+        signing_key_pool.push(bytes);
+    }
+    // An SLH-DSA key whose stored root is wrong in both places.
+    for key in keys.iter().filter(|k| is_slow(k.algorithm())) {
+        let mut bytes = key.to_bytes().to_vec();
+        let secret_end = bytes.len() - key.public_key().len() - 2;
+        bytes[secret_end - 1] ^= 1;
+        *bytes.last_mut().unwrap() ^= 1;
+        signing_key_pool.push(bytes);
     }
     for bytes in signing_key_pool.iter().chain(&verifying_key_pool) {
         e.signing_key(bytes);
@@ -1006,45 +1104,39 @@ fn main() {
         e.verifying_key(&message);
     }
 
-    // Signing through the key API, including unusable keys and claims.
+    // Signing through the key API, including unusable claims.
     for _ in 0..900 {
-        let mut key = keys[rng.below(keys.len())].clone();
-        match rng.below(12) {
-            0 => key.public_key = rng.bytes_below(40),
-            1 => key.secret_key = Zeroizing::new(rng.bytes_below(40)),
-            2 => key.algorithm = rng.pick(&Algorithm::ALL),
-            _ => {}
-        }
+        let key = pick_signer(rng, &keys);
         let id_type = rng.pick(&[KeyIdType::KeyHash, KeyIdType::PublicKey]);
         let claims = if rng.chance(70) {
             signable_claims(rng)
         } else {
             random_claims(rng)
         };
-        e.sign(&key, id_type, &claims);
+        e.sign(key, id_type, &claims);
     }
 
     // The same limits through signing, and through verification of an
     // envelope that carries a correct signature over the payload.
-    for key in &keys {
+    for key in keys.iter().filter(|k| !is_slow(k.algorithm())) {
         let material = verifier_material(key);
-        let key_id = KeyIdentifier::KeyHash(compute_key_hash(&material));
+        let key_id = KeyIdentifier::KeyHash(compute_key_hash(material));
         for claims in &limit_claims {
             e.sign(key, KeyIdType::KeyHash, claims);
             let payload = serialize_claims(claims);
-            let input = serialize_signing_input(Version::V0, key.algorithm, &key_id, &payload);
-            let signature = raw_sign(key.algorithm, &key.secret_key, &input);
+            let input = serialize_signing_input(Version::V0, key.algorithm(), &key_id, &payload);
+            let signature = raw_sign(key.algorithm(), key.secret_key(), &input);
             let token = append_signature(input, &signature);
             e.token(&token);
-            e.verify(key.algorithm, &material, &token, 1);
+            e.verify(key.algorithm(), material, &token, 1);
         }
     }
 
     // Tokens: honest ones at boundary times, under the right and wrong keys.
     for _ in 0..1500 {
-        let key = &keys[rng.below(keys.len())];
+        let key = pick_signer(rng, &keys);
         let claims = signable_claims(rng);
-        let id_type = if key.algorithm.is_symmetric() || rng.chance(70) {
+        let id_type = if key.algorithm().is_symmetric() || rng.chance(70) {
             KeyIdType::KeyHash
         } else {
             KeyIdType::PublicKey
@@ -1052,38 +1144,42 @@ fn main() {
         let token = key.sign_with_key_id(&claims, id_type).unwrap();
         e.token(&token);
         e.verify(
-            key.algorithm,
-            &verifier_material(key),
+            key.algorithm(),
+            verifier_material(key),
             &token,
             boundary_times(rng, &claims),
         );
         if rng.chance(30) {
             let other = &keys[rng.below(keys.len())];
             let algorithm = if rng.chance(50) {
-                other.algorithm
+                other.algorithm()
             } else {
-                key.algorithm
+                key.algorithm()
             };
             e.verify(
                 algorithm,
-                &verifier_material(other),
+                verifier_material(other),
                 &token,
                 claims.expires_at,
             );
         }
         if rng.chance(10) {
-            let len = rng.pick(&[0usize, 31, 33, 1311, 1313, 4097]);
-            e.verify(key.algorithm, &rng.bytes(len), &token, claims.expires_at);
+            let len = rng.pick(&[0usize, 32, 47, 48, 128, 129, 1311, 1312, 1313, 2592, 2593]);
+            e.verify(key.algorithm(), &rng.bytes(len), &token, claims.expires_at);
         }
         if token.len() < 600 || rng.chance(15) {
-            token_pool.push(token);
+            // Re-signed so that later mutations do not depend on FN-DSA's randomness.
+            let (signed_len, _) = first_len(&walk(&token), 6).unwrap();
+            let input = token[..signed_len].to_vec();
+            let signature = raw_sign(key.algorithm(), key.secret_key(), &input);
+            token_pool.push(append_signature(input, &signature));
         }
     }
 
     // Correctly signed envelopes around payloads and identifiers that signing
     // would refuse. Only the checks after the signature can reject these.
     for _ in 0..1500 {
-        let key = &keys[rng.below(keys.len())];
+        let key = pick_signer(rng, &keys);
         let material = verifier_material(key);
         let payload = match rng.below(4) {
             0 => serialize_claims(&random_claims(rng)),
@@ -1095,17 +1191,17 @@ fn main() {
             _ => rng.bytes_below(20),
         };
         let key_id = match rng.below(8) {
-            0 => KeyIdentifier::PublicKey(material.clone()),
+            0 => KeyIdentifier::PublicKey(material.to_vec()),
             1 => KeyIdentifier::KeyHash(rng.bytes(8).try_into().unwrap()),
             2 => {
-                let len = rng.pick(&[0usize, 8, 32, 33]);
+                let len = rng.pick(&[0usize, 8, 32, 33, 1312]);
                 KeyIdentifier::PublicKey(rng.bytes(len))
             }
-            _ => KeyIdentifier::KeyHash(compute_key_hash(&material)),
+            _ => KeyIdentifier::KeyHash(compute_key_hash(material)),
         };
-        e.signing_input(key.algorithm, &key_id, &payload);
-        let input = serialize_signing_input(Version::V0, key.algorithm, &key_id, &payload);
-        let mut signature = raw_sign(key.algorithm, &key.secret_key, &input);
+        e.signing_input(key.algorithm(), &key_id, &payload);
+        let input = serialize_signing_input(Version::V0, key.algorithm(), &key_id, &payload);
+        let mut signature = raw_sign(key.algorithm(), key.secret_key(), &input);
         match rng.below(20) {
             0 => signature.truncate(signature.len() - 1),
             1 => signature.push(0),
@@ -1115,7 +1211,7 @@ fn main() {
         let token = append_signature(input, &signature);
         e.token(&token);
         let now = deserialize_claims(&payload).map_or(0, |c| boundary_times(rng, &c));
-        e.verify(key.algorithm, &material, &token, now);
+        e.verify(key.algorithm(), material, &token, now);
     }
 
     // Damaged tokens.
@@ -1128,51 +1224,63 @@ fn main() {
             let original = deserialize_signed_token(base).unwrap();
             let signer = keys.iter().find(|k| {
                 let material = verifier_material(k);
-                k.algorithm == original.algorithm
-                    && (original.key_identifier.as_bytes() == compute_key_hash(&material)
+                k.algorithm() == original.algorithm
+                    && (original.key_identifier.as_bytes() == compute_key_hash(material)
                         || original.key_identifier.as_bytes() == material)
             });
             if let Some(key) = signer {
                 let now = deserialize_claims(&original.payload).unwrap().expires_at;
-                e.verify(key.algorithm, &verifier_material(key), &token, now);
+                e.verify(key.algorithm(), verifier_material(key), &token, now);
             }
         }
     }
     for _ in 0..4000 {
         e.token(&random_message(rng, 3, 6));
     }
-    for len in [7999, 8000, 8001] {
+    for len in [36511, 36512, 36513] {
         e.token(&vec![0u8; len]);
         // The first field has its own error, so the size check must come first.
-        for prefix in [[0x08, 0x05], [0x10, 0x09], [0x18, 0x09]] {
+        for prefix in [[0x08, 0x05], [0x10, 0x0C], [0x18, 0x09]] {
             let mut data = prefix.to_vec();
             data.resize(len, 0);
             e.token(&data);
         }
     }
 
-    // Unusable verifier keys that the token names correctly. Which error comes
-    // back shows where the signature length check sits relative to key decoding.
-    for algorithm in [Algorithm::Ed25519, Algorithm::MlDsa44] {
-        let full = algorithm.signature_len();
-        let not_on_curve = {
-            let mut pk = vec![0u8; 32];
-            pk[0] = 2;
-            pk
-        };
-        for material in [
-            not_on_curve,
-            vec![7; 31],
-            vec![7; 33],
-            vec![7; 1311],
-            Vec::new(),
-        ] {
-            let key_id = KeyIdentifier::KeyHash(compute_key_hash(&material));
-            let input = serialize_signing_input(Version::V0, algorithm, &key_id, &[0x08, 0x01]);
-            for sig_len in [1, full - 1, full, full + 1] {
-                let token = append_signature(input.clone(), &vec![9; sig_len]);
-                e.verify(algorithm, &material, &token, 0);
+    // Key identifier and signature lengths on each side of every algorithm's
+    // size and of the field limits, under a key that the token names correctly.
+    for algorithm in Algorithm::ALL {
+        let key_len = algorithm.public_key_len().unwrap_or(48);
+        let sig_len = algorithm.signature_len();
+        for key_len in [key_len - 1, key_len, key_len + 1, 128, 129, 2592, 2593] {
+            // The first byte is the header of an FN-DSA public key.
+            let mut material = vec![7; key_len];
+            material[0] = if algorithm == Algorithm::FnDsa512 {
+                9
+            } else {
+                10
+            };
+            for key_id in [
+                KeyIdentifier::KeyHash(compute_key_hash(&material)),
+                KeyIdentifier::PublicKey(material.clone()),
+            ] {
+                let input = serialize_signing_input(Version::V0, algorithm, &key_id, &[0x08, 0x01]);
+                for sig_len in [1, sig_len - 1, sig_len, sig_len + 1, 29792, 29793] {
+                    let token = append_signature(input.clone(), &vec![9; sig_len]);
+                    e.token(&token);
+                    e.verify(algorithm, &material, &token, 0);
+                }
             }
+        }
+    }
+
+    // One honest SLH-DSA token per parameter set and key identifier type.
+    for key in keys.iter().filter(|k| is_slow(k.algorithm())) {
+        for id_type in [KeyIdType::KeyHash, KeyIdType::PublicKey] {
+            let claims = claims_of_size(4096);
+            e.sign(key, id_type, &claims);
+            let token = key.sign_with_key_id(&claims, id_type).unwrap();
+            e.verify(key.algorithm(), key.public_key(), &token, 1);
         }
     }
 

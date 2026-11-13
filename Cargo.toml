@@ -7,12 +7,12 @@ exclude = ["fuzz"]
 name = "protoken"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Protobuf-based signed tokens: a minimal, fast alternative to JWTs"
 repository = "https://github.com/sweis/protoken-rs"
 readme = "README.md"
 categories = ["authentication", "cryptography", "encoding"]
-keywords = ["token", "jwt", "protobuf", "ed25519", "ml-dsa"]
+keywords = ["token", "jwt", "protobuf", "ml-dsa", "slh-dsa"]
 
 [features]
 default = ["cli"]
@@ -25,12 +25,21 @@ name = "protoken"
 required-features = ["cli"]
 
 [dependencies]
-# Crypto (RustCrypto ecosystem)
-ed25519-dalek = "3"
+# Crypto
 hmac = { version = "0.13", features = ["zeroize"] }
-sha2 = { version = "0.11", default-features = false }
+sha2 = { version = "0.11", default-features = false, features = ["zeroize"] }
 subtle = "2"
 ml-dsa = { version = "0.1", default-features = false, features = ["alloc", "zeroize"] }
+# Pinned: neither release promises compatibility, and fn-dsa will change its
+# key and signature formats to follow FIPS 206 drafts.
+fn-dsa = "=0.4.0"
+fn-dsa-comm = "=0.4.0"
+fn-dsa-kgen = "=0.4.0"
+fn-dsa-vrfy = "=0.4.0"
+# The AVX2 key decoder skips its range check and accepts corrupted keys, which
+# then take many seconds to fail signing. See notes/research-fn-dsa.md.
+fn-dsa-sign = { version = "=0.4.0", features = ["no_avx2"] }
+slh-dsa = { version = "=0.2.0-rc.5", features = ["zeroize"] }
 getrandom = "0.4"
 zeroize = "1"
 
@@ -54,8 +63,13 @@ serde_json = "1"
 name = "protoken_bench"
 harness = false
 
+# An unoptimized SLH-DSA signature takes about 30 seconds. Debug assertions and
+# overflow checks stay on.
+[profile.dev]
+opt-level = 2
+
 [lints.rust]
-unsafe_code = "deny"
+unsafe_code = "forbid"
 
 [lints.clippy]
 unwrap_used = "warn"

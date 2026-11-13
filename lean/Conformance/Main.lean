@@ -1,6 +1,7 @@
 import Std.Data.HashMap
 import Protoken.Keys
 import Conformance.Sha256
+import Conformance.Sha384
 
 /-!
 # Conformance runner
@@ -13,8 +14,8 @@ Input is read from stdin, one case per line: an operation name, its arguments, a
 the expected result, separated by spaces. Byte strings are lowercase hex, with `-`
 for the empty string.
 
-SHA-256 and HMAC run in Lean. Ed25519 and ML-DSA-44 are not implemented here, so
-each case carries the answers of the primitive calls it needs (an `Oracle`).
+SHA-256 and HMAC-SHA384 run in Lean. The signature schemes are not implemented here,
+so each case carries the answers of the primitive calls it needs (an `Oracle`).
 -/
 
 namespace Conformance
@@ -118,10 +119,10 @@ def renderVerifyingKey (k : VerifyingKey) : String :=
 /-- Answers from the Rust primitives for the calls one case can make. Each case
 makes at most one call of each kind. -/
 structure Oracle where
-  /-- Public key derived from the case's seed. -/
-  derived : Bytes := []
-  /-- Whether the case's Ed25519 public key decodes to a curve point. -/
-  point : Bool := false
+  /-- Public key derived from the case's secret, if the primitive accepts it. -/
+  derived : Option Bytes := none
+  /-- Whether the case's public key is well formed. -/
+  pkValid : Bool := false
   /-- Whether the case's signature verifies over the bytes before the signature field. -/
   sigOk : Bool := false
   /-- Signature over the case's signing input. -/
@@ -135,21 +136,16 @@ theorem fixLen_length (n : Nat) (b : Bytes) : (fixLen n b).length = n := by
 def cryptoOf (o : Oracle) : Crypto where
   sha256 := sha256
   sha256_length := sha256_length
-  hmacSha256 := hmacSha256
-  hmacSha256_length := hmacSha256_length
-  ed25519PublicKey _ := fixLen ED25519_PUBLIC_KEY_LEN o.derived
-  ed25519PublicKey_length _ := fixLen_length _ _
-  ed25519Sign _ _ := fixLen ED25519_SIG_LEN o.signature
-  ed25519Sign_length _ _ := fixLen_length _ _
-  ed25519PointValid _ := o.point
-  ed25519VerifyStrict _ _ _ := o.sigOk
-  mldsa44PublicKey _ := fixLen MLDSA44_PUBLIC_KEY_LEN o.derived
-  mldsa44PublicKey_length _ := fixLen_length _ _
-  mldsa44Sign _ _ := some (fixLen MLDSA44_SIG_LEN o.signature)
-  mldsa44Sign_length _ _ _ h := by
+  hmacSha384 := hmacSha384
+  hmacSha384_length := hmacSha384_length
+  publicKey a _ := o.derived.filter fun pk => a.publicKeyLen = some pk.length
+  publicKey_length _ _ _ h := by simpa using (Option.filter_eq_some_iff.mp h).2
+  publicKeyValid _ _ := o.pkValid
+  sign a _ _ := some (fixLen a.signatureLen o.signature)
+  sign_length _ _ _ _ h := by
     cases h
     exact fixLen_length _ _
-  mldsa44Verify _ _ _ := o.sigOk
+  verify _ _ _ _ := o.sigOk
 
 /-! ## Cases -/
 
@@ -165,8 +161,10 @@ def runCase : List String → Option (String × String)
     some (if validUtf8 (← hexDecode data) then "1" else "0", expected)
   | ["sha256", data, expected] => do
     some (hexEncode (sha256 (← hexDecode data)), expected)
+  | ["sha384", data, expected] => do
+    some (hexEncode (sha384 (← hexDecode data)), expected)
   | ["hmac", key, data, expected] => do
-    some (hexEncode (hmacSha256 (← hexDecode key) (← hexDecode data)), expected)
+    some (hexEncode (hmacSha384 (← hexDecode key) (← hexDecode data)), expected)
   | ["claims", data, expected] => do
     some (renderResult renderClaims (deserializeClaims (← hexDecode data)), expected)
   | ["validate", claims, expected] => do
@@ -180,20 +178,24 @@ def runCase : List String → Option (String × String)
       (← parseKeyIdentifier idType keyId) (← hexDecode payload)
     some (hexEncode input, expected)
   | ["sk", data, derived, expected] => do
-    let C := cryptoOf { derived := ← hexDecode derived }
+    -- `!` means the primitive rejected the secret.
+    let derived ← if derived == "!" then some none else (hexDecode derived).map some
+    let C := cryptoOf { derived }
     some (renderResult renderSigningKey (deserializeSigningKey C (← hexDecode data)), expected)
-  | ["vk", data, point, expected] => do
-    let C := cryptoOf { point := ← parseBool point }
+  | ["vk", data, pkValid, expected] => do
+    let C := cryptoOf { pkValid := ← parseBool pkValid }
     some (renderResult renderVerifyingKey (deserializeVerifyingKey C (← hexDecode data)), expected)
-  | ["verify", alg, key, token, now, point, sigOk, expected] => do
-    let C := cryptoOf { point := ← parseBool point, sigOk := ← parseBool sigOk }
-    let key ← hexDecode key
+  | ["verify", alg, material, token, now, pkValid, sigOk, expected] => do
+    let C := cryptoOf { pkValid := ← parseBool pkValid, sigOk := ← parseBool sigOk }
+    let alg ← parseAlgorithm alg
+    let material ← hexDecode material
     let token ← hexDecode token
     let now ← parseU64 now
-    let r := match ← parseAlgorithm alg with
-      | .hmacSha256 => verifyHmac C key token now
-      | .ed25519 => verifyEd25519 C key token now
-      | .mlDsa44 => verifyMldsa44 C key token now
+    let r :=
+      if alg.isSymmetric then
+        SigningKey.fromSecretKey C alg material >>= (·.verify C token now)
+      else
+        VerifyingKey.new C alg material >>= (·.verify C token now)
     some (renderResult renderVerified r, expected)
   | ["sign", alg, secret, pub, idType, claims, signature, expected] => do
     let C := cryptoOf { signature := ← hexDecode signature }

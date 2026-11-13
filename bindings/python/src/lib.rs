@@ -2,7 +2,9 @@
 //!
 //! This is a thin layer over `protoken::SigningKey` and `protoken::VerifyingKey`.
 //! All parsing and validation happens in the Rust library; this crate only
-//! converts types and errors.
+//! converts types and errors. Only slow calls (signing key
+//! generation and loading, SLH-DSA signing) release the GIL, because getting it
+//! back can take longer than a fast call itself.
 //!
 //! Python cannot zeroize `bytes` objects, so secret material returned by
 //! `SigningKey.to_bytes()` stays in memory until the interpreter frees it.
@@ -65,10 +67,6 @@ impl<T> OrPyErr<T> for Result<T, RustError> {
             }
         })
     }
-}
-
-fn parse_algorithm(name: &str) -> PyResult<Algorithm> {
-    name.parse::<Algorithm>().or_py_err()
 }
 
 fn now_or_system_time(now: Option<u64>) -> PyResult<u64> {
@@ -270,7 +268,7 @@ fn inspect_token(token: &[u8]) -> PyResult<UnverifiedToken> {
     })
 }
 
-/// A verifying (public) key for Ed25519 or ML-DSA-44.
+/// A verifying (public) key for ML-DSA, SLH-DSA, or FN-DSA.
 #[pyclass(
     name = "VerifyingKey",
     frozen,
@@ -298,12 +296,12 @@ impl VerifyingKey {
 
     #[getter]
     fn algorithm(&self) -> &'static str {
-        self.0.algorithm.name()
+        self.0.algorithm().name()
     }
 
     #[getter]
     fn public_key<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, &self.0.public_key)
+        PyBytes::new(py, self.0.public_key())
     }
 
     /// The 8-byte identifier that tokens signed by the matching key carry.
@@ -323,7 +321,7 @@ impl VerifyingKey {
     }
 }
 
-/// A signing key for HMAC-SHA256, Ed25519, or ML-DSA-44.
+/// A signing key for any of `ALGORITHMS`.
 #[pyclass(
     name = "SigningKey",
     frozen,
@@ -336,19 +334,20 @@ struct SigningKey(protoken::SigningKey);
 
 #[pymethods]
 impl SigningKey {
-    /// Generate a new key. `algorithm` is "hmac-sha256", "ed25519" (default), or "ml-dsa-44".
+    /// Generate a new key. `algorithm` is one of `ALGORITHMS`.
     #[staticmethod]
-    #[pyo3(signature = (algorithm = "ed25519"))]
-    fn generate(algorithm: &str) -> PyResult<Self> {
-        protoken::SigningKey::generate(parse_algorithm(algorithm)?)
+    #[pyo3(signature = (algorithm = "ml-dsa-44"))]
+    fn generate(py: Python<'_>, algorithm: &str) -> PyResult<Self> {
+        let algorithm = algorithm.parse::<Algorithm>().or_py_err()?;
+        py.detach(|| protoken::SigningKey::generate(algorithm))
             .map(SigningKey)
             .or_py_err()
     }
 
     /// Decode a serialized signing key.
     #[staticmethod]
-    fn from_bytes(data: &[u8]) -> PyResult<Self> {
-        protoken::SigningKey::from_bytes(data)
+    fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<Self> {
+        py.detach(|| protoken::SigningKey::from_bytes(data))
             .map(SigningKey)
             .or_py_err()
     }
@@ -360,13 +359,13 @@ impl SigningKey {
 
     #[getter]
     fn algorithm(&self) -> &'static str {
-        self.0.algorithm.name()
+        self.0.algorithm().name()
     }
 
     /// The public key; empty for HMAC.
     #[getter]
     fn public_key<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, &self.0.public_key)
+        PyBytes::new(py, self.0.public_key())
     }
 
     /// The verifying key. Raises for HMAC keys, which verify with the signing key itself.
@@ -394,8 +393,13 @@ impl SigningKey {
         } else {
             KeyIdType::KeyHash
         };
-        let token = self.0.sign_with_key_id(&claims.0, id_type).or_py_err()?;
-        Ok(PyBytes::new(py, &token))
+        let sign = || self.0.sign_with_key_id(&claims.0, id_type);
+        let token = if self.algorithm().starts_with("slh-dsa") {
+            py.detach(sign)
+        } else {
+            sign()
+        };
+        Ok(PyBytes::new(py, &token.or_py_err()?))
     }
 
     /// Verify a token signed by this key. `now` defaults to the current time.
@@ -424,7 +428,7 @@ fn _protoken(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("TokenExpired", py.get_type::<TokenExpired>())?;
     m.add("TokenNotYetValid", py.get_type::<TokenNotYetValid>())?;
     m.add("VerificationFailed", py.get_type::<VerificationFailed>())?;
-    let names: Vec<&str> = Algorithm::ALL.iter().map(|a| a.name()).collect();
+    let names = Algorithm::ALL.map(Algorithm::name);
     m.add("ALGORITHMS", PyTuple::new(py, names)?)?;
     Ok(())
 }

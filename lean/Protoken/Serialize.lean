@@ -107,7 +107,7 @@ theorem readClaimString_sound {data : Bytes} {pos pos' : Nat} {s : Bytes}
   split at h
   · simp at h
   · rename_i hutf
-    simp only [pure_eq_ok, ok_bind, Except.ok.injEq, Prod.mk.injEq] at h
+    simp only [pure_eq_ok, Except.ok.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     exact ⟨by simpa using hutf, readBoundedBytes_sound hv⟩
 
@@ -172,7 +172,7 @@ theorem claimsStep_sound {data : Bytes} {pos last pos' last' : Nat} {c c' : Clai
     refine ⟨by omega, hq2, hord,
       .inr (.inr (.inr (.inr (.inl ⟨rfl, s, hutf, hne, hle, rfl, ?_⟩))))⟩
     rw [hval, htag, encodeBytes_of_ne hne]; simp [WIRE_LEN]
-  · simp only [bind_eq_ok, Prod.exists, throw_eq_error, error_bind, ok_bind, pure_eq_ok,
+  · simp only [bind_eq_ok, Prod.exists, throw_eq_error, error_bind, pure_eq_ok,
       ite_error_eq_ok] at h
     obtain ⟨s, q, hs, hcount, h⟩ := h
     obtain ⟨hutf, hne, hle, hq1, hq2, hval⟩ := readClaimString_sound hs
@@ -212,7 +212,7 @@ def deserializeClaims (data : Bytes) : Result Claims := do
 /-! ## SignedToken -/
 
 def MAX_SIGNED_TOKEN_BYTES : Nat :=
-  MAX_PAYLOAD_BYTES + MAX_SIGNATURE_BYTES + MLDSA44_PUBLIC_KEY_LEN + 32
+  MAX_PAYLOAD_BYTES + MAX_SIGNATURE_BYTES + MAX_PUBLIC_KEY_BYTES + 32
 
 /-- Models `serialize_signing_input`. -/
 def serializeSigningInput (version : Version) (algorithm : Algorithm)
@@ -257,7 +257,7 @@ def tokenStep (data : Bytes) : Step TokenFields := fun pos last st => do
     | some keyIdType => pure (pos, fieldNumber, { st with keyIdType := some keyIdType })
     | none => throw (.invalidKeyIdType byte)
   | 4, 2 =>
-    let (keyId, pos) ← readBoundedBytes data pos MLDSA44_PUBLIC_KEY_LEN
+    let (keyId, pos) ← readBoundedBytes data pos MAX_PUBLIC_KEY_BYTES
     pure (pos, fieldNumber, { st with keyId := keyId })
   | 5, 2 =>
     let (payload, pos) ← readBoundedBytes data pos MAX_PAYLOAD_BYTES
@@ -287,7 +287,7 @@ theorem tokenStep_sound {data : Bytes} {pos last pos' last' : Nat} {st st' : Tok
         data.take pos' = data.take pos ++ encodeUint32 2 a.toByte.toUInt32) ∨
      (last' = 3 ∧ ∃ t : KeyIdType, st' = { st with keyIdType := some t } ∧
         data.take pos' = data.take pos ++ encodeUint32 3 t.toByte.toUInt32) ∨
-     (last' = 4 ∧ ∃ b, b ≠ [] ∧ b.length ≤ MLDSA44_PUBLIC_KEY_LEN ∧
+     (last' = 4 ∧ ∃ b, b ≠ [] ∧ b.length ≤ MAX_PUBLIC_KEY_BYTES ∧
         st' = { st with keyId := b } ∧ data.take pos' = data.take pos ++ encodeBytes 4 b) ∨
      (last' = 5 ∧ ∃ b, b ≠ [] ∧ b.length ≤ MAX_PAYLOAD_BYTES ∧
         st' = { st with payload := some b } ∧

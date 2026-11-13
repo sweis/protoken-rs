@@ -1,12 +1,11 @@
 import Protoken.Basic
 
 /-!
-# SHA-256 and HMAC-SHA256 for the conformance runner
+# SHA-256 for the conformance runner
 
-Plain implementations of FIPS 180-4 and RFC 2104. They let the runner execute the
-model's key hashing and HMAC verification without asking Rust for the answer. No
-theorem depends on this file, and the runner checks it against the `sha2` and
-`hmac` crates.
+A plain implementation of FIPS 180-4. It lets the runner execute the model's key
+hashing without asking Rust for the answer. No theorem depends on this file, and
+the runner checks it against the `sha2` crate.
 -/
 
 namespace Conformance
@@ -90,13 +89,5 @@ def sha256 (msg : Bytes) : Bytes := (sha256State msg).toBytes
 
 theorem sha256_length (msg : Bytes) : (sha256 msg).length = 32 := by
   simp [sha256, HashState.toBytes, be32]
-
-def hmacSha256 (key msg : Bytes) : Bytes :=
-  let key := if key.length > 64 then sha256 key else key
-  let block := key ++ List.replicate (64 - key.length) 0
-  sha256 (block.map (· ^^^ 0x5c) ++ sha256 (block.map (· ^^^ 0x36) ++ msg))
-
-theorem hmacSha256_length (key msg : Bytes) : (hmacSha256 key msg).length = 32 :=
-  sha256_length _
 
 end Conformance

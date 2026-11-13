@@ -45,7 +45,7 @@ structure TokenInv (data : Bytes) (pos last : Nat) (st : TokenFields) : Prop whe
   d4 : last < 4 → st.keyId = []
   d5 : last < 5 → st.payload = none
   d6 : last < 6 → st.signature = none
-  key_id_len : st.keyId.length ≤ MLDSA44_PUBLIC_KEY_LEN
+  key_id_len : st.keyId.length ≤ MAX_PUBLIC_KEY_BYTES
   payload_ok : ∀ p, st.payload = some p → p ≠ [] ∧ p.length ≤ MAX_PAYLOAD_BYTES
   /-- The recorded offset is where the signed fields end. -/
   signature_ok : ∀ sig start, st.signature = some (sig, start) →
@@ -143,7 +143,7 @@ theorem deserializeSignedTokenAt_canonical {data : Bytes} {t : SignedToken} {sig
       data.take signedLen
         = serializeSigningInput t.version t.algorithm t.keyIdentifier t.payload ∧
       t.WireValid := by
-  simp only [deserializeSignedTokenAt, throw_eq_error, error_bind, pure_eq_ok, ok_bind,
+  simp only [deserializeSignedTokenAt, throw_eq_error, error_bind, pure_eq_ok,
     ite_error_eq_ok, bind_eq_ok, required_eq_ok, Prod.exists, Except.ok.injEq,
     Prod.mk.injEq] at h
   obtain ⟨_, _, st, hloop, a, ha, kt, hkt, k, hk, p, hp, sig, start, hsig, rfl, rfl⟩ := h
@@ -199,7 +199,7 @@ theorem tokenStep_keyIdType {t : KeyIdType} (hlast : last < 3)
   simp [tokenStep, h1, h2, encodeUint32_u8 t.toByte_ne_zero, WIRE_VARINT, Nat.add_assoc]
 
 theorem tokenStep_keyId {b : Bytes} (hdata : data.length < 2 ^ 64) (hne : b ≠ [])
-    (hle : b.length ≤ MLDSA44_PUBLIC_KEY_LEN) (hlast : last < 4)
+    (hle : b.length ≤ MAX_PUBLIC_KEY_BYTES) (hlast : last < 4)
     (h : data.drop pos = encodeBytes 4 b ++ rest) :
     tokenStep data pos last st
       = .ok (pos + (encodeBytes 4 b).length, 4, { st with keyId := b }) := by
@@ -246,25 +246,20 @@ theorem KeyIdType.toByte_toNat_lt (t : KeyIdType) : t.toByte.toNat < 128 := by
   cases t <;> decide
 
 theorem SignedToken.WireValid.keyId_bounds {t : SignedToken} (hw : t.WireValid) :
-    t.keyIdentifier.asBytes ≠ [] ∧ t.keyIdentifier.asBytes.length ≤ MLDSA44_PUBLIC_KEY_LEN := by
+    t.keyIdentifier.asBytes ≠ [] ∧ t.keyIdentifier.asBytes.length ≤ MAX_PUBLIC_KEY_BYTES := by
   cases hk : t.keyIdentifier with
   | keyHash hash =>
     have := hash.property
     simp only [KeyIdentifier.asBytes]
-    refine ⟨?_, by simp only [KEY_HASH_LEN, MLDSA44_PUBLIC_KEY_LEN] at *; omega⟩
+    refine ⟨?_, by simp only [KEY_HASH_LEN, MAX_PUBLIC_KEY_BYTES] at *; omega⟩
     intro h
     rw [h] at this
     simp [KEY_HASH_LEN] at this
   | publicKey pk =>
     have := hw.key_id pk hk
     simp only [KeyIdentifier.asBytes]
-    cases ha : t.algorithm <;>
-      simp [ha, Algorithm.publicKeyLen, ED25519_PUBLIC_KEY_LEN, MLDSA44_PUBLIC_KEY_LEN] at this ⊢
-    all_goals
-      refine ⟨?_, by omega⟩
-      intro h
-      rw [h] at this
-      simp at this
+    obtain ⟨h1, h2⟩ := Algorithm.publicKeyLen_bounds this
+    exact ⟨List.length_pos_iff.mp h1, h2⟩
 
 /-- The largest well-formed token fits in `MAX_SIGNED_TOKEN_BYTES`. -/
 theorem serializeSignedToken_length_le {t : SignedToken} (hw : t.WireValid) :
@@ -272,7 +267,7 @@ theorem serializeSignedToken_length_le {t : SignedToken} (hw : t.WireValid) :
   obtain ⟨_, hk⟩ := hw.keyId_bounds
   have hp := hw.payload_len
   have hs := hw.signature_len
-  simp only [MLDSA44_PUBLIC_KEY_LEN, MAX_PAYLOAD_BYTES, MAX_SIGNATURE_BYTES,
+  simp only [MAX_PUBLIC_KEY_BYTES, MAX_PAYLOAD_BYTES, MAX_SIGNATURE_BYTES,
     MAX_SIGNED_TOKEN_BYTES] at *
   have h2 := encodeUint32_u8_length_le (f := 2) (by omega) t.algorithm.toByte_toNat_lt
   have h3 := encodeUint32_u8_length_le (f := 3) (by omega) t.keyIdentifier.keyIdType.toByte_toNat_lt
@@ -307,7 +302,7 @@ theorem deserializeSignedTokenAt_serialize {t : SignedToken} (hw : t.WireValid) 
   generalize hd : serializeSignedToken ⟨.v0, a, k, p, sig⟩ = data at *
   have hdata : data.length < 2 ^ 64 := by
     simp only [MAX_SIGNED_TOKEN_BYTES, MAX_PAYLOAD_BYTES, MAX_SIGNATURE_BYTES,
-      MLDSA44_PUBLIC_KEY_LEN] at hsize
+      MAX_PUBLIC_KEY_BYTES] at hsize
     omega
   have hsplit : data = serializeSigningInput .v0 a k p ++ encodeBytes 6 sig := by
     simp [← hd, serializeSignedToken, appendSignature]
@@ -370,7 +365,7 @@ theorem deserializeSignedTokenAt_serialize {t : SignedToken} (hw : t.WireValid) 
   have hsize' : ¬ data.length > MAX_SIGNED_TOKEN_BYTES := by omega
   have hloop := e1.trans (e2.trans (e3.trans (e4.trans (e5.trans (fieldLoop_done hend)))))
   simp only [deserializeSignedTokenAt, throw_eq_error, error_bind, pure_eq_ok, ok_bind,
-    List.isEmpty_iff, hne, hsize', if_false, hloop, required,
+    List.isEmpty_iff, hne, hsize', ite_false, hloop, required,
     keyIdentifierFromWire_complete hw.key_id]
   rw [hstart]
 

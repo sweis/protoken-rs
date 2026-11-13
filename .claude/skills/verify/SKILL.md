@@ -13,14 +13,14 @@ The surface is the `protoken` CLI. Build and drive it; don't stop at unit tests.
 cargo build                 # binary at target/debug/protoken
 ```
 
-## Core flow (repeat for hmac, ed25519, ml-dsa-44)
+## Core flow (repeat for every name in `generate-key --help`)
 
 ```sh
 BIN=target/debug/protoken
 $BIN generate-key -a <alg> > sign.key
 $BIN sign sign.key 4d --subject user:alice --audience api.test --scope read --scope write > token.b64
 # HMAC verifies with the signing key; asymmetric with the verifying key:
-$BIN get-verifying-key sign.key > verify.key       # ed25519 / ml-dsa-44 only
+$BIN get-verifying-key sign.key > verify.key       # all but hmac
 $BIN verify verify.key $(cat token.b64)            # expect OK + claims
 $BIN inspect $(cat token.b64) --json               # no key needed
 ```
@@ -35,6 +35,8 @@ $BIN inspect $(cat token.b64) --json               # no key needed
 - `verify -` with no token argument → clean usage error.
 - `inspect CICD0f-vBw` (expires_at in year 10000) → prints raw epoch seconds, exit 0, no panic.
 - `inspect GAE` (payload with only issued_at) → shown with "Expires (not set...)", exit 0.
+- `sign` with `--subject $'\e[2Kx'`, then `inspect` → the escape is printed as `\u{1b}`.
+- `generate-key -a ed25519` → error listing the valid names.
 - A key file written as *padded* base64 (either alphabet) → accepted by `sign`/`verify`.
 
 ## Also check

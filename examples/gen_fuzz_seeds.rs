@@ -14,6 +14,7 @@ use base64::Engine as _;
 use serde::Deserialize;
 
 use protoken::serialize::deserialize_signed_token;
+use protoken::VerifyingKey;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -43,16 +44,19 @@ fn main() {
     let mut written = 0;
     for v in &file.vectors {
         let token_bytes = B64.decode(&v.token_base64).unwrap();
-        let payload = deserialize_signed_token(&token_bytes)
-            .expect("reference token parses")
-            .payload;
+        let token = deserialize_signed_token(&token_bytes).expect("reference token parses");
         let mut seeds = vec![
             ("signing_key", B64.decode(&v.signing_key_base64).unwrap()),
             ("token", token_bytes),
-            ("claims", payload),
+            ("claims", token.payload),
         ];
         if let Some(vk) = &v.verifying_key_base64 {
-            seeds.push(("verifying_key", B64.decode(vk).unwrap()));
+            let vk_bytes = B64.decode(vk).unwrap();
+            let vk = VerifyingKey::from_bytes(&vk_bytes).unwrap();
+            // The input format of the verify_untrusted_key target.
+            let raw = [&[vk.algorithm() as u8], vk.public_key(), &token.signature].concat();
+            seeds.push(("key_and_signature", raw));
+            seeds.push(("verifying_key", vk_bytes));
         }
 
         for (kind, bytes) in seeds {

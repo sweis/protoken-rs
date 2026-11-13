@@ -1,8 +1,10 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::error::ProtokenError;
 use serde::{Deserialize, Serialize};
+
+use crate::error::ProtokenError;
 
 /// Maximum length for subject, audience, and individual scope fields (bytes).
 pub const MAX_CLAIM_BYTES_LEN: usize = 255;
@@ -10,20 +12,19 @@ pub const MAX_CLAIM_BYTES_LEN: usize = 255;
 pub const MAX_SCOPES: usize = 32;
 /// Maximum size of the envelope payload (serialized Claims).
 pub const MAX_PAYLOAD_BYTES: usize = 4096;
-/// Maximum size of the envelope signature. Must accommodate ML-DSA-44 (2,420 bytes).
-pub const MAX_SIGNATURE_BYTES: usize = 2560;
+/// Largest signature of any algorithm (SLH-DSA-SHA2-256s).
+pub const MAX_SIGNATURE_BYTES: usize = 29_792;
+/// Largest public key of any algorithm (ML-DSA-87).
+pub const MAX_PUBLIC_KEY_BYTES: usize = 2592;
+/// Largest secret key of any algorithm (FN-DSA-1024).
+pub const MAX_SECRET_KEY_BYTES: usize = 2369;
 
-pub const HMAC_MIN_KEY_LEN: usize = 32;
-/// Also the largest `secret_key` field the SigningKey decoder accepts.
-pub const HMAC_MAX_KEY_LEN: usize = 4096;
-pub const HMAC_SHA256_SIG_LEN: usize = 32;
+/// The SHA-384 output size.
+pub const HMAC_MIN_KEY_LEN: usize = 48;
+/// The SHA-384 block size. HMAC hashes longer keys down to 48 bytes, so they
+/// add no strength.
+pub const HMAC_MAX_KEY_LEN: usize = 128;
 pub const KEY_HASH_LEN: usize = 8;
-pub const ED25519_SEED_LEN: usize = 32;
-pub const ED25519_PUBLIC_KEY_LEN: usize = 32;
-pub const ED25519_SIG_LEN: usize = 64;
-pub const MLDSA44_SEED_LEN: usize = 32;
-pub const MLDSA44_PUBLIC_KEY_LEN: usize = 1312;
-pub const MLDSA44_SIG_LEN: usize = 2420;
 
 /// Token format version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -32,80 +33,100 @@ pub enum Version {
     V0 = 0,
 }
 
-impl Version {
-    pub fn from_byte(b: u8) -> Option<Version> {
-        match b {
-            0 => Some(Version::V0),
-            _ => None,
-        }
-    }
-
-    pub fn to_byte(self) -> u8 {
-        self as u8
-    }
-}
-
 /// Signing algorithm. Serializes to its canonical name (see [`Algorithm::name`]).
+///
+/// Wire values 1 (HMAC-SHA256) and 2 (Ed25519) are retired and must not be
+/// reused. FN-DSA is experimental: FIPS 206 is unpublished, so its keys and
+/// signatures may stop working in a later release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(into = "&str", try_from = "String")]
 #[repr(u8)]
 pub enum Algorithm {
-    #[serde(rename = "hmac-sha256")]
-    HmacSha256 = 1,
-    #[serde(rename = "ed25519")]
-    Ed25519 = 2,
-    #[serde(rename = "ml-dsa-44")]
     MlDsa44 = 3,
+    MlDsa65 = 4,
+    MlDsa87 = 5,
+    HmacSha384 = 6,
+    SlhDsaSha2_128s = 7,
+    SlhDsaSha2_192s = 8,
+    SlhDsaSha2_256s = 9,
+    FnDsa512 = 10,
+    FnDsa1024 = 11,
+}
+
+struct Params {
+    name: &'static str,
+    secret_key_len: usize,
+    public_key_len: Option<usize>,
+    signature_len: usize,
 }
 
 impl Algorithm {
-    pub const ALL: [Algorithm; 3] = [
-        Algorithm::HmacSha256,
-        Algorithm::Ed25519,
+    pub const ALL: [Algorithm; 9] = [
         Algorithm::MlDsa44,
+        Algorithm::MlDsa65,
+        Algorithm::MlDsa87,
+        Algorithm::HmacSha384,
+        Algorithm::SlhDsaSha2_128s,
+        Algorithm::SlhDsaSha2_192s,
+        Algorithm::SlhDsaSha2_256s,
+        Algorithm::FnDsa512,
+        Algorithm::FnDsa1024,
     ];
 
-    pub fn from_byte(b: u8) -> Option<Algorithm> {
-        match b {
-            1 => Some(Algorithm::HmacSha256),
-            2 => Some(Algorithm::Ed25519),
-            3 => Some(Algorithm::MlDsa44),
-            _ => None,
+    const fn params(self) -> Params {
+        let (name, secret_key_len, public_key_len, signature_len) = match self {
+            Algorithm::MlDsa44 => ("ml-dsa-44", 32, Some(1312), 2420),
+            Algorithm::MlDsa65 => ("ml-dsa-65", 32, Some(1952), 3309),
+            Algorithm::MlDsa87 => ("ml-dsa-87", 32, Some(2592), 4627),
+            Algorithm::HmacSha384 => ("hmac-sha384", HMAC_MIN_KEY_LEN, None, 48),
+            Algorithm::SlhDsaSha2_128s => ("slh-dsa-sha2-128s", 64, Some(32), 7856),
+            Algorithm::SlhDsaSha2_192s => ("slh-dsa-sha2-192s", 96, Some(48), 16_224),
+            Algorithm::SlhDsaSha2_256s => ("slh-dsa-sha2-256s", 128, Some(64), 29_792),
+            Algorithm::FnDsa512 => ("fn-dsa-512", 1345, Some(897), 666),
+            Algorithm::FnDsa1024 => ("fn-dsa-1024", 2369, Some(1793), 1280),
+        };
+        Params {
+            name,
+            secret_key_len,
+            public_key_len,
+            signature_len,
         }
-    }
-
-    pub fn to_byte(self) -> u8 {
-        self as u8
     }
 
     /// Canonical lowercase name, also accepted by `FromStr`.
-    pub fn name(self) -> &'static str {
-        match self {
-            Algorithm::HmacSha256 => "hmac-sha256",
-            Algorithm::Ed25519 => "ed25519",
-            Algorithm::MlDsa44 => "ml-dsa-44",
-        }
+    pub const fn name(self) -> &'static str {
+        self.params().name
     }
 
-    pub fn is_symmetric(self) -> bool {
-        self == Algorithm::HmacSha256
+    pub const fn is_symmetric(self) -> bool {
+        self.public_key_len().is_none()
     }
 
-    /// Expected public key length in bytes; None for symmetric algorithms.
-    pub fn public_key_len(self) -> Option<usize> {
-        match self {
-            Algorithm::HmacSha256 => None,
-            Algorithm::Ed25519 => Some(ED25519_PUBLIC_KEY_LEN),
-            Algorithm::MlDsa44 => Some(MLDSA44_PUBLIC_KEY_LEN),
-        }
+    /// Length of a generated secret key. HMAC also accepts longer keys, up to
+    /// [`HMAC_MAX_KEY_LEN`].
+    pub const fn secret_key_len(self) -> usize {
+        self.params().secret_key_len
+    }
+
+    /// None for symmetric algorithms.
+    pub const fn public_key_len(self) -> Option<usize> {
+        self.params().public_key_len
     }
 
     /// Signature (or MAC tag) length in bytes.
-    pub fn signature_len(self) -> usize {
-        match self {
-            Algorithm::HmacSha256 => HMAC_SHA256_SIG_LEN,
-            Algorithm::Ed25519 => ED25519_SIG_LEN,
-            Algorithm::MlDsa44 => MLDSA44_SIG_LEN,
-        }
+    pub const fn signature_len(self) -> usize {
+        self.params().signature_len
+    }
+}
+
+impl TryFrom<u8> for Algorithm {
+    type Error = ProtokenError;
+
+    fn try_from(byte: u8) -> Result<Self, Self::Error> {
+        Algorithm::ALL
+            .into_iter()
+            .find(|&algorithm| algorithm as u8 == byte)
+            .ok_or(ProtokenError::InvalidAlgorithm(byte))
     }
 }
 
@@ -118,14 +139,32 @@ impl fmt::Display for Algorithm {
 impl FromStr for Algorithm {
     type Err = ProtokenError;
 
-    /// Accepts the canonical names plus the short aliases `hmac` and `mldsa44`.
+    /// Accepts the canonical names in any case, plus the aliases `hmac` and `mldsa44`.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "hmac-sha256" | "hmac" => Ok(Algorithm::HmacSha256),
-            "ed25519" => Ok(Algorithm::Ed25519),
-            "ml-dsa-44" | "mldsa44" => Ok(Algorithm::MlDsa44),
-            _ => Err(ProtokenError::UnknownAlgorithmName(s.to_string())),
+        if s.eq_ignore_ascii_case("hmac") {
+            return Ok(Algorithm::HmacSha384);
         }
+        if s.eq_ignore_ascii_case("mldsa44") {
+            return Ok(Algorithm::MlDsa44);
+        }
+        Algorithm::ALL
+            .into_iter()
+            .find(|algorithm| s.eq_ignore_ascii_case(algorithm.name()))
+            .ok_or_else(|| ProtokenError::UnknownAlgorithmName(s.to_string()))
+    }
+}
+
+impl From<Algorithm> for &str {
+    fn from(algorithm: Algorithm) -> Self {
+        algorithm.name()
+    }
+}
+
+impl TryFrom<String> for Algorithm {
+    type Error = ProtokenError;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        name.parse()
     }
 }
 
@@ -139,17 +178,15 @@ pub enum KeyIdType {
     PublicKey = 2,
 }
 
-impl KeyIdType {
-    pub fn from_byte(b: u8) -> Option<KeyIdType> {
-        match b {
-            1 => Some(KeyIdType::KeyHash),
-            2 => Some(KeyIdType::PublicKey),
-            _ => None,
-        }
-    }
+impl TryFrom<u8> for KeyIdType {
+    type Error = ProtokenError;
 
-    pub fn to_byte(self) -> u8 {
-        self as u8
+    fn try_from(byte: u8) -> Result<Self, Self::Error> {
+        match byte {
+            1 => Ok(KeyIdType::KeyHash),
+            2 => Ok(KeyIdType::PublicKey),
+            _ => Err(ProtokenError::InvalidKeyIdType(byte)),
+        }
     }
 }
 
@@ -159,7 +196,7 @@ pub enum KeyIdentifier {
     /// 8-byte truncated SHA-256 hash of the key material.
     /// Used for key selection, not as a security binding (~2^32 collision resistance).
     KeyHash([u8; KEY_HASH_LEN]),
-    /// Raw public key bytes (Ed25519: 32 B, ML-DSA-44: 1312 B).
+    /// Raw public key bytes.
     PublicKey(Vec<u8>),
 }
 
@@ -205,8 +242,9 @@ impl KeyIdentifier {
 /// Token claims. Serialized as the envelope's payload bytes.
 ///
 /// Zero and empty fields are "not set"; they are omitted on the wire and in JSON.
+/// Unknown JSON fields are rejected so that a misspelled claim is not dropped.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Claims {
     /// Expiration time as Unix timestamp (seconds since epoch). Required.
     pub expires_at: u64,
@@ -231,13 +269,9 @@ fn is_zero(v: &u64) -> bool {
     *v == 0
 }
 
-fn malformed(msg: String) -> ProtokenError {
-    ProtokenError::MalformedEncoding(msg)
-}
-
 fn check_claim_len(field_name: &str, value: &str) -> Result<(), ProtokenError> {
     if value.len() > MAX_CLAIM_BYTES_LEN {
-        return Err(malformed(format!(
+        return Err(ProtokenError::malformed(format!(
             "{field_name} too long: {} bytes (max {MAX_CLAIM_BYTES_LEN})",
             value.len()
         )));
@@ -249,10 +283,12 @@ impl Claims {
     /// Validate that all claim fields are within allowed limits.
     pub fn validate(&self) -> Result<(), ProtokenError> {
         if self.expires_at == 0 {
-            return Err(malformed("expires_at must be set (non-zero)".into()));
+            return Err(ProtokenError::malformed(
+                "expires_at must be set (non-zero)",
+            ));
         }
         if self.not_before > self.expires_at {
-            return Err(malformed(format!(
+            return Err(ProtokenError::malformed(format!(
                 "not_before ({}) is after expires_at ({})",
                 self.not_before, self.expires_at
             )));
@@ -260,7 +296,7 @@ impl Claims {
         check_claim_len("subject", &self.subject)?;
         check_claim_len("audience", &self.audience)?;
         if self.scopes.len() > MAX_SCOPES {
-            return Err(malformed(format!(
+            return Err(ProtokenError::malformed(format!(
                 "too many scopes: {} (max {MAX_SCOPES})",
                 self.scopes.len()
             )));
@@ -269,37 +305,18 @@ impl Claims {
             // Canonical encoding omits empty fields, so an empty entry would
             // silently vanish on the wire.
             if scope.is_empty() {
-                return Err(malformed("scope entry must not be empty".into()));
+                return Err(ProtokenError::malformed("scope entry must not be empty"));
             }
             check_claim_len("scope entry", scope)?;
         }
-        if let Some(dup) = first_duplicate(&self.scopes) {
-            return Err(malformed(format!("duplicate scope: {dup:?}")));
+        let mut seen = BTreeSet::new();
+        if let Some(dup) = self.scopes.iter().find(|scope| !seen.insert(*scope)) {
+            return Err(ProtokenError::malformed(format!(
+                "duplicate scope: {dup:?}"
+            )));
         }
         Ok(())
     }
-}
-
-/// Find a duplicate entry. Scopes decoded from the wire are already sorted
-/// and are checked in place; only caller-built claims pay for a sorted copy.
-fn first_duplicate(scopes: &[String]) -> Option<&str> {
-    if scopes.is_sorted() {
-        return adjacent_duplicate(scopes.iter().map(String::as_str));
-    }
-    let mut sorted: Vec<&str> = scopes.iter().map(String::as_str).collect();
-    sorted.sort_unstable();
-    adjacent_duplicate(sorted.into_iter())
-}
-
-fn adjacent_duplicate<'a>(sorted: impl Iterator<Item = &'a str>) -> Option<&'a str> {
-    let mut previous: Option<&'a str> = None;
-    for scope in sorted {
-        if previous == Some(scope) {
-            return Some(scope);
-        }
-        previous = Some(scope);
-    }
-    None
 }
 
 /// A signed token envelope: signing metadata, opaque payload bytes, and a
@@ -322,18 +339,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_algorithm_from_byte_all_variants() {
-        assert_eq!(Algorithm::from_byte(1), Some(Algorithm::HmacSha256));
-        assert_eq!(Algorithm::from_byte(2), Some(Algorithm::Ed25519));
-        assert_eq!(Algorithm::from_byte(3), Some(Algorithm::MlDsa44));
-        assert_eq!(Algorithm::from_byte(0), None);
-        assert_eq!(Algorithm::from_byte(4), None);
-    }
-
-    #[test]
-    fn test_algorithm_to_byte_roundtrip() {
-        for alg in Algorithm::ALL {
-            assert_eq!(Algorithm::from_byte(alg.to_byte()), Some(alg));
+    fn test_algorithm_wire_values() {
+        assert_eq!(
+            Algorithm::ALL.map(|a| a as u8),
+            [3, 4, 5, 6, 7, 8, 9, 10, 11]
+        );
+        for algorithm in Algorithm::ALL {
+            assert_eq!(Algorithm::try_from(algorithm as u8).unwrap(), algorithm);
+        }
+        // 1 and 2 are retired.
+        for byte in [0, 1, 2, 12, 255] {
+            assert!(matches!(
+                Algorithm::try_from(byte),
+                Err(ProtokenError::InvalidAlgorithm(b)) if b == byte
+            ));
         }
     }
 
@@ -351,45 +370,51 @@ mod tests {
 
     #[test]
     fn test_algorithm_from_str_aliases() {
-        assert_eq!("hmac".parse::<Algorithm>().unwrap(), Algorithm::HmacSha256);
+        assert_eq!("hmac".parse::<Algorithm>().unwrap(), Algorithm::HmacSha384);
         assert_eq!(
-            "HMAC-SHA256".parse::<Algorithm>().unwrap(),
-            Algorithm::HmacSha256
+            "ML-DSA-65".parse::<Algorithm>().unwrap(),
+            Algorithm::MlDsa65
         );
         assert_eq!("mldsa44".parse::<Algorithm>().unwrap(), Algorithm::MlDsa44);
-        assert!(matches!(
-            "rsa".parse::<Algorithm>(),
-            Err(ProtokenError::UnknownAlgorithmName(s)) if s == "rsa"
-        ));
+        for retired in ["hmac-sha256", "ed25519"] {
+            let err = retired.parse::<Algorithm>().unwrap_err();
+            assert!(matches!(&err, ProtokenError::UnknownAlgorithmName(s) if s == retired));
+            assert!(err.to_string().contains("slh-dsa-sha2-256s"), "{err}");
+        }
     }
 
     #[test]
-    fn test_algorithm_sizes() {
-        assert_eq!(Algorithm::HmacSha256.public_key_len(), None);
-        assert_eq!(Algorithm::HmacSha256.signature_len(), HMAC_SHA256_SIG_LEN);
-        assert!(Algorithm::HmacSha256.is_symmetric());
-
-        assert_eq!(
-            Algorithm::Ed25519.public_key_len(),
-            Some(ED25519_PUBLIC_KEY_LEN)
-        );
-        assert_eq!(Algorithm::Ed25519.signature_len(), ED25519_SIG_LEN);
-        assert!(!Algorithm::Ed25519.is_symmetric());
-
-        assert_eq!(
-            Algorithm::MlDsa44.public_key_len(),
-            Some(MLDSA44_PUBLIC_KEY_LEN)
-        );
-        assert_eq!(Algorithm::MlDsa44.signature_len(), MLDSA44_SIG_LEN);
-        assert!(!Algorithm::MlDsa44.is_symmetric());
+    fn test_only_hmac_is_symmetric() {
+        for algorithm in Algorithm::ALL {
+            assert_eq!(algorithm.is_symmetric(), algorithm == Algorithm::HmacSha384);
+        }
     }
 
     #[test]
-    fn test_key_id_type_from_byte_all_variants() {
-        assert_eq!(KeyIdType::from_byte(1), Some(KeyIdType::KeyHash));
-        assert_eq!(KeyIdType::from_byte(2), Some(KeyIdType::PublicKey));
-        assert_eq!(KeyIdType::from_byte(0), None);
-        assert_eq!(KeyIdType::from_byte(3), None);
+    fn test_field_limits_are_the_largest_algorithm_sizes() {
+        let max = |size: fn(Algorithm) -> usize| Algorithm::ALL.map(size).into_iter().max();
+        assert_eq!(max(Algorithm::signature_len), Some(MAX_SIGNATURE_BYTES));
+        assert_eq!(
+            max(|a| a.public_key_len().unwrap_or(0)),
+            Some(MAX_PUBLIC_KEY_BYTES)
+        );
+        assert_eq!(
+            max(|a| a.secret_key_len().max(HMAC_MAX_KEY_LEN)),
+            Some(MAX_SECRET_KEY_BYTES)
+        );
+    }
+
+    #[test]
+    fn test_key_id_type_wire_values() {
+        for id_type in [KeyIdType::KeyHash, KeyIdType::PublicKey] {
+            assert_eq!(KeyIdType::try_from(id_type as u8).unwrap(), id_type);
+        }
+        for byte in [0, 3] {
+            assert!(matches!(
+                KeyIdType::try_from(byte),
+                Err(ProtokenError::InvalidKeyIdType(b)) if b == byte
+            ));
+        }
     }
 
     #[test]
@@ -400,21 +425,6 @@ mod tests {
             let json = serde_json::to_string(&id.key_id_type()).unwrap();
             assert_eq!(json, format!("\"{}\"", id.type_name()));
         }
-    }
-
-    #[test]
-    fn test_key_id_type_to_byte_roundtrip() {
-        for b in 1..=2u8 {
-            let kit = KeyIdType::from_byte(b).unwrap();
-            assert_eq!(kit.to_byte(), b);
-        }
-    }
-
-    #[test]
-    fn test_version_to_byte() {
-        assert_eq!(Version::V0.to_byte(), 0);
-        assert_eq!(Version::from_byte(0), Some(Version::V0));
-        assert_eq!(Version::from_byte(1), None);
     }
 
     #[test]
@@ -484,6 +494,11 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn test_claims_json_rejects_unknown_fields() {
+        assert!(serde_json::from_str::<Claims>(r#"{"expires_at":7,"aud":"api"}"#).is_err());
     }
 
     fn with_scopes(scopes: &[&str]) -> Claims {
