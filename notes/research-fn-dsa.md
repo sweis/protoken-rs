@@ -7,7 +7,6 @@ Written 2026-11-13.
 No FIPS 206 draft was found as of this date. The `fn-dsa` 0.4.0 README says it implements a
 "best guess" at the draft and that keys and signatures may break before 1.0. The signing key
 encoding already changed between 0.3 and 0.4. The crate version is pinned for that reason.
-When the format changes, assign new algorithm IDs instead of reusing 10 and 11.
 
 There are two parameter sets: FN-DSA-512 (level 1) and FN-DSA-1024 (level 5). Nothing matches
 ML-DSA-65 at level 3.

@@ -580,9 +580,9 @@ mod tests {
         let token = sample_token_hmac();
         let wire = serialize_signed_token(&token);
 
-        // version=0 omitted; algorithm=6: tag 0x10, value 0x06
+        // version=0 omitted; algorithm=1: tag 0x10, value 0x01
         assert_eq!(wire[0], 0x10);
-        assert_eq!(wire[1], 0x06);
+        assert_eq!(wire[1], 0x01);
         // key_id_type=1: tag 0x18, value 0x01
         assert_eq!(wire[2], 0x18);
         assert_eq!(wire[3], 0x01);
@@ -620,7 +620,7 @@ mod tests {
     #[test]
     fn test_rejects_missing_payload() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 6, &mut bad);
+        proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_bytes(6, &[0; 32], &mut bad);
@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn test_rejects_missing_signature() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 6, &mut bad);
+        proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_bytes(5, &serialize_claims(&sample_claims_minimal()), &mut bad);
@@ -648,9 +648,9 @@ mod tests {
     #[test]
     fn test_rejects_missing_algorithm_and_key_id_type() {
         // Only one of the two enum fields present in each case.
-        for (present_field, value, missing_name) in [(3, 1, "algorithm"), (2, 6, "key_id_type")] {
+        for (present_field, missing_name) in [(3, "algorithm"), (2, "key_id_type")] {
             let mut bad = Vec::new();
-            proto3::encode_uint32(present_field, value, &mut bad);
+            proto3::encode_uint32(present_field, 1, &mut bad);
             proto3::encode_bytes(4, &[0; 8], &mut bad);
             proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
             proto3::encode_bytes(6, &[0; 32], &mut bad);
@@ -667,7 +667,7 @@ mod tests {
     fn test_rejects_missing_key_id() {
         // key_id_type present but key_id absent (0 bytes != KEY_HASH_LEN).
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 6, &mut bad);
+        proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(5, &serialize_claims(&sample_claims_minimal()), &mut bad);
         proto3::encode_bytes(6, &[0; 32], &mut bad);
@@ -698,7 +698,7 @@ mod tests {
     fn test_rejects_invalid_version() {
         let mut bad = Vec::new();
         proto3::encode_uint32(1, 99, &mut bad);
-        proto3::encode_uint32(2, 6, &mut bad);
+        proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
@@ -712,7 +712,7 @@ mod tests {
     #[test]
     fn test_rejects_invalid_key_id_type() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 6, &mut bad);
+        proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 9, &mut bad); // invalid key_id_type
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
@@ -727,7 +727,7 @@ mod tests {
     fn test_rejects_hmac_with_public_key_id() {
         // HMAC has no public key to embed.
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 6, &mut bad); // HMAC
+        proto3::encode_uint32(2, 1, &mut bad); // HMAC
         proto3::encode_uint32(3, 2, &mut bad); // public_key
         proto3::encode_bytes(4, &[0; 32], &mut bad);
         proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
@@ -741,7 +741,7 @@ mod tests {
     #[test]
     fn test_rejects_wrong_length_key_hash() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 6, &mut bad);
+        proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 7], &mut bad); // 7 bytes instead of 8
         proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
@@ -821,7 +821,7 @@ mod tests {
         // Zero-length payload/signature fields are non-canonical (omitted when
         // empty), and must not satisfy the required-field checks.
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 6, &mut bad);
+        proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         bad.push(0x2A); // payload tag
@@ -834,7 +834,7 @@ mod tests {
         );
 
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 6, &mut bad);
+        proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
@@ -851,15 +851,15 @@ mod tests {
     fn test_rejects_non_ascending_token_fields() {
         let mut bad = Vec::new();
         proto3::encode_uint32(3, 1, &mut bad); // key_id_type first
-        proto3::encode_uint32(2, 6, &mut bad); // algorithm second (wrong!)
+        proto3::encode_uint32(2, 1, &mut bad); // algorithm second (wrong!)
         assert!(deserialize_signed_token(&bad).is_err());
     }
 
     #[test]
     fn test_rejects_duplicate_token_field() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 6, &mut bad);
-        proto3::encode_uint32(2, 6, &mut bad); // duplicate algorithm
+        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(2, 1, &mut bad); // duplicate algorithm
         assert!(deserialize_signed_token(&bad).is_err());
     }
 
@@ -915,7 +915,7 @@ mod tests {
     #[test]
     fn test_rejects_oversized_payload_inside_token() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 6, &mut bad);
+        proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_bytes(5, &vec![0; MAX_PAYLOAD_BYTES + 1], &mut bad);
@@ -926,7 +926,7 @@ mod tests {
     #[test]
     fn test_accepts_max_size_payload_inside_token() {
         let mut data = Vec::new();
-        proto3::encode_uint32(2, 6, &mut data);
+        proto3::encode_uint32(2, 1, &mut data);
         proto3::encode_uint32(3, 1, &mut data);
         proto3::encode_bytes(4, &[0; 8], &mut data);
         proto3::encode_bytes(5, &vec![0x08; MAX_PAYLOAD_BYTES], &mut data);
@@ -938,7 +938,7 @@ mod tests {
     #[test]
     fn test_rejects_oversized_signature_inside_token() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 6, &mut bad);
+        proto3::encode_uint32(2, 1, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
@@ -949,7 +949,7 @@ mod tests {
     #[test]
     fn test_accepts_max_size_signature() {
         let mut data = Vec::new();
-        proto3::encode_uint32(2, 6, &mut data);
+        proto3::encode_uint32(2, 1, &mut data);
         proto3::encode_uint32(3, 1, &mut data);
         proto3::encode_bytes(4, &[0; 8], &mut data);
         proto3::encode_bytes(5, &[0x08, 0x01], &mut data);
@@ -961,7 +961,7 @@ mod tests {
     #[test]
     fn test_rejects_oversized_key_id() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 5, &mut bad); // ML-DSA-87
+        proto3::encode_uint32(2, 4, &mut bad); // ML-DSA-87
         proto3::encode_uint32(3, 2, &mut bad); // public_key
         proto3::encode_bytes(4, &vec![0; MAX_PUBLIC_KEY_BYTES + 1], &mut bad);
         proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);

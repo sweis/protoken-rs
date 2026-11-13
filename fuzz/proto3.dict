@@ -14,7 +14,7 @@ tag_field6_len="\x32"
 tag_field2_len="\x12"
 tag_field3_len="\x1a"
 
-# Key id types 1-2 and algorithms 3-11.
+# Key id types 1-2, algorithms 1-9 (8 is the field 1 tag), and the first invalid one.
 val_zero="\x00"
 val_one="\x01"
 val_two="\x02"
@@ -25,7 +25,6 @@ val_six="\x06"
 val_seven="\x07"
 val_nine="\x09"
 val_ten="\x0a"
-val_eleven="\x0b"
 
 # Short key and signature lengths.
 len_32="\x20"

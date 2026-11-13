@@ -24,6 +24,11 @@ const EXPIRES_AT: u64 = 2087078400;
 /// The SLH-DSA keys are the first NIST ACVP keyGen case of each parameter set.
 const KEYS: [(Algorithm, &str); 7] = [
     (
+        Algorithm::HmacSha384,
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\
+         202122232425262728292a2b2c2d2e2f",
+    ),
+    (
         Algorithm::MlDsa44,
         "7003d5fd5e928c6468134be85db0babd26d455dc9b413dff84758542c2afcc7b",
     ),
@@ -34,11 +39,6 @@ const KEYS: [(Algorithm, &str); 7] = [
     (
         Algorithm::MlDsa87,
         "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
-    ),
-    (
-        Algorithm::HmacSha384,
-        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\
-         202122232425262728292a2b2c2d2e2f",
     ),
     (
         Algorithm::SlhDsaSha2_128s,

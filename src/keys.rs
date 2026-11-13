@@ -580,14 +580,14 @@ pub(crate) mod tests {
             (&[], "missing algorithm"),
             (&[0x12, 0x01, 0xAA], "missing algorithm"),
             (&[0x08, 0x00], "zero"),
-            (&[0x08, 0x06, 0x12, 0x00], "empty"),
-            (&[0x12, 0x01, 0xAA, 0x08, 0x06], "ascending"),
+            (&[0x08, 0x01, 0x12, 0x00], "empty"),
+            (&[0x12, 0x01, 0xAA, 0x08, 0x01], "ascending"),
         ];
         for (data, needle) in cases {
             assert!(is_malformed(SigningKey::from_bytes(data), needle));
             assert!(is_malformed(VerifyingKey::from_bytes(data), needle));
         }
-        let field = |tag| [0x08, 0x06, tag, 0x01, 0xAA];
+        let field = |tag| [0x08, 0x01, tag, 0x01, 0xAA];
         assert!(is_malformed(
             SigningKey::from_bytes(&field(0x22)),
             "unexpected field 4"
@@ -599,8 +599,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_decoders_reject_retired_algorithms() {
-        for byte in [1, 2] {
+    fn test_decoders_reject_unknown_algorithms() {
+        for byte in [10, 127] {
             let data = [&[0x08, byte, 0x12, 48], &[0xAB; 48][..]].concat();
             assert!(matches!(
                 SigningKey::from_bytes(&data),

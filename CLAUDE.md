@@ -19,17 +19,17 @@ Protokens are designed to be a simple, fast replacement for JWTs, ad hoc tokens,
 ### Algorithms
 | ID | Name | Standard | NIST level | Secret key | Public key | Signature |
 |---|---|---|---|---|---|---|
-| 3 | `ml-dsa-44` | FIPS 204 | 2 | 32 (seed) | 1,312 | 2,420 |
-| 4 | `ml-dsa-65` | FIPS 204 | 3 | 32 (seed) | 1,952 | 3,309 |
-| 5 | `ml-dsa-87` | FIPS 204 | 5 | 32 (seed) | 2,592 | 4,627 |
-| 6 | `hmac-sha384` | FIPS 198-1 | n/a | 48-128 | none | 48 |
-| 7 | `slh-dsa-sha2-128s` | FIPS 205 | 1 | 64 | 32 | 7,856 |
-| 8 | `slh-dsa-sha2-192s` | FIPS 205 | 3 | 96 | 48 | 16,224 |
-| 9 | `slh-dsa-sha2-256s` | FIPS 205 | 5 | 128 | 64 | 29,792 |
-| 10 | `fn-dsa-512` | FIPS 206 (unpublished) | 1 | 1,345 | 897 | 666 |
-| 11 | `fn-dsa-1024` | FIPS 206 (unpublished) | 5 | 2,369 | 1,793 | 1,280 |
+| 1 | `hmac-sha384` | FIPS 198-1 | n/a | 48-128 | none | 48 |
+| 2 | `ml-dsa-44` | FIPS 204 | 2 | 32 (seed) | 1,312 | 2,420 |
+| 3 | `ml-dsa-65` | FIPS 204 | 3 | 32 (seed) | 1,952 | 3,309 |
+| 4 | `ml-dsa-87` | FIPS 204 | 5 | 32 (seed) | 2,592 | 4,627 |
+| 5 | `slh-dsa-sha2-128s` | FIPS 205 | 1 | 64 | 32 | 7,856 |
+| 6 | `slh-dsa-sha2-192s` | FIPS 205 | 3 | 96 | 48 | 16,224 |
+| 7 | `slh-dsa-sha2-256s` | FIPS 205 | 5 | 128 | 64 | 29,792 |
+| 8 | `fn-dsa-512` | FIPS 206 (unpublished) | 1 | 1,345 | 897 | 666 |
+| 9 | `fn-dsa-1024` | FIPS 206 (unpublished) | 5 | 2,369 | 1,793 | 1,280 |
 
-Sizes are in bytes. IDs 1 (HMAC-SHA256) and 2 (Ed25519) are retired and must not be reused.
+Sizes are in bytes.
 
 ### Proto3 Schema
 ```proto
@@ -74,7 +74,7 @@ message VerifyingKey {
 The envelope carries signing metadata (algorithm, key_id_type, key_id) and the payload as `bytes`. This is the traditional way to sign protobufs: the exact signed bytes travel on the wire, so no re-serialization ambiguity exists, and the envelope can carry payload types other than Claims. Verifiers must know the expected payload type; for tokens it is always Claims.
 
 ### HMAC-SHA384
-Keys are 48 bytes (the output size) to 128 bytes (the block size). HMAC hashes a longer key first, so it adds no strength. The key hash stays SHA-256: it keeps ML-DSA-44 tokens from before the change valid, and it must differ from the HMAC hash. With HMAC-SHA256, the identifier of a key over 64 bytes was the first 8 bytes of the effective HMAC key.
+Keys are 48 bytes (the output size) to 128 bytes (the block size). HMAC hashes a longer key first, so it adds no strength. The key hash stays SHA-256 so that it differs from the HMAC hash. With HMAC-SHA256, the identifier of a key over 64 bytes was the first 8 bytes of the effective HMAC key.
 
 ### Canonical Proto3 Serialization
 Canonical proto3 wire encoding with a small custom encoder/decoder (`src/proto3.rs`). This produces valid proto3 that any library can decode, while guaranteeing deterministic output.

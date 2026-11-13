@@ -35,10 +35,10 @@ def Version.toByte : Version → UInt8
   | .v0 => 0
 
 inductive Algorithm where
+  | hmacSha384
   | mlDsa44
   | mlDsa65
   | mlDsa87
-  | hmacSha384
   | slhDsaSha2_128s
   | slhDsaSha2_192s
   | slhDsaSha2_256s
@@ -49,28 +49,28 @@ inductive Algorithm where
 namespace Algorithm
 
 def all : List Algorithm :=
-  [.mlDsa44, .mlDsa65, .mlDsa87, .hmacSha384, .slhDsaSha2_128s, .slhDsaSha2_192s, .slhDsaSha2_256s,
+  [.hmacSha384, .mlDsa44, .mlDsa65, .mlDsa87, .slhDsaSha2_128s, .slhDsaSha2_192s, .slhDsaSha2_256s,
     .fnDsa512, .fnDsa1024]
 
 /-- Models `algorithm as u8`. -/
 def toByte : Algorithm → UInt8
-  | .mlDsa44 => 3
-  | .mlDsa65 => 4
-  | .mlDsa87 => 5
-  | .hmacSha384 => 6
-  | .slhDsaSha2_128s => 7
-  | .slhDsaSha2_192s => 8
-  | .slhDsaSha2_256s => 9
-  | .fnDsa512 => 10
-  | .fnDsa1024 => 11
+  | .hmacSha384 => 1
+  | .mlDsa44 => 2
+  | .mlDsa65 => 3
+  | .mlDsa87 => 4
+  | .slhDsaSha2_128s => 5
+  | .slhDsaSha2_192s => 6
+  | .slhDsaSha2_256s => 7
+  | .fnDsa512 => 8
+  | .fnDsa1024 => 9
 
 /-- Models `Algorithm::try_from(u8)`. -/
 def fromByte (b : UInt8) : Option Algorithm :=
   all.find? (·.toByte == b)
 
 def secretKeyLen : Algorithm → Nat
-  | .mlDsa44 | .mlDsa65 | .mlDsa87 => 32
   | .hmacSha384 => HMAC_MIN_KEY_LEN
+  | .mlDsa44 | .mlDsa65 | .mlDsa87 => 32
   | .slhDsaSha2_128s => 64
   | .slhDsaSha2_192s => 96
   | .slhDsaSha2_256s => 128
@@ -78,10 +78,10 @@ def secretKeyLen : Algorithm → Nat
   | .fnDsa1024 => 2369
 
 def publicKeyLen : Algorithm → Option Nat
+  | .hmacSha384 => none
   | .mlDsa44 => some 1312
   | .mlDsa65 => some 1952
   | .mlDsa87 => some 2592
-  | .hmacSha384 => none
   | .slhDsaSha2_128s => some 32
   | .slhDsaSha2_192s => some 48
   | .slhDsaSha2_256s => some 64
@@ -89,10 +89,10 @@ def publicKeyLen : Algorithm → Option Nat
   | .fnDsa1024 => some 1793
 
 def signatureLen : Algorithm → Nat
+  | .hmacSha384 => 48
   | .mlDsa44 => 2420
   | .mlDsa65 => 3309
   | .mlDsa87 => 4627
-  | .hmacSha384 => 48
   | .slhDsaSha2_128s => 7856
   | .slhDsaSha2_192s => 16224
   | .slhDsaSha2_256s => 29792

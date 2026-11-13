@@ -2,10 +2,10 @@ from collections.abc import Sequence
 from typing import Any, Final, Literal
 
 Algorithm = Literal[
+    "hmac-sha384",
     "ml-dsa-44",
     "ml-dsa-65",
     "ml-dsa-87",
-    "hmac-sha384",
     "slh-dsa-sha2-128s",
     "slh-dsa-sha2-192s",
     "slh-dsa-sha2-256s",

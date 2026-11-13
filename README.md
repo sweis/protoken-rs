@@ -8,17 +8,17 @@ Supports a NIST MAC and the NIST post-quantum signatures:
 
 | ID | Name | Standard | NIST level | Secret key | Public key | Signature |
 |---|---|---|---|---|---|---|
-| 3 | `ml-dsa-44` | FIPS 204 | 2 | 32 (seed) | 1,312 | 2,420 |
-| 4 | `ml-dsa-65` | FIPS 204 | 3 | 32 (seed) | 1,952 | 3,309 |
-| 5 | `ml-dsa-87` | FIPS 204 | 5 | 32 (seed) | 2,592 | 4,627 |
-| 6 | `hmac-sha384` | FIPS 198-1 | n/a | 48-128 | none | 48 |
-| 7 | `slh-dsa-sha2-128s` | FIPS 205 | 1 | 64 | 32 | 7,856 |
-| 8 | `slh-dsa-sha2-192s` | FIPS 205 | 3 | 96 | 48 | 16,224 |
-| 9 | `slh-dsa-sha2-256s` | FIPS 205 | 5 | 128 | 64 | 29,792 |
-| 10 | `fn-dsa-512` | FIPS 206 (unpublished) | 1 | 1,345 | 897 | 666 |
-| 11 | `fn-dsa-1024` | FIPS 206 (unpublished) | 5 | 2,369 | 1,793 | 1,280 |
+| 1 | `hmac-sha384` | FIPS 198-1 | n/a | 48-128 | none | 48 |
+| 2 | `ml-dsa-44` | FIPS 204 | 2 | 32 (seed) | 1,312 | 2,420 |
+| 3 | `ml-dsa-65` | FIPS 204 | 3 | 32 (seed) | 1,952 | 3,309 |
+| 4 | `ml-dsa-87` | FIPS 204 | 5 | 32 (seed) | 2,592 | 4,627 |
+| 5 | `slh-dsa-sha2-128s` | FIPS 205 | 1 | 64 | 32 | 7,856 |
+| 6 | `slh-dsa-sha2-192s` | FIPS 205 | 3 | 96 | 48 | 16,224 |
+| 7 | `slh-dsa-sha2-256s` | FIPS 205 | 5 | 128 | 64 | 29,792 |
+| 8 | `fn-dsa-512` | FIPS 206 (unpublished) | 1 | 1,345 | 897 | 666 |
+| 9 | `fn-dsa-1024` | FIPS 206 (unpublished) | 5 | 2,369 | 1,793 | 1,280 |
 
-Sizes are in bytes. IDs 1 (HMAC-SHA256) and 2 (Ed25519) are retired and must not be reused.
+Sizes are in bytes.
 
 **FN-DSA is experimental.** FIPS 206 has not been published, so FN-DSA keys and
 tokens may stop working in a later release. FN-DSA has no level 3 parameter set.

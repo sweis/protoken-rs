@@ -350,8 +350,8 @@ fn is_fn_dsa(algorithm: Algorithm) -> bool {
 // --- Input generators ---
 
 const INTERESTING_BYTES: &[u8] = &[
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x10, 0x12, 0x18,
-    0x1A, 0x20, 0x22, 0x2A, 0x32, 0x38, 0x3A, 0x40, 0x7F, 0x80, 0x81, 0xFF,
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x10, 0x12, 0x18, 0x1A, 0x20,
+    0x22, 0x2A, 0x32, 0x38, 0x3A, 0x40, 0x7F, 0x80, 0x81, 0xFF,
 ];
 
 const INTERESTING_U64: &[u64] = &[
@@ -360,8 +360,8 @@ const INTERESTING_U64: &[u64] = &[
     2,
     3,
     6,
-    11,
-    12,
+    9,
+    10,
     127,
     128,
     255,
@@ -1052,7 +1052,7 @@ fn main() {
     let mut public_pool = around(&[1, 32, 48, 64, 897, 1312, 1793, 1952, 2592]);
     public_pool.extend([1312, 1952, 2592].map(|n| vec![0; n]));
     public_pool.extend(keys.iter().map(|k| k.public_key().to_vec()));
-    for algorithm_byte in 0..=13 {
+    for algorithm_byte in 0..=11 {
         for secret in &secret_pool {
             // Deriving an SLH-DSA public key is slow, so sample the pairs.
             for public in public_pool
@@ -1240,7 +1240,7 @@ fn main() {
     for len in [36511, 36512, 36513] {
         e.token(&vec![0u8; len]);
         // The first field has its own error, so the size check must come first.
-        for prefix in [[0x08, 0x05], [0x10, 0x0C], [0x18, 0x09]] {
+        for prefix in [[0x08, 0x05], [0x10, 0x0A], [0x18, 0x09]] {
             let mut data = prefix.to_vec();
             data.resize(len, 0);
             e.token(&data);

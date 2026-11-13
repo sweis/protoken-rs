@@ -40,10 +40,10 @@ pub(crate) trait Scheme {
 
 pub(crate) fn scheme(algorithm: Algorithm) -> &'static dyn Scheme {
     match algorithm {
+        Algorithm::HmacSha384 => &HmacSha384,
         Algorithm::MlDsa44 => &MlDsa::<MlDsa44>(PhantomData),
         Algorithm::MlDsa65 => &MlDsa::<MlDsa65>(PhantomData),
         Algorithm::MlDsa87 => &MlDsa::<MlDsa87>(PhantomData),
-        Algorithm::HmacSha384 => &HmacSha384,
         Algorithm::SlhDsaSha2_128s => &SlhDsa::<Sha2_128s>(PhantomData),
         Algorithm::SlhDsaSha2_192s => &SlhDsa::<Sha2_192s>(PhantomData),
         Algorithm::SlhDsaSha2_256s => &SlhDsa::<Sha2_256s>(PhantomData),

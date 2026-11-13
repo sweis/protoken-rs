@@ -35,22 +35,21 @@ pub enum Version {
 
 /// Signing algorithm. Serializes to its canonical name (see [`Algorithm::name`]).
 ///
-/// Wire values 1 (HMAC-SHA256) and 2 (Ed25519) are retired and must not be
-/// reused. FN-DSA is experimental: FIPS 206 is unpublished, so its keys and
-/// signatures may stop working in a later release.
+/// FN-DSA is experimental: FIPS 206 is unpublished, so its keys and signatures
+/// may stop working in a later release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(into = "&str", try_from = "String")]
 #[repr(u8)]
 pub enum Algorithm {
-    MlDsa44 = 3,
-    MlDsa65 = 4,
-    MlDsa87 = 5,
-    HmacSha384 = 6,
-    SlhDsaSha2_128s = 7,
-    SlhDsaSha2_192s = 8,
-    SlhDsaSha2_256s = 9,
-    FnDsa512 = 10,
-    FnDsa1024 = 11,
+    HmacSha384 = 1,
+    MlDsa44 = 2,
+    MlDsa65 = 3,
+    MlDsa87 = 4,
+    SlhDsaSha2_128s = 5,
+    SlhDsaSha2_192s = 6,
+    SlhDsaSha2_256s = 7,
+    FnDsa512 = 8,
+    FnDsa1024 = 9,
 }
 
 struct Params {
@@ -62,10 +61,10 @@ struct Params {
 
 impl Algorithm {
     pub const ALL: [Algorithm; 9] = [
+        Algorithm::HmacSha384,
         Algorithm::MlDsa44,
         Algorithm::MlDsa65,
         Algorithm::MlDsa87,
-        Algorithm::HmacSha384,
         Algorithm::SlhDsaSha2_128s,
         Algorithm::SlhDsaSha2_192s,
         Algorithm::SlhDsaSha2_256s,
@@ -75,10 +74,10 @@ impl Algorithm {
 
     const fn params(self) -> Params {
         let (name, secret_key_len, public_key_len, signature_len) = match self {
+            Algorithm::HmacSha384 => ("hmac-sha384", HMAC_MIN_KEY_LEN, None, 48),
             Algorithm::MlDsa44 => ("ml-dsa-44", 32, Some(1312), 2420),
             Algorithm::MlDsa65 => ("ml-dsa-65", 32, Some(1952), 3309),
             Algorithm::MlDsa87 => ("ml-dsa-87", 32, Some(2592), 4627),
-            Algorithm::HmacSha384 => ("hmac-sha384", HMAC_MIN_KEY_LEN, None, 48),
             Algorithm::SlhDsaSha2_128s => ("slh-dsa-sha2-128s", 64, Some(32), 7856),
             Algorithm::SlhDsaSha2_192s => ("slh-dsa-sha2-192s", 96, Some(48), 16_224),
             Algorithm::SlhDsaSha2_256s => ("slh-dsa-sha2-256s", 128, Some(64), 29_792),
@@ -340,15 +339,11 @@ mod tests {
 
     #[test]
     fn test_algorithm_wire_values() {
-        assert_eq!(
-            Algorithm::ALL.map(|a| a as u8),
-            [3, 4, 5, 6, 7, 8, 9, 10, 11]
-        );
+        assert_eq!(Algorithm::ALL.map(|a| a as u8), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
         for algorithm in Algorithm::ALL {
             assert_eq!(Algorithm::try_from(algorithm as u8).unwrap(), algorithm);
         }
-        // 1 and 2 are retired.
-        for byte in [0, 1, 2, 12, 255] {
+        for byte in [0, 10, 255] {
             assert!(matches!(
                 Algorithm::try_from(byte),
                 Err(ProtokenError::InvalidAlgorithm(b)) if b == byte
@@ -376,9 +371,9 @@ mod tests {
             Algorithm::MlDsa65
         );
         assert_eq!("mldsa44".parse::<Algorithm>().unwrap(), Algorithm::MlDsa44);
-        for retired in ["hmac-sha256", "ed25519"] {
-            let err = retired.parse::<Algorithm>().unwrap_err();
-            assert!(matches!(&err, ProtokenError::UnknownAlgorithmName(s) if s == retired));
+        for unknown in ["hmac-sha256", "ed25519"] {
+            let err = unknown.parse::<Algorithm>().unwrap_err();
+            assert!(matches!(&err, ProtokenError::UnknownAlgorithmName(s) if s == unknown));
             assert!(err.to_string().contains("slh-dsa-sha2-256s"), "{err}");
         }
     }

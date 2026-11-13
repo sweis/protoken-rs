@@ -41,10 +41,10 @@ def full_claims() -> Claims:
 
 def test_algorithms_constant():
     assert ALGORITHMS == (
+        "hmac-sha384",
         "ml-dsa-44",
         "ml-dsa-65",
         "ml-dsa-87",
-        "hmac-sha384",
         "slh-dsa-sha2-128s",
         "slh-dsa-sha2-192s",
         "slh-dsa-sha2-256s",
@@ -154,7 +154,7 @@ class TestKeys:
         assert len(SigningKey.generate("slh-dsa-sha2-128s").public_key) == 32
         assert len(SigningKey.generate("ml-dsa-44").public_key) == 1312
 
-    @pytest.mark.parametrize("data", [b"", b"\x00", b"\x08\x03\x12\x03abc", bytes(100)])
+    @pytest.mark.parametrize("data", [b"", b"\x00", b"\x08\x02\x12\x03abc", bytes(100)])
     def test_malformed_keys_rejected(self, data):
         # Key problems are plain ProtokenError, not VerificationFailed, which
         # is reserved for problems with a token.
