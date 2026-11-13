@@ -1,7 +1,7 @@
 """Compact signed tokens using canonical proto3 encoding.
 
     >>> from protoken import Claims, SigningKey
-    >>> key = SigningKey.generate("ed25519")
+    >>> key = SigningKey.generate("ml-dsa-44")
     >>> token = key.sign(Claims(expires_at=1_800_000_000, subject="user:alice"))
     >>> key.verifying_key().verify(token, now=1_799_999_000).claims.subject
     'user:alice'

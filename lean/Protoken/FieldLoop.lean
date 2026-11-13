@@ -6,11 +6,9 @@ import Protoken.Proto3
 Every message decoder in the Rust code has the shape
 
 ```rust
-let mut pos = 0;
-let mut last_field_number = 0;
-while pos < data.len() {
-    let (field_number, wire_type) = next_field(data, &mut pos, &mut last_field_number, ..)?;
-    match (field_number, wire_type) { .. }
+let mut reader = Reader::new(data);
+while !reader.is_at_end() {
+    match reader.next_field(..)? { .. }
 }
 ```
 
@@ -44,12 +42,12 @@ variable {σ : Type} {len : Nat} {step : Step σ} {hstep : step.Progress}
 
 theorem fieldLoop_done {pos last : Nat} {s : σ} (h : len ≤ pos) :
     fieldLoop len step hstep pos last s = .ok s := by
-  rw [fieldLoop, if_neg (by omega)]
+  rw [fieldLoop, ite_eq_right (by omega)]
 
 theorem fieldLoop_step {pos last pos' last' : Nat} {s s' : σ} (hlt : pos < len)
     (h : step pos last s = .ok (pos', last', s')) :
     fieldLoop len step hstep pos last s = fieldLoop len step hstep pos' last' s' := by
-  rw [fieldLoop, if_pos hlt]
+  rw [fieldLoop, ite_eq_left hlt]
   split
   · rename_i e he
     rw [h] at he
@@ -62,7 +60,7 @@ theorem fieldLoop_step {pos last pos' last' : Nat} {s s' : σ} (hlt : pos < len)
 theorem fieldLoop_error {pos last : Nat} {s : σ} {e : Error} (hlt : pos < len)
     (h : step pos last s = .error e) :
     fieldLoop len step hstep pos last s = .error e := by
-  rw [fieldLoop, if_pos hlt]
+  rw [fieldLoop, ite_eq_left hlt]
   split
   · rename_i e' he
     rw [h] at he

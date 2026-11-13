@@ -3,16 +3,15 @@ import Protoken.Verify
 /-!
 # Signing and verifying keys
 
-Model of `src/keys.rs`: the key types, algorithm dispatch, and key serialization.
-`SigningKey::generate` is omitted; it passes 32 random bytes to `from_secret_key`.
-Zeroization has no counterpart here because the model has no memory. The theorems
-are in `KeysProofs.lean`.
+Model of `src/keys.rs`. The Rust fields are private, so a Rust key always comes from
+a constructor. Here the structures are unconstrained, and `KeysProofs.lean` proves
+that every constructor returns a `Valid` key.
+
+`SigningKey::generate` is omitted; it passes its secret to `from_secret_key`.
+Zeroization has no counterpart here because the model has no memory.
 -/
 
 namespace Protoken
-
-def MAX_SECRET_KEY_BYTES : Nat := HMAC_MAX_KEY_LEN
-def MAX_PUBLIC_KEY_BYTES : Nat := 2048
 
 structure SigningKey where
   algorithm : Algorithm
@@ -27,112 +26,37 @@ structure VerifyingKey where
 
 variable (C : Crypto)
 
-/-! ## SigningKey -/
+/-- Models `check_len`. -/
+def checkLen (expected : Nat) (key : Bytes) : Result Unit :=
+  if key.length ≠ expected then .error (.invalidKeyLength expected key.length) else .ok ()
 
-namespace SigningKey
+/-- Models `check_secret_key_len`. -/
+def checkSecretKeyLen (algorithm : Algorithm) (secretKey : Bytes) : Result Unit :=
+  if !algorithm.isSymmetric then
+    checkLen algorithm.secretKeyLen secretKey
+  else if ¬(HMAC_MIN_KEY_LEN ≤ secretKey.length ∧ secretKey.length ≤ HMAC_MAX_KEY_LEN) then
+    .error .invalidKey
+  else
+    .ok ()
 
-/-- Models `SigningKey::from_secret_key`. -/
-def fromSecretKey (algorithm : Algorithm) (secretKey : Bytes) : Result SigningKey := do
-  let publicKey ←
-    if algorithm.isSymmetric then do
-      checkHmacKeyLen secretKey
-      pure []
-    else
-      derivePublicKey C algorithm secretKey
-  pure { algorithm, secretKey, publicKey }
-
-/-- Models `SigningKey::validate`. -/
-def validate (k : SigningKey) : Result Unit :=
-  match k.algorithm with
-  | .hmacSha256 => do
-    checkHmacKeyLen k.secretKey
-    if !k.publicKey.isEmpty then
-      throw .invalidKey
-    pure ()
-  | .ed25519 | .mlDsa44 => do
-    let derived ← derivePublicKey C k.algorithm k.secretKey
-    if derived ≠ k.publicKey then
-      throw .invalidKey
-    pure ()
-
-/-- Models `SigningKey::checked_public_key`. -/
-def checkedPublicKey (k : SigningKey) : Result Bytes :=
-  match k.algorithm.publicKeyLen with
+/-- Models `check_public_key`. -/
+def checkPublicKey (algorithm : Algorithm) (publicKey : Bytes) : Result Unit :=
+  match algorithm.publicKeyLen with
   | none => .error .invalidKey
-  | some expected =>
-    if k.publicKey.length ≠ expected then
-      .error (.invalidKeyLength expected k.publicKey.length)
-    else
-      .ok k.publicKey
-
-/-- Models `SigningKey::verifying_key`. -/
-def verifyingKey (k : SigningKey) : Result VerifyingKey := do
-  let publicKey ← k.checkedPublicKey
-  pure { algorithm := k.algorithm, publicKey }
-
-/-- Models `SigningKey::identifying_material`. -/
-def identifyingMaterial (k : SigningKey) : Result Bytes :=
-  if k.algorithm.isSymmetric then .ok k.secretKey else k.checkedPublicKey
-
-/-- Models `SigningKey::key_identifier`. -/
-def keyIdentifier (k : SigningKey) (idType : KeyIdType) : Result KeyIdentifier :=
-  match idType with
-  | .keyHash => do
-    let material ← k.identifyingMaterial
-    pure (.keyHash (computeKeyHash C material))
-  | .publicKey =>
-    if k.algorithm.isSymmetric then
-      .error (.invalidKeyIdType KeyIdType.publicKey.toByte)
-    else do
-      let publicKey ← k.checkedPublicKey
-      pure (.publicKey publicKey)
-
-/-- Models `SigningKey::sign_with_key_id`. -/
-def signWithKeyId (k : SigningKey) (claims : Claims) (idType : KeyIdType) : Result Bytes :=
-  match k.algorithm with
-  | .hmacSha256 =>
-    if idType = .keyHash then
-      signHmac C k.secretKey claims
-    else
-      .error (.invalidKeyIdType idType.toByte)
-  | .ed25519 => do
-    let keyId ← k.keyIdentifier C idType
-    signEd25519 C k.secretKey claims keyId
-  | .mlDsa44 => do
-    let keyId ← k.keyIdentifier C idType
-    signMldsa44 C k.secretKey claims keyId
-
-/-- Models `SigningKey::sign`. -/
-def sign (k : SigningKey) (claims : Claims) : Result Bytes :=
-  k.signWithKeyId C claims .keyHash
-
-/-- Models `SigningKey::verify`. -/
-def verify (k : SigningKey) (tokenBytes : Bytes) (now : UInt64) : Result VerifiedToken :=
-  match k.algorithm with
-  | .hmacSha256 => verifyHmac C k.secretKey tokenBytes now
-  | .ed25519 => do
-    let publicKey ← k.checkedPublicKey
-    verifyEd25519 C publicKey tokenBytes now
-  | .mlDsa44 => do
-    let publicKey ← k.checkedPublicKey
-    verifyMldsa44 C publicKey tokenBytes now
-
-end SigningKey
+  | some expected => do
+    checkLen expected publicKey
+    if !C.publicKeyValid algorithm publicKey then
+      throw .invalidKey
+    pure ()
 
 /-! ## VerifyingKey -/
 
-/-- Models `validate_public_key`. -/
-def validatePublicKey (algorithm : Algorithm) (publicKey : Bytes) : Result Unit :=
-  match algorithm with
-  | .hmacSha256 => .error .invalidKey
-  | .ed25519 => checkEd25519PublicKey C publicKey
-  | .mlDsa44 => checkMldsa44PublicKey publicKey
-
 namespace VerifyingKey
 
-/-- Models `VerifyingKey::validate`. -/
-def validate (k : VerifyingKey) : Result Unit :=
-  validatePublicKey C k.algorithm k.publicKey
+/-- Models `VerifyingKey::new`. -/
+def new (algorithm : Algorithm) (publicKey : Bytes) : Result VerifyingKey := do
+  checkPublicKey C algorithm publicKey
+  pure { algorithm, publicKey }
 
 /-- Models `VerifyingKey::key_hash`. -/
 def keyHash (k : VerifyingKey) : KeyHash :=
@@ -140,31 +64,71 @@ def keyHash (k : VerifyingKey) : KeyHash :=
 
 /-- Models `VerifyingKey::verify`. -/
 def verify (k : VerifyingKey) (tokenBytes : Bytes) (now : UInt64) : Result VerifiedToken :=
-  match k.algorithm with
-  | .hmacSha256 => .error .invalidKey
-  | .ed25519 => verifyEd25519 C k.publicKey tokenBytes now
-  | .mlDsa44 => verifyMldsa44 C k.publicKey tokenBytes now
+  verifyToken C k.algorithm k.publicKey tokenBytes now
 
 end VerifyingKey
 
+/-! ## SigningKey -/
+
+namespace SigningKey
+
+/-- Models `SigningKey::from_secret_key`. -/
+def fromSecretKey (algorithm : Algorithm) (secretKey : Bytes) : Result SigningKey := do
+  checkSecretKeyLen algorithm secretKey
+  let publicKey ← schemePublicKey C algorithm secretKey
+  pure { algorithm, secretKey, publicKey }
+
+/-- Models `SigningKey::verifying_key`. -/
+def verifyingKey (k : SigningKey) : Result VerifyingKey :=
+  VerifyingKey.new C k.algorithm k.publicKey
+
+/-- Models `SigningKey::verifier_material`. -/
+def verifierMaterial (k : SigningKey) : Bytes :=
+  if k.algorithm.isSymmetric then k.secretKey else k.publicKey
+
+/-- Models `SigningKey::key_identifier`. -/
+def keyIdentifier (k : SigningKey) (idType : KeyIdType) : Result KeyIdentifier :=
+  match idType with
+  | .keyHash => .ok (.keyHash (computeKeyHash C k.verifierMaterial))
+  | .publicKey =>
+    if k.algorithm.isSymmetric then
+      .error (.invalidKeyIdType idType.toByte)
+    else
+      .ok (.publicKey k.publicKey)
+
+/-- Models `SigningKey::sign_with_key_id`. -/
+def signWithKeyId (k : SigningKey) (claims : Claims) (idType : KeyIdType) : Result Bytes := do
+  let keyId ← k.keyIdentifier C idType
+  signToken C k.algorithm k.secretKey keyId claims
+
+/-- Models `SigningKey::sign`. -/
+def sign (k : SigningKey) (claims : Claims) : Result Bytes :=
+  k.signWithKeyId C claims .keyHash
+
+/-- Models `SigningKey::verify`. -/
+def verify (k : SigningKey) (tokenBytes : Bytes) (now : UInt64) : Result VerifiedToken :=
+  verifyToken C k.algorithm k.verifierMaterial tokenBytes now
+
+end SigningKey
+
 /-! ## Serialization -/
 
-/-- Models `serialize_signing_key`. -/
+/-- Models `SigningKey::to_bytes`. -/
 def serializeSigningKey (k : SigningKey) : Bytes :=
   encodeUint32 1 k.algorithm.toByte.toUInt32 ++ encodeBytes 2 k.secretKey ++
     encodeBytes 3 k.publicKey
 
-/-- Models `serialize_verifying_key`. -/
+/-- Models `VerifyingKey::to_bytes`. -/
 def serializeVerifyingKey (k : VerifyingKey) : Bytes :=
   encodeUint32 1 k.algorithm.toByte.toUInt32 ++ encodeBytes 2 k.publicKey
 
-/-- The local variables of `deserialize_signing_key`. -/
+/-- The local variables of `SigningKey::from_bytes`. -/
 structure SigningKeyFields where
   algorithm : Option Algorithm := none
   secretKey : Bytes := []
   publicKey : Bytes := []
 
-/-- The loop body of `deserialize_signing_key`. -/
+/-- The loop body of `SigningKey::from_bytes`. -/
 def signingKeyStep (data : Bytes) : Step SigningKeyFields := fun pos last st => do
   let (fieldNumber, wireType, pos) ← nextField data pos last none
   match fieldNumber, wireType with
@@ -173,8 +137,7 @@ def signingKeyStep (data : Bytes) : Step SigningKeyFields := fun pos last st => 
     pure (pos, fieldNumber, { st with algorithm := some algorithm })
   | 2, 2 =>
     let (bytes, pos) ← readBoundedBytes data pos MAX_SECRET_KEY_BYTES
-    -- `extend_from_slice`
-    pure (pos, fieldNumber, { st with secretKey := st.secretKey ++ bytes })
+    pure (pos, fieldNumber, { st with secretKey := bytes })
   | 3, 2 =>
     let (bytes, pos) ← readBoundedBytes data pos MAX_PUBLIC_KEY_BYTES
     pure (pos, fieldNumber, { st with publicKey := bytes })
@@ -188,7 +151,7 @@ theorem signingKeyStep_sound {data : Bytes} {pos last pos' last' : Nat}
     ((last' = 1 ∧ ∃ a : Algorithm, st' = { st with algorithm := some a } ∧
         data.take pos' = data.take pos ++ encodeUint32 1 a.toByte.toUInt32) ∨
      (last' = 2 ∧ ∃ b, b ≠ [] ∧ b.length ≤ MAX_SECRET_KEY_BYTES ∧
-        st' = { st with secretKey := st.secretKey ++ b } ∧
+        st' = { st with secretKey := b } ∧
         data.take pos' = data.take pos ++ encodeBytes 2 b) ∨
      (last' = 3 ∧ ∃ b, b ≠ [] ∧ b.length ≤ MAX_PUBLIC_KEY_BYTES ∧
         st' = { st with publicKey := b } ∧
@@ -221,22 +184,21 @@ theorem signingKeyStep_sound {data : Bytes} {pos last pos' last' : Nat}
 theorem signingKeyStep_progress (data : Bytes) : (signingKeyStep data).Progress :=
   fun _ _ _ _ _ _ h => (signingKeyStep_sound h).1
 
-/-- Models `deserialize_signing_key`. -/
+/-- Models `SigningKey::from_bytes`. -/
 def deserializeSigningKey (data : Bytes) : Result SigningKey := do
-  if data.isEmpty then
-    throw .malformedEncoding
   let st ← fieldLoop data.length (signingKeyStep data) (signingKeyStep_progress data) 0 0 {}
   let algorithm ← required st.algorithm
-  let key : SigningKey := { algorithm, secretKey := st.secretKey, publicKey := st.publicKey }
-  key.validate C
+  let key ← SigningKey.fromSecretKey C algorithm st.secretKey
+  if key.publicKey ≠ st.publicKey then
+    throw .invalidKey
   pure key
 
-/-- The local variables of `deserialize_verifying_key`. -/
+/-- The local variables of `VerifyingKey::from_bytes`. -/
 structure VerifyingKeyFields where
   algorithm : Option Algorithm := none
   publicKey : Bytes := []
 
-/-- The loop body of `deserialize_verifying_key`. -/
+/-- The loop body of `VerifyingKey::from_bytes`. -/
 def verifyingKeyStep (data : Bytes) : Step VerifyingKeyFields := fun pos last st => do
   let (fieldNumber, wireType, pos) ← nextField data pos last none
   match fieldNumber, wireType with
@@ -245,8 +207,7 @@ def verifyingKeyStep (data : Bytes) : Step VerifyingKeyFields := fun pos last st
     pure (pos, fieldNumber, { st with algorithm := some algorithm })
   | 2, 2 =>
     let (bytes, pos) ← readBoundedBytes data pos MAX_PUBLIC_KEY_BYTES
-    -- `extend_from_slice`
-    pure (pos, fieldNumber, { st with publicKey := st.publicKey ++ bytes })
+    pure (pos, fieldNumber, { st with publicKey := bytes })
   | _, _ => throw .malformedEncoding
 
 /-- What one successful iteration of the VerifyingKey loop did. -/
@@ -257,7 +218,7 @@ theorem verifyingKeyStep_sound {data : Bytes} {pos last pos' last' : Nat}
     ((last' = 1 ∧ ∃ a : Algorithm, st' = { st with algorithm := some a } ∧
         data.take pos' = data.take pos ++ encodeUint32 1 a.toByte.toUInt32) ∨
      (last' = 2 ∧ ∃ b, b ≠ [] ∧ b.length ≤ MAX_PUBLIC_KEY_BYTES ∧
-        st' = { st with publicKey := st.publicKey ++ b } ∧
+        st' = { st with publicKey := b } ∧
         data.take pos' = data.take pos ++ encodeBytes 2 b)) := by
   simp only [verifyingKeyStep, bind_eq_ok, Prod.exists] at h
   obtain ⟨f, w, p, hf, h⟩ := h
@@ -282,13 +243,11 @@ theorem verifyingKeyStep_sound {data : Bytes} {pos last pos' last' : Nat}
 theorem verifyingKeyStep_progress (data : Bytes) : (verifyingKeyStep data).Progress :=
   fun _ _ _ _ _ _ h => (verifyingKeyStep_sound h).1
 
-/-- Models `deserialize_verifying_key`. -/
+/-- Models `VerifyingKey::from_bytes`. -/
 def deserializeVerifyingKey (data : Bytes) : Result VerifyingKey := do
-  if data.isEmpty then
-    throw .malformedEncoding
   let st ← fieldLoop data.length (verifyingKeyStep data) (verifyingKeyStep_progress data) 0 0 {}
   let algorithm ← required st.algorithm
-  validatePublicKey C algorithm st.publicKey
+  checkPublicKey C algorithm st.publicKey
   pure { algorithm, publicKey := st.publicKey }
 
 end Protoken

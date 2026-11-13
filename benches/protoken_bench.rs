@@ -11,7 +11,7 @@ const NOW: u64 = 1_000_000;
 /// ML-DSA signing uses rejection sampling, and the number of rejections is
 /// fixed for a given (key, message), so timing one message repeatedly reports
 /// an arbitrary point of a wide distribution. Rotating through many messages
-/// reports the mean instead. The same inputs are used for every algorithm.
+/// reports the mean instead.
 const MESSAGES: usize = 64;
 
 fn make_claims() -> Claims {
@@ -31,44 +31,35 @@ fn varied_claims() -> Vec<Claims> {
         .collect()
 }
 
-/// Benchmark names match the columns in PERFORMANCE.md and scripts/bench-to-csv.sh.
-fn bench_name(algorithm: Algorithm) -> &'static str {
-    match algorithm {
-        Algorithm::HmacSha256 => "hmac",
-        Algorithm::Ed25519 => "ed25519",
-        Algorithm::MlDsa44 => "mldsa44",
-    }
-}
-
-fn bench_sign_verify(c: &mut Criterion) {
-    let claims = varied_claims();
+/// Groups are named after the algorithm; scripts/bench-to-csv.sh depends on that.
+fn bench_algorithms(c: &mut Criterion) {
     for algorithm in Algorithm::ALL {
-        let name = bench_name(algorithm);
+        let mut group = c.benchmark_group(algorithm.name());
+        let mut claims = varied_claims();
+        // SLH-DSA signing takes about a second and does not vary with the message.
+        if algorithm.name().starts_with("slh-dsa") {
+            group.sample_size(10);
+            claims.truncate(4);
+        }
         let key = SigningKey::generate(algorithm).expect("keygen");
         let tokens: Vec<Vec<u8>> = claims
             .iter()
             .map(|claims| key.sign(claims).expect("sign"))
             .collect();
 
-        c.bench_function(&format!("{name}_sign"), |b| {
+        group.bench_function("keygen", |b| {
+            b.iter(|| SigningKey::generate(algorithm).expect("keygen"));
+        });
+        group.bench_function("sign", |b| {
             let mut inputs = claims.iter().cycle();
             b.iter(|| key.sign(inputs.next().expect("cycle")).expect("sign"));
         });
-        c.bench_function(&format!("{name}_verify"), |b| {
+        group.bench_function("verify", |b| {
             let mut inputs = tokens.iter().cycle();
             b.iter(|| {
                 key.verify(inputs.next().expect("cycle"), NOW)
                     .expect("verify")
             });
-        });
-    }
-}
-
-fn bench_keygen(c: &mut Criterion) {
-    for algorithm in Algorithm::ALL {
-        let name = bench_name(algorithm);
-        c.bench_function(&format!("{name}_keygen"), |b| {
-            b.iter(|| SigningKey::generate(algorithm).expect("keygen"));
         });
     }
 }
@@ -81,5 +72,5 @@ fn bench_parse(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_sign_verify, bench_keygen, bench_parse);
+criterion_group!(benches, bench_algorithms, bench_parse);
 criterion_main!(benches);

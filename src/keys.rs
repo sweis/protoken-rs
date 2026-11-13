@@ -1,104 +1,73 @@
-//! Signing and verifying keys: proto3 serialization plus algorithm dispatch
-//! for key generation, signing, and verification.
+//! Signing and verifying keys.
 //!
 //! SigningKey proto3 fields:
-//!   uint32 algorithm = 1;   tag 0x08  (1=HMAC-SHA256, 2=Ed25519, 3=ML-DSA-44)
-//!   bytes secret_key = 2;   tag 0x12  (HMAC: raw key; Ed25519/ML-DSA-44: 32B seed)
-//!   bytes public_key = 3;   tag 0x1A  (Ed25519: 32B; ML-DSA-44: 1312B; absent for HMAC)
+//!   uint32 algorithm = 1;   tag 0x08
+//!   bytes secret_key = 2;   tag 0x12
+//!   bytes public_key = 3;   tag 0x1A  (absent for HMAC)
 //!
 //! VerifyingKey proto3 fields:
-//!   uint32 algorithm = 1;   tag 0x08  (2=Ed25519, 3=ML-DSA-44)
-//!   bytes public_key = 2;   tag 0x12  (Ed25519: 32B; ML-DSA-44: 1312B)
+//!   uint32 algorithm = 1;   tag 0x08
+//!   bytes public_key = 2;   tag 0x12
 //!
-//! Decoding a SigningKey re-derives the public key from the seed and rejects
-//! the key if the stored public key differs, so a loaded key can never sign
-//! tokens that its own verifying key rejects.
+//! Every constructor validates, and the fields are private, so a key that
+//! exists is well formed.
+
+use std::fmt;
 
 use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
+use crate::crypto::scheme;
 use crate::error::ProtokenError;
-use crate::proto3::{
-    self, missing_field, next_field, read_bounded_bytes, unexpected_field, WIRE_LEN, WIRE_VARINT,
-};
+use crate::proto3::{self, missing_field, unexpected_field, Reader, WIRE_LEN, WIRE_VARINT};
 use crate::serialize::read_algorithm;
-use crate::sign::{
-    check_hmac_key_len, compute_key_hash, derive_public_key, fill_random, sign_ed25519, sign_hmac,
-    sign_mldsa44,
-};
+use crate::sign::{compute_key_hash, sign_token};
 use crate::types::*;
-use crate::verify::{
-    ed25519_verifying_key, verify_ed25519, verify_hmac, verify_mldsa44, VerifiedToken,
-};
+use crate::verify::{verify_token, VerifiedToken};
 
-/// Maximum secret_key field size accepted before algorithm-specific checks.
-const MAX_SECRET_KEY_BYTES: usize = HMAC_MAX_KEY_LEN;
-/// Maximum public_key field size accepted before algorithm-specific checks.
-const MAX_PUBLIC_KEY_BYTES: usize = 2048;
+/// Upper bound on the tag and length bytes in a serialized key.
+const KEY_FRAMING_BYTES: usize = 8;
 
-/// A signing key (symmetric or asymmetric).
-///
-/// `secret_key` is zeroed when the key is dropped. For asymmetric algorithms
-/// `public_key` holds the key derived from the seed; for HMAC it is empty.
-/// Build keys with [`SigningKey::generate`], [`SigningKey::from_secret_key`],
-/// or [`SigningKey::from_bytes`], which establish that invariant; a key built
-/// as a struct literal should be checked with [`SigningKey::validate`].
+/// A signing key (symmetric or asymmetric). The secret is zeroed on drop.
 #[derive(Clone, Eq)]
 pub struct SigningKey {
-    pub algorithm: Algorithm,
-    pub secret_key: Zeroizing<Vec<u8>>,
-    pub public_key: Vec<u8>,
+    algorithm: Algorithm,
+    secret_key: Zeroizing<Vec<u8>>,
+    /// Derived from `secret_key`; empty for HMAC.
+    public_key: Vec<u8>,
 }
 
 /// Secrets are compared in constant time.
 impl PartialEq for SigningKey {
     fn eq(&self, other: &SigningKey) -> bool {
-        self.algorithm == other.algorithm
-            && bool::from(self.secret_key.ct_eq(&other.secret_key))
-            && self.public_key == other.public_key
+        self.algorithm == other.algorithm && bool::from(self.secret_key.ct_eq(&other.secret_key))
     }
 }
 
-/// Debug output redacts the secret so it cannot leak into logs.
-impl std::fmt::Debug for SigningKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+/// Redacts the secret so it cannot leak into logs.
+impl fmt::Debug for SigningKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SigningKey")
             .field("algorithm", &self.algorithm)
-            .field(
-                "secret_key",
-                &format_args!("[{} bytes redacted]", self.secret_key.len()),
-            )
-            .field("public_key", &self.public_key)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 impl SigningKey {
-    /// Generate a fresh key for `algorithm` from the OS random number generator.
+    /// Generate a fresh key from the OS random number generator.
     pub fn generate(algorithm: Algorithm) -> Result<SigningKey, ProtokenError> {
-        let secret_len = match algorithm {
-            Algorithm::HmacSha256 => HMAC_MIN_KEY_LEN,
-            Algorithm::Ed25519 => ED25519_SEED_LEN,
-            Algorithm::MlDsa44 => MLDSA44_SEED_LEN,
-        };
-        let mut secret_key = Zeroizing::new(vec![0u8; secret_len]);
-        fill_random(&mut secret_key)?;
+        let secret_key = scheme(algorithm).generate_secret_key(algorithm.secret_key_len())?;
         SigningKey::from_secret_key(algorithm, secret_key)
     }
 
-    /// Build a key from existing secret material: an HMAC key of at least
-    /// `HMAC_MIN_KEY_LEN` bytes, or a 32-byte Ed25519 / ML-DSA-44 seed. The
-    /// public key is derived from the seed.
+    /// Build a key from existing secret material: a 48 to 128 byte HMAC key,
+    /// a 32-byte ML-DSA seed, or an encoded SLH-DSA or FN-DSA private key.
     pub fn from_secret_key(
         algorithm: Algorithm,
         secret_key: Zeroizing<Vec<u8>>,
     ) -> Result<SigningKey, ProtokenError> {
-        let public_key = if algorithm.is_symmetric() {
-            check_hmac_key_len(&secret_key)?;
-            Vec::new()
-        } else {
-            derive_public_key(algorithm, &secret_key)?
-        };
+        check_secret_key_len(algorithm, &secret_key)?;
+        let public_key = scheme(algorithm).public_key(&secret_key)?;
         Ok(SigningKey {
             algorithm,
             secret_key,
@@ -106,76 +75,76 @@ impl SigningKey {
         })
     }
 
-    /// Decode from canonical proto3 bytes; see `deserialize_signing_key`.
+    /// Decode from canonical proto3 bytes. The public key is re-derived and
+    /// must match the stored one, so a corrupted key cannot sign tokens that
+    /// its own verifying key rejects.
     pub fn from_bytes(data: &[u8]) -> Result<SigningKey, ProtokenError> {
-        deserialize_signing_key(data)
-    }
+        const MESSAGE: &str = "SigningKey";
+        let mut algorithm = None;
+        let mut secret_key: &[u8] = &[];
+        let mut public_key: &[u8] = &[];
 
-    /// Encode as canonical proto3 bytes. The output contains the secret and is
-    /// zeroed when dropped.
-    #[must_use]
-    pub fn to_bytes(&self) -> Zeroizing<Vec<u8>> {
-        serialize_signing_key(self)
-    }
-
-    /// Check key sizes and, for asymmetric algorithms, that `public_key` is
-    /// the key derived from `secret_key`.
-    pub fn validate(&self) -> Result<(), ProtokenError> {
-        match self.algorithm {
-            Algorithm::HmacSha256 => {
-                check_hmac_key_len(&self.secret_key)?;
-                if !self.public_key.is_empty() {
-                    return Err(ProtokenError::InvalidKey(
-                        "HMAC signing key must not carry a public key".into(),
-                    ));
+        let mut reader = Reader::new(data);
+        while !reader.is_at_end() {
+            match reader.next_field(None)? {
+                (1, WIRE_VARINT) => algorithm = Some(read_algorithm(&mut reader)?),
+                (2, WIRE_LEN) => {
+                    secret_key = reader.read_bytes(MAX_SECRET_KEY_BYTES, "secret_key")?;
                 }
-            }
-            Algorithm::Ed25519 | Algorithm::MlDsa44 => {
-                // Also enforces the seed length.
-                let derived = derive_public_key(self.algorithm, &self.secret_key)?;
-                if derived != self.public_key {
-                    return Err(ProtokenError::InvalidKey(format!(
-                        "{} public key does not match the secret key",
-                        self.algorithm
-                    )));
+                (3, WIRE_LEN) => {
+                    public_key = reader.read_bytes(MAX_PUBLIC_KEY_BYTES, "public_key")?;
                 }
+                (field, wire_type) => return Err(unexpected_field(field, wire_type, MESSAGE)),
             }
         }
-        Ok(())
+
+        let algorithm = algorithm.ok_or_else(|| missing_field("algorithm", MESSAGE))?;
+        let key = SigningKey::from_secret_key(algorithm, Zeroizing::new(secret_key.to_vec()))?;
+        if key.public_key != public_key {
+            return Err(ProtokenError::InvalidKey(format!(
+                "{algorithm} public key does not match the secret key"
+            )));
+        }
+        Ok(key)
+    }
+
+    /// Encode as canonical proto3 bytes. The output contains the secret.
+    #[must_use]
+    pub fn to_bytes(&self) -> Zeroizing<Vec<u8>> {
+        // Sized up front: growing would leave copies of the secret behind.
+        let mut buf = Zeroizing::new(Vec::with_capacity(
+            self.secret_key.len() + self.public_key.len() + KEY_FRAMING_BYTES,
+        ));
+        proto3::encode_uint32(1, self.algorithm as u32, &mut buf);
+        proto3::encode_bytes(2, &self.secret_key, &mut buf);
+        proto3::encode_bytes(3, &self.public_key, &mut buf);
+        buf
+    }
+
+    pub fn algorithm(&self) -> Algorithm {
+        self.algorithm
+    }
+
+    pub fn secret_key(&self) -> &[u8] {
+        &self.secret_key
+    }
+
+    /// Empty for HMAC.
+    pub fn public_key(&self) -> &[u8] {
+        &self.public_key
     }
 
     /// The public half of an asymmetric key. Errors for HMAC keys.
     pub fn verifying_key(&self) -> Result<VerifyingKey, ProtokenError> {
-        Ok(VerifyingKey {
-            algorithm: self.algorithm,
-            public_key: self.checked_public_key()?.to_vec(),
-        })
+        VerifyingKey::new(self.algorithm, self.public_key.clone())
     }
 
-    /// The public key, after checking that this is an asymmetric key whose
-    /// `public_key` field has the right length. This is the cheap guard for
-    /// keys built as struct literals; `validate()` does the full derivation.
-    fn checked_public_key(&self) -> Result<&[u8], ProtokenError> {
-        let expected = self
-            .algorithm
-            .public_key_len()
-            .ok_or_else(|| ProtokenError::InvalidKey("symmetric key has no public key".into()))?;
-        if self.public_key.len() != expected {
-            return Err(ProtokenError::InvalidKeyLength {
-                expected,
-                actual: self.public_key.len(),
-            });
-        }
-        Ok(&self.public_key)
-    }
-
-    /// The material tokens identify this key by: the public key for
-    /// asymmetric algorithms, the secret itself for HMAC.
-    fn identifying_material(&self) -> Result<&[u8], ProtokenError> {
+    /// What a verifier holds: the secret for HMAC, otherwise the public key.
+    fn verifier_material(&self) -> &[u8] {
         if self.algorithm.is_symmetric() {
-            Ok(&self.secret_key)
+            &self.secret_key
         } else {
-            self.checked_public_key()
+            &self.public_key
         }
     }
 
@@ -183,14 +152,12 @@ impl SigningKey {
     pub fn key_identifier(&self, id_type: KeyIdType) -> Result<KeyIdentifier, ProtokenError> {
         match id_type {
             KeyIdType::KeyHash => Ok(KeyIdentifier::KeyHash(compute_key_hash(
-                self.identifying_material()?,
+                self.verifier_material(),
             ))),
-            KeyIdType::PublicKey if self.algorithm.is_symmetric() => Err(
-                ProtokenError::InvalidKeyIdType(KeyIdType::PublicKey.to_byte()),
-            ),
-            KeyIdType::PublicKey => Ok(KeyIdentifier::PublicKey(
-                self.checked_public_key()?.to_vec(),
-            )),
+            KeyIdType::PublicKey if self.algorithm.is_symmetric() => {
+                Err(ProtokenError::InvalidKeyIdType(id_type as u8))
+            }
+            KeyIdType::PublicKey => Ok(KeyIdentifier::PublicKey(self.public_key.clone())),
         }
     }
 
@@ -206,55 +173,74 @@ impl SigningKey {
         claims: &Claims,
         id_type: KeyIdType,
     ) -> Result<Vec<u8>, ProtokenError> {
-        match self.algorithm {
-            // sign_hmac derives the key hash itself; only the identifier type
-            // needs checking here.
-            Algorithm::HmacSha256 if id_type == KeyIdType::KeyHash => {
-                sign_hmac(&self.secret_key, claims)
-            }
-            Algorithm::HmacSha256 => Err(ProtokenError::InvalidKeyIdType(id_type.to_byte())),
-            Algorithm::Ed25519 => {
-                sign_ed25519(&self.secret_key, claims, &self.key_identifier(id_type)?)
-            }
-            Algorithm::MlDsa44 => {
-                sign_mldsa44(&self.secret_key, claims, &self.key_identifier(id_type)?)
-            }
-        }
+        let key_id = self.key_identifier(id_type)?;
+        sign_token(self.algorithm, &self.secret_key, &key_id, claims)
     }
 
-    /// Verify a token produced by this key. For asymmetric keys this uses the
-    /// public half; for HMAC the shared secret.
+    /// Verify a token produced by this key. `now` is the current Unix time.
     pub fn verify(&self, token_bytes: &[u8], now: u64) -> Result<VerifiedToken, ProtokenError> {
-        match self.algorithm {
-            Algorithm::HmacSha256 => verify_hmac(&self.secret_key, token_bytes, now),
-            Algorithm::Ed25519 => verify_ed25519(self.checked_public_key()?, token_bytes, now),
-            Algorithm::MlDsa44 => verify_mldsa44(self.checked_public_key()?, token_bytes, now),
-        }
+        verify_token(self.algorithm, self.verifier_material(), token_bytes, now)
     }
 }
 
 /// A verifying (public) key for an asymmetric algorithm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyingKey {
-    pub algorithm: Algorithm,
-    pub public_key: Vec<u8>,
+    algorithm: Algorithm,
+    public_key: Vec<u8>,
 }
 
 impl VerifyingKey {
-    /// Decode from canonical proto3 bytes; see `deserialize_verifying_key`.
+    /// Build a key from the algorithm's standard public key encoding.
+    pub fn new(algorithm: Algorithm, public_key: Vec<u8>) -> Result<VerifyingKey, ProtokenError> {
+        check_public_key(algorithm, &public_key)?;
+        Ok(VerifyingKey {
+            algorithm,
+            public_key,
+        })
+    }
+
+    /// Decode from canonical proto3 bytes.
     pub fn from_bytes(data: &[u8]) -> Result<VerifyingKey, ProtokenError> {
-        deserialize_verifying_key(data)
+        const MESSAGE: &str = "VerifyingKey";
+        let mut algorithm = None;
+        let mut public_key: &[u8] = &[];
+
+        let mut reader = Reader::new(data);
+        while !reader.is_at_end() {
+            match reader.next_field(None)? {
+                (1, WIRE_VARINT) => algorithm = Some(read_algorithm(&mut reader)?),
+                (2, WIRE_LEN) => {
+                    public_key = reader.read_bytes(MAX_PUBLIC_KEY_BYTES, "public_key")?;
+                }
+                (field, wire_type) => return Err(unexpected_field(field, wire_type, MESSAGE)),
+            }
+        }
+
+        let algorithm = algorithm.ok_or_else(|| missing_field("algorithm", MESSAGE))?;
+        // Check before copying: in a signing key offered by mistake, field 2 is a secret.
+        check_public_key(algorithm, public_key)?;
+        Ok(VerifyingKey {
+            algorithm,
+            public_key: public_key.to_vec(),
+        })
     }
 
     /// Encode as canonical proto3 bytes.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        serialize_verifying_key(self)
+        let mut buf = Vec::with_capacity(self.public_key.len() + KEY_FRAMING_BYTES);
+        proto3::encode_uint32(1, self.algorithm as u32, &mut buf);
+        proto3::encode_bytes(2, &self.public_key, &mut buf);
+        buf
     }
 
-    /// Check that the algorithm is asymmetric and the public key is well formed.
-    pub fn validate(&self) -> Result<(), ProtokenError> {
-        validate_public_key(self.algorithm, &self.public_key)
+    pub fn algorithm(&self) -> Algorithm {
+        self.algorithm
+    }
+
+    pub fn public_key(&self) -> &[u8] {
+        &self.public_key
     }
 
     /// The `KeyHash` identifier that tokens signed by the matching key carry.
@@ -265,160 +251,70 @@ impl VerifyingKey {
 
     /// Verify a token against this key. `now` is the current Unix time.
     pub fn verify(&self, token_bytes: &[u8], now: u64) -> Result<VerifiedToken, ProtokenError> {
-        match self.algorithm {
-            Algorithm::HmacSha256 => Err(symmetric_verifying_key_error()),
-            Algorithm::Ed25519 => verify_ed25519(&self.public_key, token_bytes, now),
-            Algorithm::MlDsa44 => verify_mldsa44(&self.public_key, token_bytes, now),
-        }
+        verify_token(self.algorithm, &self.public_key, token_bytes, now)
     }
 }
 
-fn symmetric_verifying_key_error() -> ProtokenError {
-    ProtokenError::InvalidKey("symmetric algorithm cannot be a verifying key".into())
+fn check_len(expected: usize, key: &[u8]) -> Result<(), ProtokenError> {
+    if key.len() != expected {
+        return Err(ProtokenError::InvalidKeyLength {
+            expected,
+            actual: key.len(),
+        });
+    }
+    Ok(())
 }
 
-fn validate_public_key(algorithm: Algorithm, public_key: &[u8]) -> Result<(), ProtokenError> {
-    match algorithm {
-        Algorithm::HmacSha256 => Err(symmetric_verifying_key_error()),
-        Algorithm::Ed25519 => ed25519_verifying_key(public_key).map(drop),
-        Algorithm::MlDsa44 => {
-            if public_key.len() != MLDSA44_PUBLIC_KEY_LEN {
-                return Err(ProtokenError::InvalidKeyLength {
-                    expected: MLDSA44_PUBLIC_KEY_LEN,
-                    actual: public_key.len(),
-                });
-            }
-            Ok(())
-        }
+fn check_secret_key_len(algorithm: Algorithm, secret_key: &[u8]) -> Result<(), ProtokenError> {
+    if !algorithm.is_symmetric() {
+        return check_len(algorithm.secret_key_len(), secret_key);
     }
+    if !(HMAC_MIN_KEY_LEN..=HMAC_MAX_KEY_LEN).contains(&secret_key.len()) {
+        return Err(ProtokenError::InvalidKey(format!(
+            "HMAC key must be {HMAC_MIN_KEY_LEN} to {HMAC_MAX_KEY_LEN} bytes, got {}",
+            secret_key.len()
+        )));
+    }
+    Ok(())
 }
 
-// --- Serialization ---
-
-/// Serialize a SigningKey into canonical proto3 bytes. The output contains
-/// the secret and is zeroed when dropped.
-#[must_use]
-pub fn serialize_signing_key(key: &SigningKey) -> Zeroizing<Vec<u8>> {
-    let mut buf = Zeroizing::new(Vec::with_capacity(
-        key.secret_key.len() + key.public_key.len() + 8,
-    ));
-    proto3::encode_uint32(1, key.algorithm.to_byte().into(), &mut buf);
-    proto3::encode_bytes(2, &key.secret_key, &mut buf);
-    proto3::encode_bytes(3, &key.public_key, &mut buf);
-    buf
-}
-
-/// Serialize a VerifyingKey into canonical proto3 bytes.
-#[must_use]
-pub fn serialize_verifying_key(key: &VerifyingKey) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(key.public_key.len() + 8);
-    proto3::encode_uint32(1, key.algorithm.to_byte().into(), &mut buf);
-    proto3::encode_bytes(2, &key.public_key, &mut buf);
-    buf
-}
-
-/// Deserialize and validate a SigningKey from canonical proto3 bytes.
-pub fn deserialize_signing_key(data: &[u8]) -> Result<SigningKey, ProtokenError> {
-    const MESSAGE: &str = "SigningKey";
-    if data.is_empty() {
-        return Err(ProtokenError::MalformedEncoding("empty signing key".into()));
+fn check_public_key(algorithm: Algorithm, public_key: &[u8]) -> Result<(), ProtokenError> {
+    let expected = algorithm
+        .public_key_len()
+        .ok_or_else(|| ProtokenError::InvalidKey(format!("{algorithm} has no verifying key")))?;
+    check_len(expected, public_key)?;
+    if !scheme(algorithm).is_valid_public_key(public_key) {
+        return Err(ProtokenError::InvalidKey(format!(
+            "malformed {algorithm} public key"
+        )));
     }
-
-    let mut algorithm = None;
-    let mut secret_key = Zeroizing::new(Vec::new());
-    let mut public_key = Vec::new();
-    let mut pos = 0;
-    let mut last_field_number = 0;
-
-    while pos < data.len() {
-        let (field_number, wire_type) = next_field(data, &mut pos, &mut last_field_number, None)?;
-        match (field_number, wire_type) {
-            (1, WIRE_VARINT) => algorithm = Some(read_algorithm(data, &mut pos)?),
-            (2, WIRE_LEN) => {
-                let bytes = read_bounded_bytes(data, &mut pos, MAX_SECRET_KEY_BYTES, "secret_key")?;
-                secret_key.extend_from_slice(bytes);
-            }
-            (3, WIRE_LEN) => {
-                public_key =
-                    read_bounded_bytes(data, &mut pos, MAX_PUBLIC_KEY_BYTES, "public_key")?
-                        .to_vec();
-            }
-            _ => return Err(unexpected_field(field_number, wire_type, MESSAGE)),
-        }
-    }
-
-    let key = SigningKey {
-        algorithm: algorithm.ok_or_else(|| missing_field("algorithm", MESSAGE))?,
-        secret_key,
-        public_key,
-    };
-    key.validate()?;
-    Ok(key)
-}
-
-/// Deserialize and validate a VerifyingKey from canonical proto3 bytes.
-pub fn deserialize_verifying_key(data: &[u8]) -> Result<VerifyingKey, ProtokenError> {
-    const MESSAGE: &str = "VerifyingKey";
-    if data.is_empty() {
-        return Err(ProtokenError::MalformedEncoding(
-            "empty verifying key".into(),
-        ));
-    }
-
-    let mut algorithm = None;
-    // A rejected input may be a signing key offered by mistake (the CLI tries
-    // this decoder first), in which case field 2 is a secret: keep it in a
-    // zeroizing buffer until the key is known to be a real verifying key.
-    let mut public_key = Zeroizing::new(Vec::new());
-    let mut pos = 0;
-    let mut last_field_number = 0;
-
-    while pos < data.len() {
-        let (field_number, wire_type) = next_field(data, &mut pos, &mut last_field_number, None)?;
-        match (field_number, wire_type) {
-            (1, WIRE_VARINT) => algorithm = Some(read_algorithm(data, &mut pos)?),
-            (2, WIRE_LEN) => {
-                let bytes = read_bounded_bytes(data, &mut pos, MAX_PUBLIC_KEY_BYTES, "public_key")?;
-                public_key.extend_from_slice(bytes);
-            }
-            _ => return Err(unexpected_field(field_number, wire_type, MESSAGE)),
-        }
-    }
-
-    let algorithm = algorithm.ok_or_else(|| missing_field("algorithm", MESSAGE))?;
-    validate_public_key(algorithm, &public_key)?;
-    Ok(VerifyingKey {
-        algorithm,
-        public_key: std::mem::take(&mut *public_key),
-    })
+    Ok(())
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
-mod tests {
+pub(crate) mod tests {
+    use std::sync::LazyLock;
+
     use super::*;
 
-    /// RFC 8032 section 7.1 test 1 key pair.
-    fn ed25519_fixture() -> SigningKey {
-        SigningKey {
-            algorithm: Algorithm::Ed25519,
-            secret_key: Zeroizing::new(
-                hex::decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
-                    .unwrap(),
-            ),
-            public_key: hex::decode(
-                "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
-            )
-            .unwrap(),
-        }
-    }
+    pub(crate) const ASYMMETRIC: [Algorithm; 8] = [
+        Algorithm::MlDsa44,
+        Algorithm::MlDsa65,
+        Algorithm::MlDsa87,
+        Algorithm::SlhDsaSha2_128s,
+        Algorithm::SlhDsaSha2_192s,
+        Algorithm::SlhDsaSha2_256s,
+        Algorithm::FnDsa512,
+        Algorithm::FnDsa1024,
+    ];
 
-    fn hmac_fixture() -> SigningKey {
-        SigningKey {
-            algorithm: Algorithm::HmacSha256,
-            secret_key: Zeroizing::new(vec![0xAB; 32]),
-            public_key: Vec::new(),
-        }
+    /// One key per algorithm, shared by all tests because SLH-DSA key generation is slow.
+    pub(crate) fn fixed_key(algorithm: Algorithm) -> SigningKey {
+        static KEYS: LazyLock<[SigningKey; 9]> =
+            LazyLock::new(|| Algorithm::ALL.map(|a| SigningKey::generate(a).unwrap()));
+        let key = KEYS.iter().find(|key| key.algorithm == algorithm);
+        key.unwrap().clone()
     }
 
     fn claims() -> Claims {
@@ -430,216 +326,204 @@ mod tests {
         }
     }
 
-    // --- Roundtrips ---
-
-    #[test]
-    fn test_signing_key_roundtrip_all_algorithms() {
-        for algorithm in Algorithm::ALL {
-            let key = SigningKey::generate(algorithm).unwrap();
-            assert_eq!(key.algorithm, algorithm);
-            let decoded = SigningKey::from_bytes(&key.to_bytes()).unwrap();
-            assert_eq!(key, decoded, "{algorithm}");
-            // Free functions and methods are the same encoding.
-            assert_eq!(*key.to_bytes(), *serialize_signing_key(&key));
-        }
+    fn secret(bytes: &[u8]) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(bytes.to_vec())
     }
 
-    #[test]
-    fn test_verifying_key_roundtrip_asymmetric_algorithms() {
-        for algorithm in [Algorithm::Ed25519, Algorithm::MlDsa44] {
-            let vk = SigningKey::generate(algorithm)
-                .unwrap()
-                .verifying_key()
-                .unwrap();
-            let decoded = VerifyingKey::from_bytes(&vk.to_bytes()).unwrap();
-            assert_eq!(vk, decoded, "{algorithm}");
-            assert_eq!(vk.to_bytes(), serialize_verifying_key(&vk));
-        }
+    fn encode_key(algorithm: Algorithm, field2: &[u8], field3: &[u8]) -> Vec<u8> {
+        let mut data = Vec::new();
+        proto3::encode_uint32(1, algorithm as u32, &mut data);
+        proto3::encode_bytes(2, field2, &mut data);
+        proto3::encode_bytes(3, field3, &mut data);
+        data
     }
 
-    #[test]
-    fn test_signing_key_wire_format() {
-        let bytes = ed25519_fixture().to_bytes();
-        // algorithm=2, then 32-byte secret, then 32-byte public key.
-        assert_eq!(&bytes[..2], &[0x08, 0x02]);
-        assert_eq!(&bytes[2..4], &[0x12, 0x20]);
-        assert_eq!(&bytes[36..38], &[0x1A, 0x20]);
-        assert_eq!(bytes.len(), 70);
-
-        let bytes = hmac_fixture().to_bytes();
-        assert_eq!(&bytes[..4], &[0x08, 0x01, 0x12, 0x20]);
-        assert_eq!(bytes.len(), 36);
+    fn is_malformed<T>(result: Result<T, ProtokenError>, needle: &str) -> bool {
+        matches!(result, Err(ProtokenError::MalformedEncoding(m)) if m.contains(needle))
     }
 
-    #[test]
-    fn test_verifying_key_wire_format() {
-        let bytes = ed25519_fixture().verifying_key().unwrap().to_bytes();
-        assert_eq!(&bytes[..4], &[0x08, 0x02, 0x12, 0x20]);
-        assert_eq!(bytes.len(), 36);
+    fn is_invalid_key<T>(result: Result<T, ProtokenError>, needle: &str) -> bool {
+        matches!(result, Err(ProtokenError::InvalidKey(m)) if m.contains(needle))
     }
 
-    #[test]
-    fn test_hmac_signing_key_roundtrip_max_length_secret() {
-        let key = SigningKey {
-            secret_key: Zeroizing::new(vec![0x5A; MAX_SECRET_KEY_BYTES]),
-            ..hmac_fixture()
-        };
-        assert_eq!(SigningKey::from_bytes(&key.to_bytes()).unwrap(), key);
+    fn is_length_error<T>(result: Result<T, ProtokenError>, want: usize, got: usize) -> bool {
+        matches!(
+            result,
+            Err(ProtokenError::InvalidKeyLength { expected, actual })
+                if expected == want && actual == got
+        )
     }
 
     // --- Construction ---
 
     #[test]
-    fn test_generate_secret_sizes_and_randomness() {
+    fn test_generate() {
         for algorithm in Algorithm::ALL {
-            let a = SigningKey::generate(algorithm).unwrap();
-            let b = SigningKey::generate(algorithm).unwrap();
-            assert_eq!(a.secret_key.len(), 32, "{algorithm}");
+            let key = fixed_key(algorithm);
+            assert_eq!(key.algorithm(), algorithm);
+            assert_eq!(key.secret_key().len(), algorithm.secret_key_len());
             assert_eq!(
-                a.public_key.len(),
-                algorithm.public_key_len().unwrap_or(0),
-                "{algorithm}"
+                key.public_key().len(),
+                algorithm.public_key_len().unwrap_or(0)
             );
-            assert_ne!(a, b, "{algorithm}: two generated keys must differ");
-            assert_ne!(*a.secret_key, vec![0u8; 32], "{algorithm}");
-            assert!(a.validate().is_ok(), "{algorithm}");
-        }
-    }
-
-    #[test]
-    fn test_from_secret_key_matches_fixture_and_decoder() {
-        let fixture = ed25519_fixture();
-        let built =
-            SigningKey::from_secret_key(Algorithm::Ed25519, fixture.secret_key.clone()).unwrap();
-        assert_eq!(built, fixture);
-
-        for algorithm in Algorithm::ALL {
-            let generated = SigningKey::generate(algorithm).unwrap();
-            let rebuilt =
-                SigningKey::from_secret_key(algorithm, generated.secret_key.clone()).unwrap();
-            assert_eq!(rebuilt, generated, "{algorithm}");
-            assert_eq!(
-                SigningKey::from_bytes(&rebuilt.to_bytes()).unwrap(),
-                generated,
-                "{algorithm}"
+            let other = SigningKey::generate(algorithm).unwrap();
+            assert_ne!(key, other);
+            // No 16-byte stretch of the secret may be constant across keys.
+            let (a, b) = (
+                key.secret_key().as_chunks::<16>().0,
+                other.secret_key().as_chunks().0,
             );
+            assert!(a.iter().zip(b).all(|(a, b)| a != b), "{algorithm}");
         }
     }
 
     #[test]
-    fn test_from_secret_key_rejects_bad_secrets() {
-        assert!(matches!(
-            SigningKey::from_secret_key(Algorithm::HmacSha256, Zeroizing::new(vec![0; 31])),
-            Err(ProtokenError::InvalidKey(_))
-        ));
-        // A longer key could be built and used but not decoded again.
-        assert!(matches!(
-            SigningKey::from_secret_key(
-                Algorithm::HmacSha256,
-                Zeroizing::new(vec![0; HMAC_MAX_KEY_LEN + 1])
-            ),
-            Err(ProtokenError::InvalidKey(m)) if m.contains("too long")
-        ));
-        assert!(matches!(
-            SigningKey::from_secret_key(Algorithm::Ed25519, Zeroizing::new(vec![0; 16])),
-            Err(ProtokenError::InvalidKeyLength {
-                expected: ED25519_SEED_LEN,
-                actual: 16
-            })
-        ));
-        assert!(matches!(
-            SigningKey::from_secret_key(Algorithm::MlDsa44, Zeroizing::new(vec![0; 64])),
-            Err(ProtokenError::InvalidKeyLength {
-                expected: MLDSA44_SEED_LEN,
-                actual: 64
-            })
-        ));
+    fn test_from_secret_key_rejects_wrong_lengths() {
+        for algorithm in ASYMMETRIC {
+            let expected = algorithm.secret_key_len();
+            for len in [0, expected - 1, expected + 1] {
+                let result = SigningKey::from_secret_key(algorithm, secret(&vec![0; len]));
+                assert!(is_length_error(result, expected, len), "{algorithm}");
+            }
+        }
+        for (len, ok) in [
+            (0, false),
+            (47, false),
+            (48, true),
+            (128, true),
+            (129, false),
+        ] {
+            let result = SigningKey::from_secret_key(Algorithm::HmacSha384, secret(&vec![7; len]));
+            assert_eq!(result.is_ok(), ok, "{len}");
+            assert!(ok || is_invalid_key(result, "HMAC key must be"));
+        }
     }
 
     #[test]
-    fn test_struct_literal_with_wrong_public_key_length_cannot_be_used() {
-        fn is_length_error<T>(result: Result<T, ProtokenError>) -> bool {
-            matches!(result, Err(ProtokenError::InvalidKeyLength { .. }))
-        }
-        for algorithm in [Algorithm::Ed25519, Algorithm::MlDsa44] {
-            for bad_len in [0, 31, 100] {
-                let key = SigningKey {
-                    public_key: vec![0xAA; bad_len],
-                    ..SigningKey::generate(algorithm).unwrap()
-                };
-                assert!(
-                    is_length_error(key.verifying_key()),
-                    "{algorithm}/{bad_len}"
-                );
-                assert!(is_length_error(key.key_identifier(KeyIdType::KeyHash)));
-                assert!(is_length_error(key.key_identifier(KeyIdType::PublicKey)));
-                assert!(is_length_error(key.sign(&claims())));
-                assert!(is_length_error(key.verify(b"", 0)));
-                assert!(key.validate().is_err());
+    fn test_slh_dsa_secret_key_must_contain_its_own_root() {
+        for algorithm in &ASYMMETRIC[3..6] {
+            let key = fixed_key(*algorithm);
+            assert!(key.secret_key().ends_with(key.public_key()));
+            let n = key.secret_key().len() / 4;
+            // SK.seed, PK.seed, and PK.root. SK.prf does not affect the root.
+            for i in [0, 2 * n, 4 * n - 1] {
+                let mut corrupted = secret(key.secret_key());
+                corrupted[i] ^= 1;
+                let result = SigningKey::from_secret_key(*algorithm, corrupted);
+                assert!(is_invalid_key(result, "root does not match"), "{algorithm}");
             }
         }
     }
 
     #[test]
-    fn test_signing_key_equality_covers_every_field() {
-        let key = ed25519_fixture();
-        assert_eq!(key, key.clone());
-
-        let mut other_secret = key.clone();
-        other_secret.secret_key[0] ^= 1;
-        assert_ne!(key, other_secret);
-
-        let mut other_public = key.clone();
-        other_public.public_key[0] ^= 1;
-        assert_ne!(key, other_public);
-
-        let mut shorter_secret = key.clone();
-        shorter_secret.secret_key.pop();
-        assert_ne!(key, shorter_secret);
-
-        let other_algorithm = SigningKey {
-            algorithm: Algorithm::MlDsa44,
-            ..key.clone()
-        };
-        assert_ne!(key, other_algorithm);
+    fn test_fn_dsa_keys_are_validated() {
+        for algorithm in [Algorithm::FnDsa512, Algorithm::FnDsa1024] {
+            let key = fixed_key(algorithm);
+            let len = key.secret_key().len();
+            // The header, f, F, and the trailing hash of the public key.
+            for i in [0, 1, len - 100, len - 1] {
+                let mut corrupted = secret(key.secret_key());
+                corrupted[i] ^= 1;
+                let result = SigningKey::from_secret_key(algorithm, corrupted);
+                assert!(is_invalid_key(result, "FN-DSA"), "{algorithm}: {i}");
+            }
+            // A wrong header, and coefficients that are not reduced modulo q.
+            for range in [0..1, 1..8] {
+                let mut corrupted = key.public_key().to_vec();
+                corrupted[range].fill(0xFF);
+                let result = VerifyingKey::new(algorithm, corrupted);
+                assert!(is_invalid_key(result, "malformed"), "{algorithm}");
+            }
+        }
     }
 
-    // --- Sign / verify dispatch ---
+    #[test]
+    fn test_loading_a_degenerate_fn_dsa_key_does_not_sign() {
+        // With F = 0 the key decodes but has no usable basis. Signing with
+        // such keys can run without bound, so loading must not try.
+        let key = fixed_key(Algorithm::FnDsa512);
+        let mut degenerate = secret(key.secret_key());
+        degenerate[769..1281].fill(0);
+        assert!(SigningKey::from_secret_key(key.algorithm(), degenerate).is_ok());
+    }
 
     #[test]
-    fn test_sign_and_verify_all_algorithms() {
+    fn test_ml_dsa_rejects_zero_t1() {
+        for algorithm in &ASYMMETRIC[..3] {
+            let mut public_key = vec![0; algorithm.public_key_len().unwrap()];
+            public_key[31] = 1;
+            let result = VerifyingKey::new(*algorithm, public_key.clone());
+            assert!(is_invalid_key(result, "malformed"), "{algorithm}");
+            public_key[32] = 1;
+            assert!(VerifyingKey::new(*algorithm, public_key).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_only_fn_dsa_signing_is_randomized() {
         for algorithm in Algorithm::ALL {
-            let sk = SigningKey::generate(algorithm).unwrap();
-            let token = sk.sign(&claims()).unwrap();
+            let key = fixed_key(algorithm);
+            let repeats = key.sign(&claims()).unwrap() == key.sign(&claims()).unwrap();
+            assert_eq!(repeats, !algorithm.name().starts_with("fn-dsa"));
+        }
+    }
 
-            let verified = sk.verify(&token, 1_900_000_000).unwrap();
-            assert_eq!(verified.claims, claims(), "{algorithm}");
-            assert_eq!(verified.algorithm, algorithm);
-            assert_eq!(
-                verified.key_identifier,
-                sk.key_identifier(KeyIdType::KeyHash).unwrap()
-            );
+    #[test]
+    fn test_verifying_key_new_checks_algorithm_and_length() {
+        for algorithm in ASYMMETRIC {
+            let expected = algorithm.public_key_len().unwrap();
+            for len in [0, expected - 1, expected + 1] {
+                let result = VerifyingKey::new(algorithm, vec![0; len]);
+                assert!(is_length_error(result, expected, len), "{algorithm}");
+            }
+        }
+        let result = VerifyingKey::new(Algorithm::HmacSha384, vec![0; 48]);
+        assert!(is_invalid_key(result, "no verifying key"));
+        let result = fixed_key(Algorithm::HmacSha384).verifying_key();
+        assert!(is_invalid_key(result, "no verifying key"));
+    }
 
-            if algorithm.is_symmetric() {
-                assert!(matches!(
-                    sk.verifying_key(),
-                    Err(ProtokenError::InvalidKey(_))
-                ));
-            } else {
-                let vk = sk.verifying_key().unwrap();
-                let verified = vk.verify(&token, 1_900_000_000).unwrap();
-                assert_eq!(verified.claims, claims());
-                assert_eq!(
-                    verified.key_identifier,
-                    KeyIdentifier::KeyHash(vk.key_hash())
-                );
+    #[test]
+    fn test_signing_key_equality() {
+        let build = |algorithm, byte| SigningKey::from_secret_key(algorithm, secret(&[byte; 32]));
+        let key = build(Algorithm::MlDsa44, 1).unwrap();
+        assert_eq!(key, build(Algorithm::MlDsa44, 1).unwrap());
+        assert_ne!(key, build(Algorithm::MlDsa44, 2).unwrap());
+        assert_ne!(key, build(Algorithm::MlDsa65, 1).unwrap());
+    }
 
-                let other = SigningKey::generate(algorithm)
-                    .unwrap()
-                    .verifying_key()
+    #[test]
+    fn test_signing_key_debug_redacts_secret() {
+        assert_eq!(
+            format!("{:?}", fixed_key(Algorithm::HmacSha384)),
+            "SigningKey { algorithm: HmacSha384, .. }"
+        );
+    }
+
+    // --- Sign and verify ---
+
+    #[test]
+    fn test_sign_and_verify_with_both_key_id_types() {
+        for algorithm in ASYMMETRIC {
+            let sk = fixed_key(algorithm);
+            let vk = sk.verifying_key().unwrap();
+            assert_eq!(vk.algorithm(), algorithm);
+            let other = SigningKey::generate(algorithm).unwrap();
+            for key_id in [
+                KeyIdentifier::KeyHash(vk.key_hash()),
+                KeyIdentifier::PublicKey(vk.public_key().to_vec()),
+            ] {
+                let token = sk
+                    .sign_with_key_id(&claims(), key_id.key_id_type())
                     .unwrap();
+                for verified in [sk.verify(&token, 0), vk.verify(&token, 0)] {
+                    let verified = verified.unwrap();
+                    assert_eq!(verified.algorithm, algorithm);
+                    assert_eq!(verified.key_identifier, key_id);
+                    assert_eq!(verified.claims, claims());
+                }
                 assert!(matches!(
-                    other.verify(&token, 1_900_000_000),
+                    other.verify(&token, 0),
                     Err(ProtokenError::KeyHashMismatch)
                 ));
             }
@@ -647,302 +531,140 @@ mod tests {
     }
 
     #[test]
-    fn test_sign_with_embedded_public_key() {
-        for algorithm in [Algorithm::Ed25519, Algorithm::MlDsa44] {
-            let sk = SigningKey::generate(algorithm).unwrap();
-            let token = sk
-                .sign_with_key_id(&claims(), KeyIdType::PublicKey)
-                .unwrap();
-            let verified = sk.verifying_key().unwrap().verify(&token, 0).unwrap();
+    fn test_hmac_is_identified_by_the_hash_of_its_secret() {
+        let key = fixed_key(Algorithm::HmacSha384);
+        let verified = key.verify(&key.sign(&claims()).unwrap(), 0).unwrap();
+        assert_eq!(
+            verified.key_identifier,
+            KeyIdentifier::KeyHash(compute_key_hash(key.secret_key()))
+        );
+        assert!(matches!(
+            key.sign_with_key_id(&claims(), KeyIdType::PublicKey),
+            Err(ProtokenError::InvalidKeyIdType(2))
+        ));
+    }
+
+    // --- Serialization ---
+
+    #[test]
+    fn test_key_roundtrips() {
+        let longest_hmac =
+            SigningKey::from_secret_key(Algorithm::HmacSha384, secret(&[5; HMAC_MAX_KEY_LEN]));
+        for key in Algorithm::ALL
+            .map(fixed_key)
+            .into_iter()
+            .chain(longest_hmac)
+        {
+            let bytes = key.to_bytes();
+            let fields = key.secret_key().len() + key.public_key().len();
+            assert!(bytes.len() <= fields + KEY_FRAMING_BYTES);
             assert_eq!(
-                verified.key_identifier,
-                KeyIdentifier::PublicKey(sk.public_key.clone())
+                *bytes,
+                encode_key(key.algorithm(), key.secret_key(), key.public_key())
             );
+            assert_eq!(SigningKey::from_bytes(&bytes).unwrap(), key);
+            assert!(VerifyingKey::from_bytes(&bytes).is_err());
+
+            if let Ok(vk) = key.verifying_key() {
+                let bytes = vk.to_bytes();
+                assert_eq!(bytes, encode_key(key.algorithm(), key.public_key(), &[]));
+                assert_eq!(VerifyingKey::from_bytes(&bytes).unwrap(), vk);
+                assert!(SigningKey::from_bytes(&bytes).is_err());
+            }
         }
     }
 
     #[test]
-    fn test_hmac_key_rejects_embedded_public_key_id() {
-        let sk = hmac_fixture();
-        assert!(matches!(
-            sk.sign_with_key_id(&claims(), KeyIdType::PublicKey),
-            Err(ProtokenError::InvalidKeyIdType(2))
+    fn test_decoders_reject_bad_structure() {
+        let cases: [(&[u8], &str); 5] = [
+            (&[], "missing algorithm"),
+            (&[0x12, 0x01, 0xAA], "missing algorithm"),
+            (&[0x08, 0x00], "zero"),
+            (&[0x08, 0x06, 0x12, 0x00], "empty"),
+            (&[0x12, 0x01, 0xAA, 0x08, 0x06], "ascending"),
+        ];
+        for (data, needle) in cases {
+            assert!(is_malformed(SigningKey::from_bytes(data), needle));
+            assert!(is_malformed(VerifyingKey::from_bytes(data), needle));
+        }
+        let field = |tag| [0x08, 0x06, tag, 0x01, 0xAA];
+        assert!(is_malformed(
+            SigningKey::from_bytes(&field(0x22)),
+            "unexpected field 4"
         ));
-        assert!(matches!(
-            sk.key_identifier(KeyIdType::PublicKey),
-            Err(ProtokenError::InvalidKeyIdType(2))
-        ));
-    }
-
-    #[test]
-    fn test_key_identifier_material() {
-        let hmac = hmac_fixture();
-        assert_eq!(
-            hmac.key_identifier(KeyIdType::KeyHash).unwrap(),
-            KeyIdentifier::KeyHash(compute_key_hash(&hmac.secret_key))
-        );
-        let ed = ed25519_fixture();
-        assert_eq!(
-            ed.key_identifier(KeyIdType::KeyHash).unwrap(),
-            KeyIdentifier::KeyHash(ed.verifying_key().unwrap().key_hash())
-        );
-        assert_eq!(
-            ed.key_identifier(KeyIdType::PublicKey).unwrap(),
-            KeyIdentifier::PublicKey(ed.public_key.clone())
-        );
-    }
-
-    #[test]
-    fn test_sign_is_deterministic_for_fixture() {
-        let sk = ed25519_fixture();
-        assert_eq!(sk.sign(&claims()).unwrap(), sk.sign(&claims()).unwrap());
-    }
-
-    #[test]
-    fn test_hmac_verifying_key_struct_cannot_verify() {
-        let vk = VerifyingKey {
-            algorithm: Algorithm::HmacSha256,
-            public_key: vec![0; 32],
-        };
-        assert!(matches!(vk.validate(), Err(ProtokenError::InvalidKey(_))));
-        assert!(matches!(
-            vk.verify(&[], 0),
-            Err(ProtokenError::InvalidKey(_))
-        ));
-    }
-
-    // --- Validation on decode ---
-
-    fn encode_signing_key(algorithm: u32, secret: &[u8], public: &[u8]) -> Vec<u8> {
-        let mut data = Vec::new();
-        proto3::encode_uint32(1, algorithm, &mut data);
-        proto3::encode_bytes(2, secret, &mut data);
-        proto3::encode_bytes(3, public, &mut data);
-        data
-    }
-
-    fn encode_verifying_key(algorithm: u32, public: &[u8]) -> Vec<u8> {
-        let mut data = Vec::new();
-        proto3::encode_uint32(1, algorithm, &mut data);
-        proto3::encode_bytes(2, public, &mut data);
-        data
-    }
-
-    #[test]
-    fn test_rejects_empty_keys() {
-        assert!(deserialize_signing_key(&[]).is_err());
-        assert!(deserialize_verifying_key(&[]).is_err());
-    }
-
-    #[test]
-    fn test_rejects_missing_algorithm() {
-        let mut data = Vec::new();
-        proto3::encode_bytes(2, &[0xAB; 32], &mut data);
-        let err = deserialize_signing_key(&data).unwrap_err();
-        assert!(
-            matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("missing algorithm")),
-            "got {err:?}"
-        );
-        let err = deserialize_verifying_key(&data).unwrap_err();
-        assert!(
-            matches!(&err, ProtokenError::MalformedEncoding(m) if m.contains("missing algorithm")),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn test_rejects_unknown_and_zero_algorithm() {
-        assert!(matches!(
-            deserialize_signing_key(&encode_signing_key(9, &[0xAB; 32], &[])),
-            Err(ProtokenError::InvalidAlgorithm(9))
-        ));
-        assert!(matches!(
-            deserialize_verifying_key(&encode_verifying_key(9, &[0; 32])),
-            Err(ProtokenError::InvalidAlgorithm(9))
-        ));
-        // Explicit zero is non-canonical.
-        let data = [0x08, 0x00, 0x12, 0x01, 0xAA];
-        assert!(matches!(
-            deserialize_signing_key(&data),
-            Err(ProtokenError::MalformedEncoding(_))
-        ));
-        assert!(matches!(
-            deserialize_verifying_key(&data),
-            Err(ProtokenError::MalformedEncoding(_))
+        assert!(is_malformed(
+            VerifyingKey::from_bytes(&field(0x1A)),
+            "unexpected field 3"
         ));
     }
 
     #[test]
-    fn test_rejects_hmac_verifying_key() {
-        assert!(matches!(
-            deserialize_verifying_key(&encode_verifying_key(1, &[0; 32])),
-            Err(ProtokenError::InvalidKey(_))
-        ));
-    }
-
-    #[test]
-    fn test_rejects_short_hmac_key() {
-        assert!(matches!(
-            deserialize_signing_key(&encode_signing_key(1, &[0; 16], &[])),
-            Err(ProtokenError::InvalidKey(_))
-        ));
-    }
-
-    #[test]
-    fn test_rejects_hmac_key_with_public_key() {
-        let err =
-            deserialize_signing_key(&encode_signing_key(1, &[0xAB; 32], &[0; 32])).unwrap_err();
-        assert!(
-            matches!(&err, ProtokenError::InvalidKey(m) if m.contains("public key")),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn test_rejects_wrong_seed_length() {
-        let pk = ed25519_fixture().public_key;
-        assert!(matches!(
-            deserialize_signing_key(&encode_signing_key(2, &[0; 16], &pk)),
-            Err(ProtokenError::InvalidKeyLength {
-                expected: ED25519_SEED_LEN,
-                actual: 16
-            })
-        ));
-        assert!(matches!(
-            deserialize_signing_key(&encode_signing_key(
-                3,
-                &[0; 31],
-                &[0; MLDSA44_PUBLIC_KEY_LEN]
-            )),
-            Err(ProtokenError::InvalidKeyLength {
-                expected: MLDSA44_SEED_LEN,
-                actual: 31
-            })
-        ));
-    }
-
-    #[test]
-    fn test_rejects_mismatched_public_key() {
-        for algorithm in [Algorithm::Ed25519, Algorithm::MlDsa44] {
-            let real = SigningKey::generate(algorithm).unwrap();
-            let other = SigningKey::generate(algorithm).unwrap();
-
-            let mismatched = SigningKey {
-                public_key: other.public_key.clone(),
-                ..real.clone()
-            };
-            let err = deserialize_signing_key(&mismatched.to_bytes()).unwrap_err();
-            assert!(
-                matches!(&err, ProtokenError::InvalidKey(m) if m.contains("does not match")),
-                "{algorithm}: got {err:?}"
-            );
-
-            // A missing or truncated public key is also a mismatch.
-            let missing = SigningKey {
-                public_key: Vec::new(),
-                ..real.clone()
-            };
-            assert!(deserialize_signing_key(&missing.to_bytes()).is_err());
+    fn test_decoders_reject_retired_algorithms() {
+        for byte in [1, 2] {
+            let data = [&[0x08, byte, 0x12, 48], &[0xAB; 48][..]].concat();
+            assert!(matches!(
+                SigningKey::from_bytes(&data),
+                Err(ProtokenError::InvalidAlgorithm(b)) if b == byte
+            ));
+            assert!(matches!(
+                VerifyingKey::from_bytes(&data),
+                Err(ProtokenError::InvalidAlgorithm(b)) if b == byte
+            ));
         }
     }
 
     #[test]
-    fn test_accepts_known_ed25519_pair() {
-        let key = ed25519_fixture();
-        assert!(key.validate().is_ok());
-        assert_eq!(SigningKey::from_bytes(&key.to_bytes()).unwrap(), key);
+    fn test_signing_key_decoder_rejects_mismatched_public_key() {
+        for algorithm in Algorithm::ALL {
+            let key = fixed_key(algorithm);
+            let public_key = key.public_key();
+            let mut wrong = vec![[public_key, &[0]].concat()];
+            if let Some((first, rest)) = public_key.split_first() {
+                wrong = vec![[&[first ^ 1], rest].concat(), rest.to_vec(), Vec::new()];
+            }
+            for public_key in wrong {
+                let data = encode_key(algorithm, key.secret_key(), &public_key);
+                assert!(
+                    is_invalid_key(SigningKey::from_bytes(&data), "does not match"),
+                    "{algorithm}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn test_rejects_wrong_length_verifying_keys() {
-        assert!(matches!(
-            deserialize_verifying_key(&encode_verifying_key(2, &[0; 31])),
-            Err(ProtokenError::InvalidKeyLength {
-                expected: ED25519_PUBLIC_KEY_LEN,
-                actual: 31
-            })
-        ));
-        assert!(matches!(
-            deserialize_verifying_key(&encode_verifying_key(3, &[0; 1000])),
-            Err(ProtokenError::InvalidKeyLength {
-                expected: MLDSA44_PUBLIC_KEY_LEN,
-                actual: 1000
-            })
-        ));
-    }
-
-    #[test]
-    fn test_rejects_invalid_ed25519_point_in_verifying_key() {
-        let not_on_curve = crate::verify::tests::NOT_ON_CURVE;
-        assert!(matches!(
-            deserialize_verifying_key(&encode_verifying_key(2, &not_on_curve)),
-            Err(ProtokenError::InvalidKey(_))
+    fn test_decoders_check_key_lengths() {
+        let data = encode_key(Algorithm::MlDsa44, &[0; 31], &[0; 1312]);
+        assert!(is_length_error(SigningKey::from_bytes(&data), 32, 31));
+        let data = encode_key(Algorithm::HmacSha384, &[0; 47], &[]);
+        assert!(is_invalid_key(SigningKey::from_bytes(&data), "HMAC"));
+        let data = encode_key(Algorithm::MlDsa44, &[0; 1000], &[]);
+        assert!(is_length_error(VerifyingKey::from_bytes(&data), 1312, 1000));
+        let data = encode_key(Algorithm::HmacSha384, &[0; 48], &[]);
+        assert!(is_invalid_key(
+            VerifyingKey::from_bytes(&data),
+            "no verifying key"
         ));
     }
 
     #[test]
     fn test_field_size_limits() {
-        // Over the raw limits: rejected while reading the field.
-        let too_big_secret = encode_signing_key(1, &vec![0; MAX_SECRET_KEY_BYTES + 1], &[]);
-        assert!(matches!(
-            deserialize_signing_key(&too_big_secret),
-            Err(ProtokenError::MalformedEncoding(m)) if m.contains("secret_key too long")
+        let too_long_secret = [0; MAX_SECRET_KEY_BYTES + 1];
+        let too_long_public = [0; MAX_PUBLIC_KEY_BYTES + 1];
+        let data = encode_key(Algorithm::HmacSha384, &too_long_secret, &[]);
+        assert!(is_malformed(
+            SigningKey::from_bytes(&data),
+            "secret_key too long"
         ));
-        let too_big_public = encode_signing_key(2, &[0; 32], &vec![0; MAX_PUBLIC_KEY_BYTES + 1]);
-        assert!(matches!(
-            deserialize_signing_key(&too_big_public),
-            Err(ProtokenError::MalformedEncoding(m)) if m.contains("public_key too long")
+        let data = encode_key(Algorithm::MlDsa87, &[0; 32], &too_long_public);
+        assert!(is_malformed(
+            SigningKey::from_bytes(&data),
+            "public_key too long"
         ));
-        let too_big_vk = encode_verifying_key(2, &vec![0; MAX_PUBLIC_KEY_BYTES + 1]);
-        assert!(matches!(
-            deserialize_verifying_key(&too_big_vk),
-            Err(ProtokenError::MalformedEncoding(m)) if m.contains("public_key too long")
+        let data = encode_key(Algorithm::MlDsa87, &too_long_public, &[]);
+        assert!(is_malformed(
+            VerifyingKey::from_bytes(&data),
+            "public_key too long"
         ));
-
-        // At the raw limits: passes the read and fails algorithm-specific checks.
-        let max_public = encode_signing_key(2, &[0; 32], &vec![0; MAX_PUBLIC_KEY_BYTES]);
-        assert!(matches!(
-            deserialize_signing_key(&max_public),
-            Err(ProtokenError::InvalidKey(_))
-        ));
-        let max_vk = encode_verifying_key(3, &vec![0; MAX_PUBLIC_KEY_BYTES]);
-        assert!(matches!(
-            deserialize_verifying_key(&max_vk),
-            Err(ProtokenError::InvalidKeyLength { .. })
-        ));
-    }
-
-    #[test]
-    fn test_rejects_unknown_and_out_of_order_fields() {
-        let mut data = encode_signing_key(1, &[0xAB; 32], &[]);
-        proto3::encode_bytes(4, &[1], &mut data);
-        assert!(deserialize_signing_key(&data).is_err());
-
-        let mut data = Vec::new();
-        proto3::encode_bytes(2, &[0xAB; 32], &mut data);
-        proto3::encode_uint32(1, 1, &mut data);
-        assert!(deserialize_signing_key(&data).is_err());
-
-        let mut data = encode_verifying_key(2, &ed25519_fixture().public_key);
-        proto3::encode_bytes(3, &[1], &mut data);
-        assert!(deserialize_verifying_key(&data).is_err());
-    }
-
-    #[test]
-    fn test_rejects_empty_secret_field() {
-        // An explicit empty bytes field is non-canonical.
-        let data = [0x08, 0x01, 0x12, 0x00];
-        assert!(matches!(
-            deserialize_signing_key(&data),
-            Err(ProtokenError::MalformedEncoding(m)) if m.contains("empty")
-        ));
-    }
-
-    #[test]
-    fn test_signing_key_debug_redacts_secret() {
-        let debug = format!("{:?}", hmac_fixture());
-        assert!(debug.contains("[32 bytes redacted]"), "got: {debug}");
-        assert!(debug.contains("HmacSha256"));
-        assert!(!debug.contains("171"), "secret byte leaked: {debug}");
     }
 }

@@ -4,11 +4,24 @@ Compact, signed binary tokens using canonical proto3 wire encoding.
 
 **Warning**: This code is experimental and not ready for production. It is mostly AI generated and has not had human review.
 
-Supports three algorithms:
+Supports a NIST MAC and the NIST post-quantum signatures:
 
-- **HMAC-SHA256** -- symmetric MAC, ~56-byte tokens
-- **Ed25519** -- asymmetric signature, ~88-byte tokens
-- **ML-DSA-44** -- post-quantum signature (FIPS 204), ~2,500-byte tokens
+| ID | Name | Standard | NIST level | Secret key | Public key | Signature |
+|---|---|---|---|---|---|---|
+| 3 | `ml-dsa-44` | FIPS 204 | 2 | 32 (seed) | 1,312 | 2,420 |
+| 4 | `ml-dsa-65` | FIPS 204 | 3 | 32 (seed) | 1,952 | 3,309 |
+| 5 | `ml-dsa-87` | FIPS 204 | 5 | 32 (seed) | 2,592 | 4,627 |
+| 6 | `hmac-sha384` | FIPS 198-1 | n/a | 48-128 | none | 48 |
+| 7 | `slh-dsa-sha2-128s` | FIPS 205 | 1 | 64 | 32 | 7,856 |
+| 8 | `slh-dsa-sha2-192s` | FIPS 205 | 3 | 96 | 48 | 16,224 |
+| 9 | `slh-dsa-sha2-256s` | FIPS 205 | 5 | 128 | 64 | 29,792 |
+| 10 | `fn-dsa-512` | FIPS 206 (unpublished) | 1 | 1,345 | 897 | 666 |
+| 11 | `fn-dsa-1024` | FIPS 206 (unpublished) | 5 | 2,369 | 1,793 | 1,280 |
+
+Sizes are in bytes. IDs 1 (HMAC-SHA256) and 2 (Ed25519) are retired and must not be reused.
+
+**FN-DSA is experimental.** FIPS 206 has not been published, so FN-DSA keys and
+tokens may stop working in a later release. FN-DSA has no level 3 parameter set.
 
 ## Build
 
@@ -25,7 +38,7 @@ cargo install --path .
 ## Quick start
 
 ```sh
-# Generate an Ed25519 signing key
+# Generate an ML-DSA-44 signing key
 protoken generate-key > my.key
 
 # Extract the public (verifying) key
@@ -45,14 +58,14 @@ Example output from `verify` (keys and timestamps will differ):
 
 ```
 OK
-     Algorithm  ed25519
+     Algorithm  ml-dsa-44
         Key ID  nsaAwNyxZac (key_hash)
        Expires  2026-02-24T23:21:39Z
     Not Before  2026-02-24T22:21:39Z
      Issued At  2026-02-24T22:21:39Z
-       Subject  user:alice
-      Audience  api.example.com
-        Scopes  read, write
+       Subject  "user:alice"
+      Audience  "api.example.com"
+        Scopes  ["read", "write"]
 ```
 
 Example output from `inspect --json` (no key needed):
@@ -60,7 +73,7 @@ Example output from `inspect --json` (no key needed):
 ```json
 {
   "type": "SignedToken",
-  "algorithm": "ed25519",
+  "algorithm": "ml-dsa-44",
   "key_identifier": { "type": "key_hash", "base64": "nsaAwNyxZac" },
   "claims": {
     "expires_at": 1771975299,
@@ -71,7 +84,7 @@ Example output from `inspect --json` (no key needed):
     "scopes": ["read", "write"]
   },
   "signature_base64": "HGsm4IgMB8uDg...",
-  "total_bytes": 142
+  "total_bytes": 2499
 }
 ```
 
@@ -82,7 +95,7 @@ All keys and tokens are base64-encoded canonical proto3 messages. Use `-` as the
 ### Generate a key and sign a token
 
 ```sh
-# Generate an Ed25519 signing key (default algorithm)
+# Generate an ML-DSA-44 signing key (default algorithm)
 protoken generate-key > my.key
 
 # Sign a token valid for 1 hour
@@ -108,14 +121,14 @@ protoken verify my.pub <token>
 ### Other algorithms
 
 ```sh
-# HMAC-SHA256 (symmetric -- use signing key to verify); "hmac" is accepted as an alias
-protoken generate-key -a hmac-sha256 > hmac.key
+# HMAC-SHA384 (symmetric -- use signing key to verify); "hmac" is accepted as an alias
+protoken generate-key -a hmac-sha384 > hmac.key
 protoken sign hmac.key 4d | protoken verify hmac.key
 
-# ML-DSA-44 (post-quantum)
-protoken generate-key -a ml-dsa-44 > pq.key
-protoken get-verifying-key pq.key > pq.pub
-protoken sign pq.key 1h | protoken verify pq.pub
+# Any other name from the table above
+protoken generate-key -a slh-dsa-sha2-128s > slh.key
+protoken get-verifying-key slh.key > slh.pub
+protoken sign slh.key 1h | protoken verify slh.pub
 ```
 
 ### Sign with claims
@@ -150,11 +163,11 @@ tokens -- so the envelope can carry other message types.
 ```proto
 message SignedToken {
   uint32 version = 1;      // reserved, always 0 (omitted on wire)
-  uint32 algorithm = 2;    // 1 = HMAC-SHA256, 2 = Ed25519, 3 = ML-DSA-44
+  uint32 algorithm = 2;    // see the algorithm table
   uint32 key_id_type = 3;  // 1 = key_hash, 2 = public_key
-  bytes  key_id = 4;       // 8 B (key_hash) or public key (Ed25519: 32 B, ML-DSA-44: 1312 B)
+  bytes  key_id = 4;       // 8 B (key_hash) or the public key
   bytes  payload = 5;      // canonical proto3 encoding of Claims
-  bytes  signature = 6;    // HMAC-SHA256 (32 B), Ed25519 (64 B), ML-DSA-44 (2420 B)
+  bytes  signature = 6;    // over fields 1-5
 }
 
 message Claims {
@@ -168,13 +181,13 @@ message Claims {
 
 message SigningKey {
   uint32 algorithm = 1;
-  bytes secret_key = 2;    // HMAC: raw key (32-4096 B); Ed25519/ML-DSA-44: 32 B seed
-  bytes public_key = 3;    // Ed25519: 32 B; ML-DSA-44: 1312 B; empty for HMAC
+  bytes secret_key = 2;    // HMAC key, ML-DSA seed, or encoded SLH-DSA/FN-DSA private key
+  bytes public_key = 3;    // empty for HMAC
 }
 
 message VerifyingKey {
-  uint32 algorithm = 1;    // 2 = Ed25519, 3 = ML-DSA-44
-  bytes public_key = 2;    // Ed25519: 32 B; ML-DSA-44: 1312 B
+  uint32 algorithm = 1;    // any but HMAC
+  bytes public_key = 2;
 }
 ```
 
@@ -185,9 +198,9 @@ can decode.
 
 Serialized `Claims` may be at most 4096 bytes. Signing rejects larger claims.
 
-Loading a `SigningKey` re-derives the public key from the seed and rejects the
-key if the stored `public_key` differs. Loading an Ed25519 `VerifyingKey`
-rejects encodings that are not valid curve points.
+Loading a `SigningKey` re-derives the public key from the secret and rejects the
+key if the stored `public_key` differs. Loading a `VerifyingKey`
+rejects malformed FN-DSA keys and ML-DSA keys whose `t1` is zero.
 
 ### Signature construction
 
@@ -197,27 +210,24 @@ canonical, the signed bytes are exactly the token bytes minus the signature
 field. Binding the algorithm and key identifier into the signature prevents
 algorithm-confusion and key-substitution attacks.
 
-Signing is deterministic for all three algorithms; ML-DSA-44 uses the
-FIPS 204 deterministic variant with an empty context string.
+All signatures use the pure (no pre-hash) mode with an empty context string.
+ML-DSA and SLH-DSA use their deterministic variants. FN-DSA is always randomized.
 
 The 8-byte key hash is `SHA-256(key_material)[0..8]`. It is a key selection
 identifier, not a security binding: security rests on full signature
 verification. Verifiers additionally compare the key identifier against their
-own key in constant time before verifying the signature. Ed25519 uses strict
-verification (`verify_strict`), which also rejects small-order keys and
-signature components.
+own key in constant time before verifying the signature.
 
 Keys used with protoken should not be reused to sign other formats.
 
+Verification checks the signature and the time window (`not_before <= now <=
+expires_at`). The caller must check `audience` and `scope`.
+
 ### Token sizes
 
-| Configuration | Total |
-|---|---|
-| HMAC + key_hash (minimal) | ~56 B |
-| Ed25519 + key_hash (minimal) | ~88 B |
-| Ed25519 + embedded public key | ~112 B |
-| ML-DSA-44 + key_hash (minimal) | ~2,450 B |
-| ML-DSA-44 + embedded public key | ~3,760 B |
+A minimal token (only `expires_at`) is the signature plus 24 to 26 bytes: 72 B for
+HMAC-SHA384, 691 B for FN-DSA-512, 2,445 B for ML-DSA-44, and 29,818 B for
+SLH-DSA-SHA2-256s. Embedding the public key replaces the 8-byte hash with the key.
 
 ## Library API
 
@@ -226,7 +236,7 @@ Add the crate with `default-features = false` to skip the CLI's dependencies.
 ```rust
 use protoken::{Algorithm, Claims, SigningKey, VerifyingKey};
 
-let key = SigningKey::generate(Algorithm::Ed25519)?;
+let key = SigningKey::generate(Algorithm::MlDsa44)?;
 let claims = Claims {
     expires_at: 1800000000,
     subject: "user:alice".into(),
@@ -243,8 +253,11 @@ assert_eq!(verified.claims.subject, "user:alice");
 
 `SigningKey::sign_with_key_id(&claims, KeyIdType::PublicKey)` embeds the
 public key in the token instead of its hash. HMAC keys verify with
-`SigningKey::verify`. The `sign` and `verify` modules expose the same
-operations on raw key bytes, and `serialize` exposes the wire format.
+`SigningKey::verify`. `SigningKey::from_secret_key` and `VerifyingKey::new` build
+keys from raw bytes, and `serialize` exposes the wire format.
+
+The signature crates keep large values on the stack. In release builds, allow
+512 KB for signing and key loading and 192 KB for verification.
 
 ## Python
 
@@ -256,7 +269,7 @@ with [maturin](https://www.maturin.rs). See
 ```python
 from protoken import Claims, SigningKey
 
-key = SigningKey.generate("ed25519")
+key = SigningKey.generate("ml-dsa-44")
 token = key.sign(Claims(expires_at=1_800_000_000, subject="user:alice"))
 key.verifying_key().verify(token).claims.subject   # 'user:alice'
 ```
@@ -269,6 +282,7 @@ All binary data is URL-safe base64 (no padding). Both files are generated from
 fixed seeds, so `make vectors-check` confirms the code still reproduces them
 exactly; `make vectors` rewrites them after an intentional format change. The
 Python tests also verify and re-sign the reference vectors.
+`testdata/acvp_vectors.json` holds NIST ACVP known-answer tests for ML-DSA and SLH-DSA.
 
 ## Benchmarks
 
@@ -282,14 +296,14 @@ See [PERFORMANCE.md](PERFORMANCE.md) for benchmark results.
 
 ```sh
 cargo install cargo-fuzz
-make fuzz TARGET=parse_claims        # or: parse_signed_token, roundtrip,
-                                     # parse_keys, exercise_token, verify_token
+make fuzz TARGET=parse_claims        # or: parse_signed_token, roundtrip, parse_keys,
+                                     # exercise_token, verify_token, verify_untrusted_key
 ```
 
-`roundtrip` asserts that anything the decoders accept re-encodes to identical
-bytes. `verify_token` runs every verifier over the input and, when the input
-is valid Claims, signs and verifies it with each algorithm; it is slower than
-the parsers because it exercises real signing.
+`roundtrip` and `parse_keys` assert that anything the decoders accept re-encodes to
+identical bytes. `verify_token` mutates the reference tokens under their own keys and
+asserts that no other byte string verifies. `verify_untrusted_key` feeds arbitrary
+public keys and signatures to the primitives.
 
 ## Formal verification
 
@@ -305,6 +319,8 @@ make lean-conformance   # compare the model with the Rust library
 ```
 
 The proofs are about a hand-written model, not the Rust source. A differential
-test over about 150,000 inputs ties the two together. The cryptographic primitives
+test over about 170,000 inputs ties the two together. The cryptographic primitives
 are assumed rather than verified. See [lean/README.md](lean/README.md) for the
-theorem list and the limits of what is proved.
+theorem list and the limits of what is proved, and
+[notes/research-lean-extraction.md](notes/research-lean-extraction.md) for how to
+extend the proofs to the Rust source.

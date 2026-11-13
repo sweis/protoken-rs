@@ -7,12 +7,8 @@ fuzz_target!(|data: &[u8]| {
     let Ok(token) = deserialize_signed_token(data) else {
         return;
     };
-    let _ = token.version.to_byte();
-    let _ = token.algorithm.to_string();
-    let _ = token.key_identifier.key_id_type().to_byte();
-    let _ = token.key_identifier.as_bytes().len();
+    let _ = serde_json::to_string(&token.algorithm);
     let _ = serde_json::to_string(&token.key_identifier);
-    let _ = token.signature.len();
 
     let Ok(claims) = deserialize_claims(&token.payload) else {
         return;

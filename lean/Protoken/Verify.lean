@@ -55,42 +55,11 @@ def finishVerification (token : SignedToken) (now : UInt64) : Result VerifiedTok
   checkTemporalClaims claims now
   pure { algorithm := token.algorithm, keyIdentifier := token.keyIdentifier, claims }
 
-/-- Models `ed25519_verifying_key(..)`, keeping only success or the error. -/
-def checkEd25519PublicKey (publicKey : Bytes) : Result Unit := do
-  if publicKey.length ≠ ED25519_PUBLIC_KEY_LEN then
-    throw (.invalidKeyLength ED25519_PUBLIC_KEY_LEN publicKey.length)
-  if !C.ed25519PointValid publicKey then
-    throw .invalidKey
-  pure ()
-
-/-- Models `mldsa44_verifying_key(..)`, keeping only success or the error. -/
-def checkMldsa44PublicKey (publicKey : Bytes) : Result Unit :=
-  if publicKey.length ≠ MLDSA44_PUBLIC_KEY_LEN then
-    .error (.invalidKeyLength MLDSA44_PUBLIC_KEY_LEN publicKey.length)
-  else
-    .ok ()
-
-/-- Models `verify_hmac`. `verify_slice` accepts exactly the tag that HMAC produces. -/
-def verifyHmac (key tokenBytes : Bytes) (now : UInt64) : Result VerifiedToken := do
-  checkHmacKeyLen key
-  let (token, signingInput) ← parseEnvelope C tokenBytes .hmacSha256 key
-  if C.hmacSha256 key signingInput ≠ token.signature then
-    throw .verificationFailed
-  finishVerification token now
-
-/-- Models `verify_ed25519`. -/
-def verifyEd25519 (publicKey tokenBytes : Bytes) (now : UInt64) : Result VerifiedToken := do
-  let (token, signingInput) ← parseEnvelope C tokenBytes .ed25519 publicKey
-  checkEd25519PublicKey C publicKey
-  if !C.ed25519VerifyStrict publicKey signingInput token.signature then
-    throw .verificationFailed
-  finishVerification token now
-
-/-- Models `verify_mldsa44`. -/
-def verifyMldsa44 (publicKey tokenBytes : Bytes) (now : UInt64) : Result VerifiedToken := do
-  let (token, signingInput) ← parseEnvelope C tokenBytes .mlDsa44 publicKey
-  checkMldsa44PublicKey publicKey
-  if !C.mldsa44Verify publicKey signingInput token.signature then
+/-- Models `verify_token`. -/
+def verifyToken (algorithm : Algorithm) (keyMaterial tokenBytes : Bytes) (now : UInt64) :
+    Result VerifiedToken := do
+  let (token, signingInput) ← parseEnvelope C tokenBytes algorithm keyMaterial
+  if !schemeVerify C algorithm keyMaterial signingInput token.signature then
     throw .verificationFailed
   finishVerification token now
 

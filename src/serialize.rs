@@ -26,10 +26,7 @@
 //! algorithm and key identifier into the signature.
 
 use crate::error::ProtokenError;
-use crate::proto3::{
-    self, missing_field, next_field, read_bounded_bytes, read_nonzero_u8, read_nonzero_varint,
-    unexpected_field, WIRE_LEN, WIRE_VARINT,
-};
+use crate::proto3::{self, missing_field, unexpected_field, Reader, WIRE_LEN, WIRE_VARINT};
 use crate::types::*;
 
 /// Serialize Claims into canonical proto3 bytes.
@@ -57,20 +54,27 @@ pub fn serialize_claims(claims: &Claims) -> Vec<u8> {
 }
 
 /// Read an `algorithm` field. Shared by the token and key decoders.
-pub(crate) fn read_algorithm(data: &[u8], pos: &mut usize) -> Result<Algorithm, ProtokenError> {
-    let byte = read_nonzero_u8(data, pos, "algorithm")?;
-    Algorithm::from_byte(byte).ok_or(ProtokenError::InvalidAlgorithm(byte))
+pub(crate) fn read_algorithm(reader: &mut Reader) -> Result<Algorithm, ProtokenError> {
+    reader.read_nonzero_u8("algorithm")?.try_into()
 }
 
-/// Decode a length-limited UTF-8 string field.
 fn read_claim_string<'a>(
-    data: &'a [u8],
-    pos: &mut usize,
+    reader: &mut Reader<'a>,
     field_name: &str,
 ) -> Result<&'a str, ProtokenError> {
-    let bytes = read_bounded_bytes(data, pos, MAX_CLAIM_BYTES_LEN, field_name)?;
+    let bytes = reader.read_bytes(MAX_CLAIM_BYTES_LEN, field_name)?;
     std::str::from_utf8(bytes)
-        .map_err(|_| ProtokenError::MalformedEncoding(format!("{field_name} is not valid UTF-8")))
+        .map_err(|_| ProtokenError::malformed(format!("{field_name} is not valid UTF-8")))
+}
+
+pub(crate) fn check_claims_size(payload: &[u8]) -> Result<(), ProtokenError> {
+    if payload.len() > MAX_PAYLOAD_BYTES {
+        return Err(ProtokenError::malformed(format!(
+            "claims too large: {} bytes (max {MAX_PAYLOAD_BYTES})",
+            payload.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Deserialize Claims from canonical proto3 bytes.
@@ -80,69 +84,48 @@ fn read_claim_string<'a>(
 /// can still display such payloads. Verification applies `Claims::validate()`
 /// after the signature check.
 pub fn deserialize_claims(data: &[u8]) -> Result<Claims, ProtokenError> {
-    if data.is_empty() {
-        return Err(ProtokenError::MalformedEncoding("empty claims".into()));
-    }
-    if data.len() > MAX_PAYLOAD_BYTES {
-        return Err(ProtokenError::MalformedEncoding(format!(
-            "claims too large: {} bytes (max {MAX_PAYLOAD_BYTES})",
-            data.len()
-        )));
-    }
-
     const SCOPE_FIELD: u32 = 6;
-    let mut claims = Claims::default();
-    let mut pos = 0;
-    let mut last_field_number = 0;
+    if data.is_empty() {
+        return Err(ProtokenError::malformed("empty claims"));
+    }
+    check_claims_size(data)?;
 
-    while pos < data.len() {
-        let (field_number, wire_type) =
-            next_field(data, &mut pos, &mut last_field_number, Some(SCOPE_FIELD))?;
-        match (field_number, wire_type) {
-            (1, WIRE_VARINT) => {
-                claims.expires_at = read_nonzero_varint(data, &mut pos, "expires_at")?;
-            }
-            (2, WIRE_VARINT) => {
-                claims.not_before = read_nonzero_varint(data, &mut pos, "not_before")?;
-            }
-            (3, WIRE_VARINT) => {
-                claims.issued_at = read_nonzero_varint(data, &mut pos, "issued_at")?;
-            }
-            (4, WIRE_LEN) => {
-                claims.subject = read_claim_string(data, &mut pos, "subject")?.to_string();
-            }
-            (5, WIRE_LEN) => {
-                claims.audience = read_claim_string(data, &mut pos, "audience")?.to_string();
-            }
+    let mut claims = Claims::default();
+    let mut reader = Reader::new(data);
+    while !reader.is_at_end() {
+        match reader.next_field(Some(SCOPE_FIELD))? {
+            (1, WIRE_VARINT) => claims.expires_at = reader.read_nonzero_varint("expires_at")?,
+            (2, WIRE_VARINT) => claims.not_before = reader.read_nonzero_varint("not_before")?,
+            (3, WIRE_VARINT) => claims.issued_at = reader.read_nonzero_varint("issued_at")?,
+            (4, WIRE_LEN) => claims.subject = read_claim_string(&mut reader, "subject")?.into(),
+            (5, WIRE_LEN) => claims.audience = read_claim_string(&mut reader, "audience")?.into(),
             (SCOPE_FIELD, WIRE_LEN) => {
-                let scope = read_claim_string(data, &mut pos, "scope")?;
+                let scope = read_claim_string(&mut reader, "scope")?;
                 if claims.scopes.len() >= MAX_SCOPES {
-                    return Err(ProtokenError::MalformedEncoding(format!(
+                    return Err(ProtokenError::malformed(format!(
                         "too many scopes: max {MAX_SCOPES}"
                     )));
                 }
-                // Canonical encoding: strictly ascending, which also rules out duplicates.
+                // Strictly ascending, which also rules out duplicates.
                 if let Some(prev) = claims.scopes.last() {
                     if scope <= prev.as_str() {
-                        return Err(ProtokenError::MalformedEncoding(format!(
+                        return Err(ProtokenError::malformed(format!(
                             "scopes not in sorted order: {scope:?} after {prev:?}"
                         )));
                     }
                 }
-                claims.scopes.push(scope.to_string());
+                claims.scopes.push(scope.into());
             }
-            _ => return Err(unexpected_field(field_number, wire_type, "Claims")),
+            (field, wire_type) => return Err(unexpected_field(field, wire_type, "Claims")),
         }
     }
-
     Ok(claims)
 }
 
-/// Maximum total size for a serialized SignedToken: payload + signature +
-/// embedded ML-DSA-44 public key + framing (6 single-byte tags, 3 length
-/// varints of at most 2 bytes each, and 3 varint values — well under 32).
-const MAX_SIGNED_TOKEN_BYTES: usize =
-    MAX_PAYLOAD_BYTES + MAX_SIGNATURE_BYTES + MLDSA44_PUBLIC_KEY_LEN + 32;
+/// Maximum total size of a serialized SignedToken: the largest key identifier,
+/// payload, and signature, plus framing (at most 14 bytes).
+pub const MAX_SIGNED_TOKEN_BYTES: usize =
+    MAX_PAYLOAD_BYTES + MAX_SIGNATURE_BYTES + MAX_PUBLIC_KEY_BYTES + 32;
 
 /// Serialize the envelope fields covered by the signature (fields 1-5).
 /// Both signing and verification compute the signature over these bytes.
@@ -154,9 +137,9 @@ pub fn serialize_signing_input(
     payload: &[u8],
 ) -> Vec<u8> {
     let mut buf = Vec::with_capacity(payload.len() + key_identifier.as_bytes().len() + 16);
-    proto3::encode_uint32(1, version.to_byte() as u32, &mut buf);
-    proto3::encode_uint32(2, algorithm.to_byte() as u32, &mut buf);
-    proto3::encode_uint32(3, key_identifier.key_id_type().to_byte() as u32, &mut buf);
+    proto3::encode_uint32(1, version as u32, &mut buf);
+    proto3::encode_uint32(2, algorithm as u32, &mut buf);
+    proto3::encode_uint32(3, key_identifier.key_id_type() as u32, &mut buf);
     proto3::encode_bytes(4, key_identifier.as_bytes(), &mut buf);
     proto3::encode_bytes(5, payload, &mut buf);
     buf
@@ -198,60 +181,43 @@ pub fn deserialize_signed_token(data: &[u8]) -> Result<SignedToken, ProtokenErro
 pub(crate) fn deserialize_signed_token_at(
     data: &[u8],
 ) -> Result<(SignedToken, usize), ProtokenError> {
+    const MESSAGE: &str = "SignedToken";
     if data.is_empty() {
-        return Err(ProtokenError::MalformedEncoding("empty token".into()));
+        return Err(ProtokenError::malformed("empty token"));
     }
     if data.len() > MAX_SIGNED_TOKEN_BYTES {
-        return Err(ProtokenError::MalformedEncoding(format!(
-            "signed token too large: {} bytes (max {})",
-            data.len(),
-            MAX_SIGNED_TOKEN_BYTES
+        return Err(ProtokenError::malformed(format!(
+            "signed token too large: {} bytes (max {MAX_SIGNED_TOKEN_BYTES})",
+            data.len()
         )));
     }
 
-    const MESSAGE: &str = "SignedToken";
     let mut algorithm = None;
     let mut key_id_type = None;
     let mut key_id: &[u8] = &[];
     let mut payload = None;
     // The signature and the offset at which its field starts.
-    let mut signature: Option<(&[u8], usize)> = None;
+    let mut signature = None;
 
-    let mut pos = 0;
-    let mut last_field_number = 0;
-
-    while pos < data.len() {
-        let field_start = pos;
-        let (field_number, wire_type) = next_field(data, &mut pos, &mut last_field_number, None)?;
-        match (field_number, wire_type) {
-            // Version can only legally be 0, and canonical encoding omits
-            // zero values, so an explicit version field is always invalid.
+    let mut reader = Reader::new(data);
+    while !reader.is_at_end() {
+        let field_start = reader.position();
+        match reader.next_field(None)? {
+            // The only version is 0, which canonical encoding omits.
             (1, WIRE_VARINT) => {
-                let v = proto3::read_u8_value(data, &mut pos, "version")?;
-                return Err(ProtokenError::InvalidVersion(v));
+                return Err(ProtokenError::InvalidVersion(reader.read_u8("version")?));
             }
-            (2, WIRE_VARINT) => algorithm = Some(read_algorithm(data, &mut pos)?),
+            (2, WIRE_VARINT) => algorithm = Some(read_algorithm(&mut reader)?),
             (3, WIRE_VARINT) => {
-                let byte = read_nonzero_u8(data, &mut pos, "key_id_type")?;
-                key_id_type =
-                    Some(KeyIdType::from_byte(byte).ok_or(ProtokenError::InvalidKeyIdType(byte))?);
+                key_id_type = Some(reader.read_nonzero_u8("key_id_type")?.try_into()?);
             }
-            (4, WIRE_LEN) => {
-                key_id = read_bounded_bytes(data, &mut pos, MLDSA44_PUBLIC_KEY_LEN, "key_id")?;
-            }
-            (5, WIRE_LEN) => {
-                payload = Some(read_bounded_bytes(
-                    data,
-                    &mut pos,
-                    MAX_PAYLOAD_BYTES,
-                    "payload",
-                )?);
-            }
+            (4, WIRE_LEN) => key_id = reader.read_bytes(MAX_PUBLIC_KEY_BYTES, "key_id")?,
+            (5, WIRE_LEN) => payload = Some(reader.read_bytes(MAX_PAYLOAD_BYTES, "payload")?),
             (6, WIRE_LEN) => {
-                let sig = read_bounded_bytes(data, &mut pos, MAX_SIGNATURE_BYTES, "signature")?;
-                signature = Some((sig, field_start));
+                let bytes = reader.read_bytes(MAX_SIGNATURE_BYTES, "signature")?;
+                signature = Some((bytes, field_start));
             }
-            _ => return Err(unexpected_field(field_number, wire_type, MESSAGE)),
+            (field, wire_type) => return Err(unexpected_field(field, wire_type, MESSAGE)),
         }
     }
 
@@ -293,7 +259,7 @@ fn key_identifier_from_wire(
             // Symmetric algorithms have no public key to embed.
             let expected = algorithm
                 .public_key_len()
-                .ok_or(ProtokenError::InvalidKeyIdType(key_id_type.to_byte()))?;
+                .ok_or(ProtokenError::InvalidKeyIdType(key_id_type as u8))?;
             if key_id.len() != expected {
                 return Err(length_error(expected));
             }
@@ -328,12 +294,12 @@ mod tests {
     fn sample_token_hmac() -> SignedToken {
         SignedToken {
             version: Version::V0,
-            algorithm: Algorithm::HmacSha256,
+            algorithm: Algorithm::HmacSha384,
             key_identifier: KeyIdentifier::KeyHash([
                 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
             ]),
             payload: serialize_claims(&sample_claims_minimal()),
-            signature: vec![0xAB; 32],
+            signature: vec![0xAB; 48],
         }
     }
 
@@ -586,31 +552,27 @@ mod tests {
     }
 
     #[test]
-    fn test_signed_token_ed25519_pubkey_roundtrip() {
-        let token = SignedToken {
-            version: Version::V0,
-            algorithm: Algorithm::Ed25519,
-            key_identifier: KeyIdentifier::PublicKey(vec![0xBB; 32]),
-            payload: serialize_claims(&sample_claims_full()),
-            signature: vec![0xCD; 64],
-        };
-        let wire = serialize_signed_token(&token);
-        let decoded = deserialize_signed_token(&wire).unwrap();
-        assert_eq!(token, decoded);
-    }
+    fn test_signed_token_embedded_public_key_lengths() {
+        for algorithm in crate::keys::tests::ASYMMETRIC {
+            let expected = algorithm.public_key_len().unwrap();
+            let with_key_len = |len| SignedToken {
+                version: Version::V0,
+                algorithm,
+                key_identifier: KeyIdentifier::PublicKey(vec![0xBB; len]),
+                payload: serialize_claims(&sample_claims_full()),
+                signature: vec![0xCD; algorithm.signature_len()],
+            };
+            let token = with_key_len(expected);
+            let wire = serialize_signed_token(&token);
+            assert_eq!(deserialize_signed_token(&wire).unwrap(), token);
 
-    #[test]
-    fn test_signed_token_mldsa44_pubkey_roundtrip() {
-        let token = SignedToken {
-            version: Version::V0,
-            algorithm: Algorithm::MlDsa44,
-            key_identifier: KeyIdentifier::PublicKey(vec![0xEE; MLDSA44_PUBLIC_KEY_LEN]),
-            payload: serialize_claims(&sample_claims_minimal()),
-            signature: vec![0xDD; MLDSA44_SIG_LEN],
-        };
-        let wire = serialize_signed_token(&token);
-        let decoded = deserialize_signed_token(&wire).unwrap();
-        assert_eq!(token, decoded);
+            let wire = serialize_signed_token(&with_key_len(expected - 1));
+            assert!(matches!(
+                deserialize_signed_token(&wire),
+                Err(ProtokenError::InvalidKeyLength { expected: e, actual })
+                    if e == expected && actual == expected - 1
+            ));
+        }
     }
 
     #[test]
@@ -618,9 +580,9 @@ mod tests {
         let token = sample_token_hmac();
         let wire = serialize_signed_token(&token);
 
-        // version=0 omitted; algorithm=1: tag 0x10, value 0x01
+        // version=0 omitted; algorithm=6: tag 0x10, value 0x06
         assert_eq!(wire[0], 0x10);
-        assert_eq!(wire[1], 0x01);
+        assert_eq!(wire[1], 0x06);
         // key_id_type=1: tag 0x18, value 0x01
         assert_eq!(wire[2], 0x18);
         assert_eq!(wire[3], 0x01);
@@ -645,9 +607,9 @@ mod tests {
             &token.payload,
         );
         assert_eq!(&wire[..input.len()], input.as_slice());
-        // Remainder is the signature field: tag 0x32, length 32, 32 bytes.
+        // Remainder is the signature field: tag 0x32, length 48, 48 bytes.
         assert_eq!(wire[input.len()], 0x32);
-        assert_eq!(wire.len(), input.len() + 2 + 32);
+        assert_eq!(wire.len(), input.len() + 2 + 48);
     }
 
     #[test]
@@ -658,7 +620,7 @@ mod tests {
     #[test]
     fn test_rejects_missing_payload() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(2, 6, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_bytes(6, &[0; 32], &mut bad);
@@ -672,7 +634,7 @@ mod tests {
     #[test]
     fn test_rejects_missing_signature() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(2, 6, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_bytes(5, &serialize_claims(&sample_claims_minimal()), &mut bad);
@@ -686,9 +648,9 @@ mod tests {
     #[test]
     fn test_rejects_missing_algorithm_and_key_id_type() {
         // Only one of the two enum fields present in each case.
-        for (present_field, missing_name) in [(3u32, "algorithm"), (2, "key_id_type")] {
+        for (present_field, value, missing_name) in [(3, 1, "algorithm"), (2, 6, "key_id_type")] {
             let mut bad = Vec::new();
-            proto3::encode_uint32(present_field, 1, &mut bad);
+            proto3::encode_uint32(present_field, value, &mut bad);
             proto3::encode_bytes(4, &[0; 8], &mut bad);
             proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
             proto3::encode_bytes(6, &[0; 32], &mut bad);
@@ -705,7 +667,7 @@ mod tests {
     fn test_rejects_missing_key_id() {
         // key_id_type present but key_id absent (0 bytes != KEY_HASH_LEN).
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(2, 6, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(5, &serialize_claims(&sample_claims_minimal()), &mut bad);
         proto3::encode_bytes(6, &[0; 32], &mut bad);
@@ -736,7 +698,7 @@ mod tests {
     fn test_rejects_invalid_version() {
         let mut bad = Vec::new();
         proto3::encode_uint32(1, 99, &mut bad);
-        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(2, 6, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
@@ -750,7 +712,7 @@ mod tests {
     #[test]
     fn test_rejects_invalid_key_id_type() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(2, 6, &mut bad);
         proto3::encode_uint32(3, 9, &mut bad); // invalid key_id_type
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
@@ -763,9 +725,9 @@ mod tests {
 
     #[test]
     fn test_rejects_hmac_with_public_key_id() {
-        // HMAC (algorithm=1) has no public key to embed.
+        // HMAC has no public key to embed.
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 1, &mut bad); // HMAC
+        proto3::encode_uint32(2, 6, &mut bad); // HMAC
         proto3::encode_uint32(3, 2, &mut bad); // public_key
         proto3::encode_bytes(4, &[0; 32], &mut bad);
         proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
@@ -779,7 +741,7 @@ mod tests {
     #[test]
     fn test_rejects_wrong_length_key_hash() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(2, 6, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 7], &mut bad); // 7 bytes instead of 8
         proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
@@ -789,23 +751,6 @@ mod tests {
             Err(ProtokenError::InvalidKeyLength {
                 expected: 8,
                 actual: 7
-            })
-        ));
-    }
-
-    #[test]
-    fn test_rejects_wrong_length_ed25519_public_key_id() {
-        let mut bad = Vec::new();
-        proto3::encode_uint32(2, 2, &mut bad); // Ed25519
-        proto3::encode_uint32(3, 2, &mut bad); // public_key
-        proto3::encode_bytes(4, &[0; 31], &mut bad); // 31 bytes instead of 32
-        proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
-        proto3::encode_bytes(6, &[0; 64], &mut bad);
-        assert!(matches!(
-            deserialize_signed_token(&bad),
-            Err(ProtokenError::InvalidKeyLength {
-                expected: 32,
-                actual: 31
             })
         ));
     }
@@ -876,7 +821,7 @@ mod tests {
         // Zero-length payload/signature fields are non-canonical (omitted when
         // empty), and must not satisfy the required-field checks.
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(2, 6, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         bad.push(0x2A); // payload tag
@@ -889,7 +834,7 @@ mod tests {
         );
 
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(2, 6, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
@@ -906,15 +851,15 @@ mod tests {
     fn test_rejects_non_ascending_token_fields() {
         let mut bad = Vec::new();
         proto3::encode_uint32(3, 1, &mut bad); // key_id_type first
-        proto3::encode_uint32(2, 1, &mut bad); // algorithm second (wrong!)
+        proto3::encode_uint32(2, 6, &mut bad); // algorithm second (wrong!)
         assert!(deserialize_signed_token(&bad).is_err());
     }
 
     #[test]
     fn test_rejects_duplicate_token_field() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 1, &mut bad);
-        proto3::encode_uint32(2, 1, &mut bad); // duplicate algorithm
+        proto3::encode_uint32(2, 6, &mut bad);
+        proto3::encode_uint32(2, 6, &mut bad); // duplicate algorithm
         assert!(deserialize_signed_token(&bad).is_err());
     }
 
@@ -938,7 +883,7 @@ mod tests {
     fn test_rejects_truncated_signed_token() {
         let wire = serialize_signed_token(&sample_token_hmac());
         for len in 1..wire.len() {
-            let _ = deserialize_signed_token(&wire[..len]);
+            assert!(deserialize_signed_token(&wire[..len]).is_err());
         }
     }
 
@@ -964,17 +909,13 @@ mod tests {
 
     #[test]
     fn test_max_signed_token_bytes_sanity() {
-        // Pins the MAX_SIGNED_TOKEN_BYTES value so arithmetic mutations are
-        // caught. Must exceed the largest legitimate token (ML-DSA-44 with
-        // embedded public key and a max-size payload).
-        // 4096 + 2560 + 1312 + 32 = 8000.
-        assert_eq!(MAX_SIGNED_TOKEN_BYTES, 8000);
+        assert_eq!(MAX_SIGNED_TOKEN_BYTES, 4096 + 29_792 + 2592 + 32);
     }
 
     #[test]
     fn test_rejects_oversized_payload_inside_token() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(2, 6, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_bytes(5, &vec![0; MAX_PAYLOAD_BYTES + 1], &mut bad);
@@ -985,7 +926,7 @@ mod tests {
     #[test]
     fn test_accepts_max_size_payload_inside_token() {
         let mut data = Vec::new();
-        proto3::encode_uint32(2, 1, &mut data);
+        proto3::encode_uint32(2, 6, &mut data);
         proto3::encode_uint32(3, 1, &mut data);
         proto3::encode_bytes(4, &[0; 8], &mut data);
         proto3::encode_bytes(5, &vec![0x08; MAX_PAYLOAD_BYTES], &mut data);
@@ -997,7 +938,7 @@ mod tests {
     #[test]
     fn test_rejects_oversized_signature_inside_token() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 1, &mut bad);
+        proto3::encode_uint32(2, 6, &mut bad);
         proto3::encode_uint32(3, 1, &mut bad);
         proto3::encode_bytes(4, &[0; 8], &mut bad);
         proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
@@ -1008,7 +949,7 @@ mod tests {
     #[test]
     fn test_accepts_max_size_signature() {
         let mut data = Vec::new();
-        proto3::encode_uint32(2, 1, &mut data);
+        proto3::encode_uint32(2, 6, &mut data);
         proto3::encode_uint32(3, 1, &mut data);
         proto3::encode_bytes(4, &[0; 8], &mut data);
         proto3::encode_bytes(5, &[0x08, 0x01], &mut data);
@@ -1020,9 +961,9 @@ mod tests {
     #[test]
     fn test_rejects_oversized_key_id() {
         let mut bad = Vec::new();
-        proto3::encode_uint32(2, 3, &mut bad); // ML-DSA-44
+        proto3::encode_uint32(2, 5, &mut bad); // ML-DSA-87
         proto3::encode_uint32(3, 2, &mut bad); // public_key
-        proto3::encode_bytes(4, &vec![0; MLDSA44_PUBLIC_KEY_LEN + 1], &mut bad);
+        proto3::encode_bytes(4, &vec![0; MAX_PUBLIC_KEY_BYTES + 1], &mut bad);
         proto3::encode_bytes(5, &[0x08, 0x01], &mut bad);
         proto3::encode_bytes(6, &[0; 32], &mut bad);
         let err = deserialize_signed_token(&bad).unwrap_err();

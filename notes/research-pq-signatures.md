@@ -2,6 +2,11 @@
 
 Research conducted 2026-02-18. Evaluated ML-DSA, SLH-DSA, XMSS, and LMS for use in protoken-rs.
 
+**Update 2026-11-13:** protoken now supports ML-DSA-44/65/87, SLH-DSA-SHA2-128s/192s/256s,
+and FN-DSA-512/1024 (see [research-fn-dsa.md](research-fn-dsa.md)). ML-DSA-44 remains the
+default. Measured timings are in [PERFORMANCE.md](../PERFORMANCE.md). An SLH-DSA key is
+limited to 2^64 signatures, which is unlimited in practice.
+
 ## Quick Comparison
 
 | | ML-DSA-44 | SLH-DSA-SHA2-128s | XMSS-SHA2_10_256 | LMS-SHA256_H20 |

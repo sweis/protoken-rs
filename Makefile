@@ -36,9 +36,10 @@ vectors-check:
 python:
 	cd bindings/python && maturin develop && pytest
 
-# Check the Lean proofs and the axiom audit (requires elan)
+# Check the Lean proofs and the axiom audit, then replay the proofs through a
+# fresh kernel (requires elan)
 lean:
-	cd lean && lake build --wfail
+	cd lean && lake build --wfail && lake env leanchecker Protoken
 
 # Replay Rust-generated cases through the Lean model. Example:
 #   make lean-conformance SEED=7
@@ -54,10 +55,11 @@ mutants:
 
 # Fuzz one target (requires nightly and `cargo install cargo-fuzz`). The
 # corpus is first seeded with the reference keys, tokens, and payloads so the
-# fuzzers start from inputs the decoders accept. Example:
+# fuzzers start from inputs the decoders accept. max_len is just above the
+# largest token. Example:
 #   make fuzz TARGET=verify_token DURATION=120
 TARGET ?= parse_claims
 DURATION ?= 60
 fuzz:
 	cargo run -q --example gen_fuzz_seeds fuzz/corpus/$(TARGET)
-	cargo +nightly fuzz run $(TARGET) -- -dict=fuzz/proto3.dict -max_total_time=$(DURATION)
+	cargo +nightly fuzz run $(TARGET) -- -dict=fuzz/proto3.dict -max_len=37000 -max_total_time=$(DURATION)

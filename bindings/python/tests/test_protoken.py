@@ -21,7 +21,7 @@ from protoken import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 EXPIRES = 2_000_000_000
 NOW = 1_900_000_000
-ASYMMETRIC = [a for a in ALGORITHMS if a != "hmac-sha256"]
+ASYMMETRIC = [a for a in ALGORITHMS if a != "hmac-sha384"]
 
 
 def b64decode(text: str) -> bytes:
@@ -40,7 +40,17 @@ def full_claims() -> Claims:
 
 
 def test_algorithms_constant():
-    assert ALGORITHMS == ("hmac-sha256", "ed25519", "ml-dsa-44")
+    assert ALGORITHMS == (
+        "ml-dsa-44",
+        "ml-dsa-65",
+        "ml-dsa-87",
+        "hmac-sha384",
+        "slh-dsa-sha2-128s",
+        "slh-dsa-sha2-192s",
+        "slh-dsa-sha2-256s",
+        "fn-dsa-512",
+        "fn-dsa-1024",
+    )
 
 
 class TestClaims:
@@ -111,16 +121,16 @@ class TestKeys:
         assert SigningKey.from_bytes(key.to_bytes()) == key
         assert len(key.key_hash()) == 8
 
-    def test_generate_defaults_to_ed25519(self):
-        assert SigningKey.generate().algorithm == "ed25519"
+    def test_generate_defaults_to_ml_dsa_44(self):
+        assert SigningKey.generate().algorithm == "ml-dsa-44"
 
     def test_generate_accepts_aliases(self):
-        assert SigningKey.generate("hmac").algorithm == "hmac-sha256"
+        assert SigningKey.generate("hmac").algorithm == "hmac-sha384"
         assert SigningKey.generate("ML-DSA-44").algorithm == "ml-dsa-44"
 
     def test_generate_rejects_unknown_algorithm(self):
         with pytest.raises(ProtokenError, match="unknown algorithm"):
-            SigningKey.generate("rsa")
+            SigningKey.generate("ed25519")
 
     def test_generated_keys_differ(self):
         assert SigningKey.generate() != SigningKey.generate()
@@ -135,16 +145,16 @@ class TestKeys:
         assert VerifyingKey.from_bytes(vk.to_bytes()) == vk
 
     def test_hmac_has_no_verifying_key(self):
-        key = SigningKey.generate("hmac-sha256")
+        key = SigningKey.generate("hmac-sha384")
         assert key.public_key == b""
         with pytest.raises(ProtokenError):
             key.verifying_key()
 
     def test_public_key_sizes(self):
-        assert len(SigningKey.generate("ed25519").public_key) == 32
+        assert len(SigningKey.generate("slh-dsa-sha2-128s").public_key) == 32
         assert len(SigningKey.generate("ml-dsa-44").public_key) == 1312
 
-    @pytest.mark.parametrize("data", [b"", b"\x00", b"\x08\x02\x12\x03abc", bytes(100)])
+    @pytest.mark.parametrize("data", [b"", b"\x00", b"\x08\x03\x12\x03abc", bytes(100)])
     def test_malformed_keys_rejected(self, data):
         # Key problems are plain ProtokenError, not VerificationFailed, which
         # is reserved for problems with a token.
@@ -161,9 +171,9 @@ class TestKeys:
             SigningKey.from_bytes(vk_bytes)
 
     def test_repr_hides_secret(self):
-        key = SigningKey.generate("hmac-sha256")
-        assert repr(key) == 'SigningKey(algorithm="hmac-sha256")'
-        assert repr(SigningKey.generate().verifying_key()) == 'VerifyingKey(algorithm="ed25519")'
+        key = SigningKey.generate("hmac-sha384")
+        assert repr(key) == 'SigningKey(algorithm="hmac-sha384")'
+        assert repr(SigningKey.generate().verifying_key()) == 'VerifyingKey(algorithm="ml-dsa-44")'
 
     def test_keys_are_not_picklable(self):
         with pytest.raises(TypeError):
@@ -202,7 +212,7 @@ class TestSignVerify:
 
     def test_hmac_cannot_embed_public_key(self):
         with pytest.raises(ProtokenError):
-            SigningKey.generate("hmac-sha256").sign(Claims(EXPIRES), embed_public_key=True)
+            SigningKey.generate("hmac-sha384").sign(Claims(EXPIRES), embed_public_key=True)
 
     def test_signing_is_deterministic(self):
         key = SigningKey.generate("ml-dsa-44")
@@ -238,12 +248,12 @@ class TestSignVerify:
             SigningKey.generate(algorithm).verify(token, now=NOW)
 
     def test_wrong_algorithm_rejected(self):
-        token = SigningKey.generate("hmac-sha256").sign(Claims(EXPIRES))
-        with pytest.raises(VerificationFailed, match="expected ed25519"):
-            SigningKey.generate("ed25519").verify(token, now=NOW)
+        token = SigningKey.generate("hmac-sha384").sign(Claims(EXPIRES))
+        with pytest.raises(VerificationFailed, match="expected ml-dsa-44"):
+            SigningKey.generate("ml-dsa-44").verify(token, now=NOW)
 
     def test_every_single_bit_flip_is_rejected(self):
-        key = SigningKey.generate("ed25519")
+        key = SigningKey.generate("hmac-sha384")
         token = bytearray(key.sign(full_claims()))
         for i in range(len(token)):
             corrupted = bytearray(token)
@@ -265,27 +275,27 @@ class TestSignVerify:
             SigningKey.generate().verify("dG9rZW4", now=NOW)  # type: ignore[arg-type]
 
     def test_verified_token_repr(self):
-        key = SigningKey.generate("hmac-sha256")
+        key = SigningKey.generate("hmac-sha384")
         verified = key.verify(key.sign(Claims(EXPIRES)), now=NOW)
-        assert repr(verified).startswith('VerifiedToken(algorithm="hmac-sha256", key_id_type="key_hash"')
+        assert repr(verified).startswith('VerifiedToken(algorithm="hmac-sha384", key_id_type="key_hash"')
 
 
 class TestInspect:
     def test_inspect_does_not_need_a_key(self):
-        key = SigningKey.generate("ed25519")
+        key = SigningKey.generate("ml-dsa-44")
         claims = full_claims()
         token = key.sign(claims)
 
         unverified = inspect_token(token)
-        assert unverified.algorithm == "ed25519"
+        assert unverified.algorithm == "ml-dsa-44"
         assert unverified.key_id_type == "key_hash"
         assert unverified.key_id == key.key_hash()
         assert unverified.claims == claims
-        assert len(unverified.signature) == 64
+        assert len(unverified.signature) == 2420
         assert repr(unverified).startswith("UnverifiedToken(")
 
     def test_inspect_shows_embedded_public_key(self):
-        key = SigningKey.generate("ed25519")
+        key = SigningKey.generate("ml-dsa-44")
         unverified = inspect_token(key.sign(Claims(EXPIRES), embed_public_key=True))
         assert unverified.key_id_type == "public_key"
         assert unverified.key_id == key.public_key
@@ -327,6 +337,8 @@ class TestReferenceVectors:
 
     def test_resigning_reproduces_stored_tokens(self, vectors):
         for v in vectors:
+            if v["algorithm"].startswith("fn-dsa"):
+                continue  # randomized signing
             key = SigningKey.from_bytes(b64decode(v["signing_key_base64"]))
             token = key.sign(Claims(**v["claims"]))
             assert token == b64decode(v["token_base64"]), v["name"]

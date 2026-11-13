@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Regression tests against testdata/reference_vectors.json: long-lived keys
-//! and tokens (expiring 2036) for every algorithm. All three algorithms sign
-//! deterministically, so re-signing the stored claims with the stored key
+//! and tokens (expiring 2036) for every algorithm. All algorithms but FN-DSA
+//! sign deterministically, so re-signing the stored claims with the stored key
 //! must reproduce the stored token byte for byte. Regenerate with
 //! `cargo run --example gen_reference_vectors`.
 
@@ -69,7 +69,7 @@ fn decode(b64: &str) -> Vec<u8> {
 #[test]
 fn test_reference_covers_every_algorithm() {
     let mut algorithms: Vec<Algorithm> = load_vectors().iter().map(|v| v.algorithm).collect();
-    algorithms.sort_by_key(|a| a.to_byte());
+    algorithms.sort_by_key(|&a| a as u8);
     assert_eq!(algorithms, Algorithm::ALL);
 }
 
@@ -77,7 +77,7 @@ fn test_reference_covers_every_algorithm() {
 fn test_reference_keys_are_consistent() {
     for v in load_vectors() {
         let sk = v.signing_key();
-        assert_eq!(sk.algorithm, v.algorithm, "{}", v.name);
+        assert_eq!(sk.algorithm(), v.algorithm, "{}", v.name);
 
         let key_hash = sk.key_identifier(KeyIdType::KeyHash).unwrap();
         assert_eq!(
@@ -152,6 +152,9 @@ fn test_reference_tokens_verify() {
 #[test]
 fn test_reference_resign_reproduces_tokens() {
     for v in load_vectors() {
+        if v.algorithm.name().starts_with("fn-dsa") {
+            continue;
+        }
         let token = v.signing_key().sign(&v.claims).unwrap();
         assert_eq!(
             B64.encode(&token),

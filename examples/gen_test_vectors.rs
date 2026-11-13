@@ -12,7 +12,7 @@ use protoken::{Algorithm, Claims, KeyIdType, SigningKey, Zeroizing};
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 const HMAC_KEY: &[u8] = b"protoken-test-vector-key-do-not-use-in-production!!";
-const ED25519_SEED_HEX: &str = "3cc4bec961d0bf428a58a323812992ea8cd803814871ee8b2477dc3362ac4619";
+const MLDSA44_SEED_HEX: &str = "3cc4bec961d0bf428a58a323812992ea8cd803814871ee8b2477dc3362ac4619";
 
 fn claims_vector(name: &str, claims: &Claims) -> serde_json::Value {
     let bytes = serialize_claims(claims);
@@ -41,7 +41,7 @@ fn signed_vector(
         "name": name,
         "type": "signed_token",
         "input": {
-            "algorithm": key.algorithm,
+            "algorithm": key.algorithm(),
             "signing_key_base64": B64.encode(key.to_bytes()),
             "key_hash_base64": B64.encode(key_hash.as_bytes()),
             "key_id_type": id_type,
@@ -63,11 +63,11 @@ fn key_hash_vector(name: &str, input: &[u8]) -> serde_json::Value {
 
 fn main() {
     let hmac_key =
-        SigningKey::from_secret_key(Algorithm::HmacSha256, Zeroizing::new(HMAC_KEY.to_vec()))
+        SigningKey::from_secret_key(Algorithm::HmacSha384, Zeroizing::new(HMAC_KEY.to_vec()))
             .unwrap();
-    let ed25519_key = SigningKey::from_secret_key(
-        Algorithm::Ed25519,
-        Zeroizing::new(hex::decode(ED25519_SEED_HEX).unwrap()),
+    let mldsa44_key = SigningKey::from_secret_key(
+        Algorithm::MlDsa44,
+        Zeroizing::new(hex::decode(MLDSA44_SEED_HEX).unwrap()),
     )
     .unwrap();
 
@@ -107,19 +107,19 @@ fn main() {
         ),
         signed_vector("signed_hmac", &hmac_key, KeyIdType::KeyHash, 1700000000),
         signed_vector(
-            "signed_ed25519_keyhash",
-            &ed25519_key,
+            "signed_mldsa44_keyhash",
+            &mldsa44_key,
             KeyIdType::KeyHash,
             1800000000,
         ),
         signed_vector(
-            "signed_ed25519_pubkey",
-            &ed25519_key,
+            "signed_mldsa44_pubkey",
+            &mldsa44_key,
             KeyIdType::PublicKey,
             1800000000,
         ),
         key_hash_vector("key_hash_hmac", HMAC_KEY),
-        key_hash_vector("key_hash_ed25519_pubkey", &ed25519_key.public_key),
+        key_hash_vector("key_hash_mldsa44_pubkey", mldsa44_key.public_key()),
     ];
 
     let output = serde_json::json!({

@@ -12,8 +12,9 @@ Each reader has two lemmas.
 * `_complete`: if the unread input `data.drop pos` starts with a canonical
   encoding, it accepts and returns the encoded value.
 
-Positions, lengths, and field numbers are natural numbers. Where Rust checks that
-a value fits a machine type, the model has the same check.
+A Rust `Reader` is modelled by passing its fields: each reader takes `data` and
+`pos` and returns the new `pos`. Positions, lengths, and field numbers are natural
+numbers. Where Rust checks that a value fits a machine type, the model has the same check.
 -/
 
 namespace Protoken
@@ -40,19 +41,19 @@ def encodeBytes (field : Nat) (value : Bytes) : Bytes :=
   if value.isEmpty then []
   else encodeTag field WIRE_LEN ++ encodeVarint (UInt64.ofNat value.length) ++ value
 
-/-- Models `decode_tag`. Returns `(field_number, wire_type, pos)`. -/
+/-- Models `Reader::read_tag`. Returns `(field_number, wire_type, pos)`. -/
 def decodeTag (data : Bytes) (pos : Nat) : Result (Nat × Nat × Nat) := do
   let (tag, pos) ← decodeVarint data pos
   let wireType := (tag &&& 0x07).toNat
   let fieldNumber := (tag >>> 3).toNat
   if fieldNumber == 0 then
     throw .malformedEncoding
-  -- `u32::try_from`
+  -- `u32::try_from`, which gives the same error
   if fieldNumber ≥ 2 ^ 32 then
     throw .malformedEncoding
   pure (fieldNumber, wireType, pos)
 
-/-- Models `read_u8_value`. -/
+/-- Models `Reader::read_u8`. -/
 def readU8Value (data : Bytes) (pos : Nat) : Result (UInt8 × Nat) := do
   let (v, pos) ← decodeVarint data pos
   -- `u8::try_from`
@@ -60,7 +61,7 @@ def readU8Value (data : Bytes) (pos : Nat) : Result (UInt8 × Nat) := do
     throw .malformedEncoding
   pure (v.toUInt8, pos)
 
-/-- Models `read_bytes_value`. `usize` is taken to be 64 bits. On a 32-bit target
+/-- The first half of `Reader::read_bytes`. `usize` is taken to be 64 bits. On a 32-bit target
 `usize::try_from` can fail where this model continues, but then the length
 exceeds `data.len()`, so both return the same error. -/
 def readBytesValue (data : Bytes) (pos : Nat) : Result (Bytes × Nat) := do
@@ -73,22 +74,22 @@ def readBytesValue (data : Bytes) (pos : Nat) : Result (Bytes × Nat) := do
     throw .malformedEncoding
   pure ((data.drop pos).take len, pos + len)
 
-/-- Models `read_nonzero_varint`. -/
+/-- Models `Reader::read_nonzero_varint`. -/
 def readNonzeroVarint (data : Bytes) (pos : Nat) : Result (UInt64 × Nat) := do
   let (v, pos) ← decodeVarint data pos
   if v == 0 then
     throw .malformedEncoding
   pure (v, pos)
 
-/-- Models `read_nonzero_u8`. -/
+/-- Models `Reader::read_nonzero_u8`. -/
 def readNonzeroU8 (data : Bytes) (pos : Nat) : Result (UInt8 × Nat) := do
   let (v, pos) ← readU8Value data pos
   if v == 0 then
     throw .malformedEncoding
   pure (v, pos)
 
-/-- Models `next_field`. Returns `(field_number, wire_type, pos)`. The Rust
-function also stores `field_number` into `last_field_number`; callers of this
+/-- Models `Reader::next_field`. Returns `(field_number, wire_type, pos)`. The Rust
+method also stores `field_number` into `last_field_number`; callers of this
 model do that themselves. -/
 def nextField (data : Bytes) (pos lastFieldNumber : Nat) (repeated : Option Nat) :
     Result (Nat × Nat × Nat) := do
@@ -98,7 +99,7 @@ def nextField (data : Bytes) (pos lastFieldNumber : Nat) (repeated : Option Nat)
     throw .malformedEncoding
   pure (fieldNumber, wireType, pos)
 
-/-- Models `read_bounded_bytes`. -/
+/-- Models `Reader::read_bytes`. -/
 def readBoundedBytes (data : Bytes) (pos maxLen : Nat) : Result (Bytes × Nat) := do
   let (bytes, pos) ← readBytesValue data pos
   if bytes.isEmpty then
@@ -181,7 +182,7 @@ theorem decodeTag_sound {data : Bytes} {pos f w pos' : Nat}
   · simp at h
   · split at h
     · simp at h
-    · simp only [pure_eq_ok, ok_bind, Except.ok.injEq, Prod.mk.injEq] at h
+    · simp only [pure_eq_ok, Except.ok.injEq, Prod.mk.injEq] at h
       obtain ⟨rfl, rfl, rfl⟩ := h
       obtain ⟨h1, h2, h3⟩ := decodeVarint_sound hv
       refine ⟨h1, h2, ?_⟩
@@ -206,14 +207,18 @@ theorem encodeVarint_length_one {v : UInt64} (h : v.toNat < 128) :
   rw [encodeVarint_eq_varintNat, varintNat_of_lt h]
   rfl
 
-theorem encodeVarint_length_le_two {v : UInt64} (h : v.toNat < 16384) :
-    (encodeVarint v).length ≤ 2 := by
+theorem encodeVarint_length_le_three {v : UInt64} (h : v.toNat < 2 ^ 21) :
+    (encodeVarint v).length ≤ 3 := by
   rw [encodeVarint_eq_varintNat]
   by_cases h1 : v.toNat < 128
   · rw [varintNat_of_lt h1]
     simp
-  · rw [varintNat_of_ge (by omega), varintNat_of_lt (by omega)]
-    simp
+  · rw [varintNat_of_ge (by omega)]
+    by_cases h2 : v.toNat / 128 < 128
+    · rw [varintNat_of_lt h2]
+      simp
+    · rw [varintNat_of_ge (by omega), varintNat_of_lt (by omega)]
+      simp
 
 /-- All field numbers are at most 15, so tags are single bytes. -/
 theorem encodeTag_length {f w : Nat} (hf : f < 16) (hw : w < 8) : (encodeTag f w).length = 1 :=
@@ -228,13 +233,13 @@ theorem encodeUint32_u8_length_le {f : Nat} (hf : f < 16) {b : UInt8} (hb : b.to
       encodeVarint_length_one (by simpa using hb)]
     omega
 
-theorem encodeBytes_length_le {f : Nat} (hf : f < 16) {b : Bytes} (hb : b.length < 16384) :
-    (encodeBytes f b).length ≤ 3 + b.length := by
+theorem encodeBytes_length_le {f : Nat} (hf : f < 16) {b : Bytes} (hb : b.length < 2 ^ 21) :
+    (encodeBytes f b).length ≤ 4 + b.length := by
   unfold encodeBytes
   split
   · simp
   · have h1 := encodeTag_length hf (w := WIRE_LEN) (by simp [WIRE_LEN])
-    have h2 := encodeVarint_length_le_two (v := UInt64.ofNat b.length)
+    have h2 := encodeVarint_length_le_three (v := UInt64.ofNat b.length)
       (by simp [UInt64.toNat_ofNat']; omega)
     simp only [List.length_append]
     omega
@@ -270,7 +275,7 @@ theorem readNonzeroVarint_sound {data : Bytes} {pos pos' : Nat} {v : UInt64}
   split at h
   · simp at h
   · rename_i hne
-    simp only [pure_eq_ok, ok_bind, Except.ok.injEq, Prod.mk.injEq] at h
+    simp only [pure_eq_ok, Except.ok.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     exact ⟨by simpa using hne, decodeVarint_sound hv⟩
 
@@ -288,7 +293,7 @@ theorem readU8Value_sound {data : Bytes} {pos pos' : Nat} {v : UInt8}
   split at h
   · simp at h
   · rename_i hlt
-    simp only [pure_eq_ok, ok_bind, Except.ok.injEq, Prod.mk.injEq] at h
+    simp only [pure_eq_ok, Except.ok.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     have : v'.toUInt8.toUInt64 = v' := by
       apply UInt64.toNat_inj.mp
@@ -313,7 +318,7 @@ theorem readNonzeroU8_sound {data : Bytes} {pos pos' : Nat} {v : UInt8}
   split at h
   · simp at h
   · rename_i hne
-    simp only [pure_eq_ok, ok_bind, Except.ok.injEq, Prod.mk.injEq] at h
+    simp only [pure_eq_ok, Except.ok.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     exact ⟨by simpa using hne, readU8Value_sound hv⟩
 
@@ -332,7 +337,7 @@ theorem readBytesValue_sound {data : Bytes} {pos pos' : Nat} {bytes : Bytes}
   · simp at h
   · split at h
     · simp at h
-    · simp only [pure_eq_ok, ok_bind, Except.ok.injEq, Prod.mk.injEq] at h
+    · simp only [pure_eq_ok, Except.ok.injEq, Prod.mk.injEq] at h
       obtain ⟨rfl, rfl⟩ := h
       obtain ⟨h1, h2, h3⟩ := decodeVarint_sound hv
       have hlen : ((data.drop p).take len64.toNat).length = len64.toNat := by
@@ -358,7 +363,7 @@ theorem readBytesValue_complete {data : Bytes} {pos : Nat} {bytes rest : Bytes}
     simp [UInt64.toNat_ofNat']
     omega
   simp only [readBytesValue, decodeVarint_complete h, ok_bind, hb, hdrop]
-  rw [if_neg (by omega), if_neg (by omega)]
+  rw [ite_eq_right (by omega), ite_eq_right (by omega)]
   simp
 
 theorem readBoundedBytes_sound {data : Bytes} {pos maxLen pos' : Nat} {bytes : Bytes}
@@ -372,7 +377,7 @@ theorem readBoundedBytes_sound {data : Bytes} {pos maxLen pos' : Nat} {bytes : B
   · split at h
     · simp at h
     · rename_i hne hle
-      simp only [pure_eq_ok, ok_bind, Except.ok.injEq, Prod.mk.injEq] at h
+      simp only [pure_eq_ok, Except.ok.injEq, Prod.mk.injEq] at h
       obtain ⟨rfl, rfl⟩ := h
       exact ⟨by simpa using hne, by omega, readBytesValue_sound hv⟩
 

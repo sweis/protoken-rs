@@ -5,14 +5,15 @@
 //! canonical encoding minus the signature field. The payload is the canonical
 //! proto3 encoding of a [`Claims`] message.
 //!
-//! Supported algorithms: HMAC-SHA256, Ed25519, and ML-DSA-44 (post-quantum).
+//! Supported algorithms: HMAC-SHA384, ML-DSA (FIPS 204), SLH-DSA (FIPS 205), and,
+//! experimentally, FN-DSA (the unpublished FIPS 206).
 //!
 //! The usual entry points are [`SigningKey`] and [`VerifyingKey`]:
 //!
 //! ```
 //! use protoken::{Algorithm, Claims, SigningKey};
 //!
-//! let key = SigningKey::generate(Algorithm::Ed25519)?;
+//! let key = SigningKey::generate(Algorithm::MlDsa44)?;
 //! let claims = Claims {
 //!     expires_at: 1_800_000_000,
 //!     subject: "user:alice".into(),
@@ -26,9 +27,9 @@
 //! # Ok::<(), protoken::ProtokenError>(())
 //! ```
 //!
-//! The `sign` and `verify` modules expose the same operations on raw key
-//! material, and `serialize` exposes the wire format directly.
+//! The `serialize` module exposes the wire format directly.
 
+mod crypto;
 pub mod error;
 pub mod keys;
 pub mod proto3;

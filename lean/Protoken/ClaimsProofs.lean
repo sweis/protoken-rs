@@ -136,7 +136,7 @@ theorem claimsInv_step {data : Bytes} {pos last pos' last' : Nat} {c c' : Claims
 exactly `serializeClaims` of the result, and the result meets the wire limits. -/
 theorem deserializeClaims_canonical {data : Bytes} {c : Claims}
     (h : deserializeClaims data = .ok c) : serializeClaims c = data ∧ c.WireValid := by
-  simp only [deserializeClaims, throw_eq_error, error_bind, pure_eq_ok, ok_bind,
+  simp only [deserializeClaims, throw_eq_error, error_bind,
     ite_error_eq_ok] at h
   obtain ⟨_, _, h⟩ := h
   obtain ⟨pos, last, hpos, hinv⟩ := fieldLoop_invariant (ClaimsInv data)
@@ -379,8 +379,8 @@ theorem deserializeClaims_serializeClaims_of_wireValid {c : Claims} (hw : c.Wire
   have hsorted : ({ c with scopes := sortScopes c.scopes } : Claims) = c := by
     rw [sortScopes_of_pairwise_lt hw.scopes_sorted]
   have hsize' : ¬ (serializeClaims c).length > MAX_PAYLOAD_BYTES := by omega
-  simp only [deserializeClaims, throw_eq_error, error_bind, pure_eq_ok, ok_bind,
-    List.isEmpty_iff, hne, hsize', if_false]
+  simp only [deserializeClaims, throw_eq_error, error_bind,
+    List.isEmpty_iff, hne, hsize', ite_false]
   simp only [serializeClaims, hsorted, MAX_PAYLOAD_BYTES] at hsize ⊢
   exact claimsLoop_complete hw (by omega)
 

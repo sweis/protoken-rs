@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::types::Algorithm;
+
 #[derive(Debug, Error)]
 pub enum ProtokenError {
     #[error("invalid version: {0}")]
@@ -8,7 +10,10 @@ pub enum ProtokenError {
     #[error("invalid algorithm: {0}")]
     InvalidAlgorithm(u8),
 
-    #[error("unknown algorithm name: {0:?} (expected hmac-sha256, ed25519, or ml-dsa-44)")]
+    #[error(
+        "unknown algorithm name: {0:?} (expected one of: {names})",
+        names = Algorithm::ALL.map(Algorithm::name).join(", ")
+    )]
     UnknownAlgorithmName(String),
 
     #[error("invalid key identifier type: {0}")]
@@ -40,4 +45,10 @@ pub enum ProtokenError {
 
     #[error("malformed encoding: {0}")]
     MalformedEncoding(String),
+}
+
+impl ProtokenError {
+    pub(crate) fn malformed(message: impl Into<String>) -> Self {
+        ProtokenError::MalformedEncoding(message.into())
+    }
 }

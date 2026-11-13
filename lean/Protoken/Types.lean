@@ -17,17 +17,13 @@ namespace Protoken
 def MAX_CLAIM_BYTES_LEN : Nat := 255
 def MAX_SCOPES : Nat := 32
 def MAX_PAYLOAD_BYTES : Nat := 4096
-def MAX_SIGNATURE_BYTES : Nat := 2560
+def MAX_SIGNATURE_BYTES : Nat := 29792
+def MAX_PUBLIC_KEY_BYTES : Nat := 2592
+def MAX_SECRET_KEY_BYTES : Nat := 2369
 
-def HMAC_MIN_KEY_LEN : Nat := 32
-def HMAC_SHA256_SIG_LEN : Nat := 32
+def HMAC_MIN_KEY_LEN : Nat := 48
+def HMAC_MAX_KEY_LEN : Nat := 128
 def KEY_HASH_LEN : Nat := 8
-def ED25519_SEED_LEN : Nat := 32
-def ED25519_PUBLIC_KEY_LEN : Nat := 32
-def ED25519_SIG_LEN : Nat := 64
-def MLDSA44_SEED_LEN : Nat := 32
-def MLDSA44_PUBLIC_KEY_LEN : Nat := 1312
-def MLDSA44_SIG_LEN : Nat := 2420
 
 /-! ## Enums -/
 
@@ -39,45 +35,93 @@ def Version.toByte : Version → UInt8
   | .v0 => 0
 
 inductive Algorithm where
-  | hmacSha256
-  | ed25519
   | mlDsa44
+  | mlDsa65
+  | mlDsa87
+  | hmacSha384
+  | slhDsaSha2_128s
+  | slhDsaSha2_192s
+  | slhDsaSha2_256s
+  | fnDsa512
+  | fnDsa1024
   deriving DecidableEq, Repr
 
 namespace Algorithm
 
-def fromByte (b : UInt8) : Option Algorithm :=
-  if b == 1 then some .hmacSha256
-  else if b == 2 then some .ed25519
-  else if b == 3 then some .mlDsa44
-  else none
+def all : List Algorithm :=
+  [.mlDsa44, .mlDsa65, .mlDsa87, .hmacSha384, .slhDsaSha2_128s, .slhDsaSha2_192s, .slhDsaSha2_256s,
+    .fnDsa512, .fnDsa1024]
 
+/-- Models `algorithm as u8`. -/
 def toByte : Algorithm → UInt8
-  | .hmacSha256 => 1
-  | .ed25519 => 2
   | .mlDsa44 => 3
+  | .mlDsa65 => 4
+  | .mlDsa87 => 5
+  | .hmacSha384 => 6
+  | .slhDsaSha2_128s => 7
+  | .slhDsaSha2_192s => 8
+  | .slhDsaSha2_256s => 9
+  | .fnDsa512 => 10
+  | .fnDsa1024 => 11
 
-def isSymmetric (a : Algorithm) : Bool := a == .hmacSha256
+/-- Models `Algorithm::try_from(u8)`. -/
+def fromByte (b : UInt8) : Option Algorithm :=
+  all.find? (·.toByte == b)
+
+def secretKeyLen : Algorithm → Nat
+  | .mlDsa44 | .mlDsa65 | .mlDsa87 => 32
+  | .hmacSha384 => HMAC_MIN_KEY_LEN
+  | .slhDsaSha2_128s => 64
+  | .slhDsaSha2_192s => 96
+  | .slhDsaSha2_256s => 128
+  | .fnDsa512 => 1345
+  | .fnDsa1024 => 2369
 
 def publicKeyLen : Algorithm → Option Nat
-  | .hmacSha256 => none
-  | .ed25519 => some ED25519_PUBLIC_KEY_LEN
-  | .mlDsa44 => some MLDSA44_PUBLIC_KEY_LEN
+  | .mlDsa44 => some 1312
+  | .mlDsa65 => some 1952
+  | .mlDsa87 => some 2592
+  | .hmacSha384 => none
+  | .slhDsaSha2_128s => some 32
+  | .slhDsaSha2_192s => some 48
+  | .slhDsaSha2_256s => some 64
+  | .fnDsa512 => some 897
+  | .fnDsa1024 => some 1793
 
 def signatureLen : Algorithm → Nat
-  | .hmacSha256 => HMAC_SHA256_SIG_LEN
-  | .ed25519 => ED25519_SIG_LEN
-  | .mlDsa44 => MLDSA44_SIG_LEN
+  | .mlDsa44 => 2420
+  | .mlDsa65 => 3309
+  | .mlDsa87 => 4627
+  | .hmacSha384 => 48
+  | .slhDsaSha2_128s => 7856
+  | .slhDsaSha2_192s => 16224
+  | .slhDsaSha2_256s => 29792
+  | .fnDsa512 => 666
+  | .fnDsa1024 => 1280
+
+def isSymmetric (a : Algorithm) : Bool := a.publicKeyLen.isNone
+
+theorem isSymmetric_iff {a : Algorithm} : a.isSymmetric = true ↔ a = .hmacSha384 := by
+  cases a <;> decide
+
+theorem secretKeyLen_bounds (a : Algorithm) :
+    0 < a.secretKeyLen ∧ a.secretKeyLen ≤ MAX_SECRET_KEY_BYTES := by
+  cases a <;> decide
+
+theorem publicKeyLen_bounds {a : Algorithm} {n : Nat} (h : a.publicKeyLen = some n) :
+    0 < n ∧ n ≤ MAX_PUBLIC_KEY_BYTES := by
+  cases a <;> cases h <;> decide
+
+theorem signatureLen_bounds (a : Algorithm) :
+    0 < a.signatureLen ∧ a.signatureLen ≤ MAX_SIGNATURE_BYTES := by
+  cases a <;> decide
 
 @[simp] theorem fromByte_toByte (a : Algorithm) : fromByte a.toByte = some a := by
   cases a <;> rfl
 
 theorem toByte_of_fromByte {b : UInt8} {a : Algorithm} (h : fromByte b = some a) :
     a.toByte = b := by
-  unfold fromByte at h
-  repeat' split at h
-  all_goals simp_all [toByte]
-  all_goals subst h; rfl
+  simpa using List.find?_some h
 
 @[simp] theorem toByte_ne_zero (a : Algorithm) : a.toByte ≠ 0 := by
   cases a <;> decide
@@ -171,24 +215,10 @@ def sortScopes (scopes : List Bytes) : List Bytes :=
 def checkClaimLen (value : Bytes) : Result Unit :=
   if value.length > MAX_CLAIM_BYTES_LEN then .error .malformedEncoding else .ok ()
 
-/-- Models `<[String]>::is_sorted`. -/
-def isSorted : List Bytes → Bool
-  | a :: b :: rest => decide (a ≤ b) && isSorted (b :: rest)
-  | _ => true
-
-/-- The loop of `adjacent_duplicate`. -/
-def adjacentDuplicateLoop (previous : Option Bytes) : List Bytes → Option Bytes
+/-- Models `scopes.iter().find(|scope| !seen.insert(*scope))`. -/
+def firstDuplicate (seen : List Bytes) : List Bytes → Option Bytes
   | [] => none
-  | scope :: rest =>
-    if previous = some scope then some scope else adjacentDuplicateLoop (some scope) rest
-
-/-- Models `adjacent_duplicate`. -/
-def adjacentDuplicate (sorted : List Bytes) : Option Bytes :=
-  adjacentDuplicateLoop none sorted
-
-/-- Models `first_duplicate`. -/
-def firstDuplicate (scopes : List Bytes) : Option Bytes :=
-  if isSorted scopes then adjacentDuplicate scopes else adjacentDuplicate (sortScopes scopes)
+  | scope :: rest => if scope ∈ seen then some scope else firstDuplicate (scope :: seen) rest
 
 /-- The per-scope loop in `Claims::validate`. -/
 def validateScopeEntries : List Bytes → Result Unit
@@ -210,7 +240,7 @@ def Claims.validate (c : Claims) : Result Unit := do
   if c.scopes.length > MAX_SCOPES then
     throw .malformedEncoding
   validateScopeEntries c.scopes
-  if (firstDuplicate c.scopes).isSome then
+  if (firstDuplicate [] c.scopes).isSome then
     throw .malformedEncoding
   pure ()
 
@@ -263,9 +293,6 @@ def validUtf8 : Bytes → Bool
 theorem bytes_le_trans {a b c : Bytes} (h1 : a ≤ b) (h2 : b ≤ c) : a ≤ c :=
   List.le_trans h1 h2
 
-theorem bytes_le_antisymm {a b : Bytes} (h1 : a ≤ b) (h2 : b ≤ a) : a = b :=
-  List.le_antisymm h1 h2
-
 theorem bytes_le_of_lt {a b : Bytes} (h : a < b) : a ≤ b :=
   List.le_of_lt h
 
@@ -308,61 +335,24 @@ theorem sortScopes_pairwise_lt {l : List Bytes} (hn : l.Nodup) :
     (sortScopes l).Pairwise (· < ·) :=
   pairwise_lt_of_le_of_nodup (sortScopes_pairwise_le l) ((sortScopes_perm l).nodup_iff.mpr hn)
 
-theorem isSorted_iff (l : List Bytes) : isSorted l = true ↔ l.Pairwise (· ≤ ·) := by
-  induction l with
-  | nil => simp [isSorted]
-  | cons a l ih =>
-    cases l with
-    | nil => simp [isSorted]
-    | cons b rest =>
-      simp only [isSorted, Bool.and_eq_true, decide_eq_true_eq, ih]
+theorem firstDuplicate_eq_none (seen l : List Bytes) :
+    firstDuplicate seen l = none ↔ l.Nodup ∧ ∀ s ∈ l, s ∉ seen := by
+  induction l generalizing seen with
+  | nil => simp [firstDuplicate]
+  | cons a rest ih =>
+    by_cases h : a ∈ seen
+    · simp [firstDuplicate, h]
+    · simp only [firstDuplicate, h, ite_false, ih, List.nodup_cons, List.mem_cons, not_or,
+        forall_eq_or_imp, not_false_eq_true, true_and]
       constructor
-      · rintro ⟨hab, hrest⟩
-        refine List.pairwise_cons.mpr ⟨?_, hrest⟩
-        intro x hx
-        rcases List.mem_cons.mp hx with rfl | hx
-        · exact hab
-        · exact bytes_le_trans hab ((List.pairwise_cons.mp hrest).1 x hx)
-      · intro h
-        obtain ⟨h1, h2⟩ := List.pairwise_cons.mp h
-        exact ⟨h1 b (by simp), h2⟩
+      · rintro ⟨hn, hs⟩
+        exact ⟨⟨fun ha => (hs a ha).1 rfl, hn⟩, fun s hm => (hs s hm).2⟩
+      · rintro ⟨⟨ha, hn⟩, hs⟩
+        exact ⟨hn, fun s hm => ⟨fun he => ha (he ▸ hm), hs s hm⟩⟩
 
-theorem adjacentDuplicateLoop_some (p : Bytes) (l : List Bytes)
-    (h : (p :: l).Pairwise (· ≤ ·)) :
-    adjacentDuplicateLoop (some p) l = none ↔ (p :: l).Nodup := by
-  induction l generalizing p with
-  | nil => simp [adjacentDuplicateLoop]
-  | cons s rest ih =>
-    obtain ⟨hp, hrest⟩ := List.pairwise_cons.mp h
-    simp only [adjacentDuplicateLoop, Option.some.injEq]
-    by_cases hps : p = s
-    · simp [hps]
-    · rw [if_neg hps, ih s hrest]
-      constructor
-      · intro hn
-        refine List.nodup_cons.mpr ⟨?_, hn⟩
-        intro hmem
-        rcases List.mem_cons.mp hmem with h | hmem
-        · exact hps h
-        · exact hps (bytes_le_antisymm (hp s (by simp)) ((List.pairwise_cons.mp hrest).1 p hmem))
-      · intro hn
-        exact (List.nodup_cons.mp hn).2
-
-theorem adjacentDuplicate_eq_none_iff {l : List Bytes} (h : l.Pairwise (· ≤ ·)) :
-    adjacentDuplicate l = none ↔ l.Nodup := by
-  cases l with
-  | nil => simp [adjacentDuplicate, adjacentDuplicateLoop]
-  | cons a rest =>
-    simpa [adjacentDuplicate, adjacentDuplicateLoop] using adjacentDuplicateLoop_some a rest h
-
-/-- `first_duplicate` finds nothing exactly when the scopes are distinct. -/
-theorem firstDuplicate_eq_none_iff (l : List Bytes) : firstDuplicate l = none ↔ l.Nodup := by
-  unfold firstDuplicate
-  split
-  · rename_i h
-    exact adjacentDuplicate_eq_none_iff ((isSorted_iff l).mp h)
-  · rw [adjacentDuplicate_eq_none_iff (sortScopes_pairwise_le l)]
-    exact (sortScopes_perm l).nodup_iff
+/-- The search finds nothing exactly when the scopes are distinct. -/
+theorem firstDuplicate_eq_none_iff (l : List Bytes) : firstDuplicate [] l = none ↔ l.Nodup := by
+  simp [firstDuplicate_eq_none]
 
 /-! ## What `validate` checks -/
 
@@ -392,12 +382,12 @@ theorem validateScopeEntries_eq_ok_iff (l : List Bytes) :
     · simp [hs, checkClaimLen_eq_ok_iff, ih]
 
 theorem Claims.validate_eq_ok_iff (c : Claims) : c.validate = .ok () ↔ c.Valid := by
-  have hdup : (firstDuplicate c.scopes).isSome = true ↔ ¬ c.scopes.Nodup := by
+  have hdup : (firstDuplicate [] c.scopes).isSome = true ↔ ¬ c.scopes.Nodup := by
     rw [← firstDuplicate_eq_none_iff]
-    cases firstDuplicate c.scopes <;> simp
+    cases firstDuplicate [] c.scopes <;> simp
   simp only [Claims.validate, throw_eq_error, error_bind, pure_eq_ok, bind_unit_eq_ok,
     ite_error_eq_ok, checkClaimLen_eq_ok_iff, validateScopeEntries_eq_ok_iff, hdup, beq_iff_eq,
-    Decidable.not_not, and_true, true_and, gt_iff_lt, UInt64.not_lt, Nat.not_lt]
+    Decidable.not_not, and_true, gt_iff_lt, UInt64.not_lt, Nat.not_lt]
   constructor
   · rintro ⟨h1, h2, h3, h4, h5, h6, h7⟩
     exact ⟨h1, h2, h3, h4, h5, h6, h7⟩
