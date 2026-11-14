@@ -59,7 +59,7 @@ def finishVerification (token : SignedToken) (now : UInt64) : Result VerifiedTok
 def verifyToken (algorithm : Algorithm) (keyMaterial tokenBytes : Bytes) (now : UInt64) :
     Result VerifiedToken := do
   let (token, signingInput) ← parseEnvelope C tokenBytes algorithm keyMaterial
-  if !schemeVerify C algorithm keyMaterial signingInput token.signature then
+  if !schemeVerify C algorithm keyMaterial CONTEXT signingInput token.signature then
     throw .verificationFailed
   finishVerification token now
 

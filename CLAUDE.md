@@ -65,7 +65,7 @@ message VerifyingKey {
 
 7. Canonical encoding rules: fields in ascending order, minimal varints, default values (0/empty) omitted, no unknown or duplicate fields. Repeated fields (scope) appear consecutively, sorted lexicographically, no duplicates. Decoders reject non-canonical input.
 8. The version field is reserved and always 0. It will not appear on the wire until we finalize the format.
-9. The signature is computed over the canonical encoding of envelope fields 1-5. Because the encoding is canonical, the signed bytes are exactly the token bytes minus the trailing signature field. This binds the algorithm and key identifier into the signature, preventing algorithm-confusion and key-substitution attacks.
+9. The signature is computed over the canonical encoding of envelope fields 1-5. Because the encoding is canonical, the signed bytes are exactly the token bytes minus the trailing signature field. This binds the algorithm and key identifier into the signature, preventing algorithm-confusion and key-substitution attacks. Signature schemes sign these bytes under the context string `protoken`.
 10. Verification order: parse envelope (structure and size checks) → check algorithm matches the key → constant-time compare key identifier → verify signature → parse payload as Claims → `Claims::validate()` → check temporal claims. Payload bytes are not interpreted before the signature verifies.
 
 ## Decisions
@@ -81,8 +81,8 @@ Canonical proto3 wire encoding with a small custom encoder/decoder (`src/proto3.
 See [notes/research-protobuf-determinism.md](notes/research-protobuf-determinism.md).
 
 ### Post-Quantum Signatures
-Ed25519 was removed in November 2026. All schemes use pure mode and an empty context. See [notes/research-pq-signatures.md](notes/research-pq-signatures.md).
-- **ML-DSA** is the default (`ml-dsa-44`). Keys are 32-byte seeds. Signing is deterministic. Public keys with `t1 = 0` are rejected because anyone can sign for them.
+Ed25519 was removed in November 2026. All schemes use pure mode and the context string `protoken`. `Scheme::sign` and `verify` take the context as an argument so that the NIST vectors can run through them. See [notes/research-pq-signatures.md](notes/research-pq-signatures.md).
+- **ML-DSA** is the default (`ml-dsa-44`). Keys are 32-byte seeds. Signing is deterministic and uses the crate's hidden `expanded_key()`: the documented way to sign with a context copies the key to the stack and pushes ML-DSA-87 past 512 KB. Public keys with `t1 = 0` are rejected because anyone can sign for them.
 - **SLH-DSA** uses only the SHA2 "s" sets: tokens are sent and verified more often than signed, so size and verify time matter most. Keys use the FIPS 205 encoding (`SK.seed || SK.prf || PK.seed || PK.root`); loading recomputes the root with the crate's hidden `slh_keygen_internal`. Signing is deterministic and takes about a second, so the dev profile uses `opt-level = 2` and tests, fuzzers, and generators use these keys sparingly.
 - **FN-DSA** is randomized and stores the encoded key, not a seed, as NIST plans to require. Loading checks the embedded public key hash and must never sign: the sampler can run without bound on a crafted key. See [notes/research-fn-dsa.md](notes/research-fn-dsa.md).
 
@@ -129,7 +129,7 @@ Anything the library produces must be accepted by its own decoders. `sign_token`
 The 8-byte key hash (SHA-256[0..8]) gives ~2^32 collision resistance at the birthday bound. It is a key *identifier* for key selection, not a security binding. Security relies on full signature verification. Documented in the code and README.
 
 ### Key Reuse
-Keys used with protoken should not sign other formats. The signing input has no domain-separation prefix; the envelope structure itself (proto3 fields 1-5) is the only framing.
+Keys used with protoken should not sign other formats. The `protoken` context string separates ML-DSA, SLH-DSA, and FN-DSA token signatures from pure or pre-hash signatures under any other context, but not from a signer that accepts a raw internal message or `mu`. HMAC has no context, and a message prefix would not help against another protocol that MACs attacker-chosen bytes, so the envelope (proto3 fields 1-5) is its only framing.
 
 ## Implementation Status
 

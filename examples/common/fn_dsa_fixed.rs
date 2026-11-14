@@ -51,12 +51,12 @@ pub fn secret_key(algorithm: Algorithm, seed: &[u8]) -> Vec<u8> {
     secret_key
 }
 
-pub fn sign(secret_key: &[u8], message: &[u8]) -> Option<Vec<u8>> {
+pub fn sign(secret_key: &[u8], context: &[u8], message: &[u8]) -> Option<Vec<u8>> {
     let mut key = fn_dsa::SigningKeyStandard::decode(secret_key)?;
     let mut signature = vec![0; fn_dsa::signature_size(key.get_logn())];
     key.sign(
         &mut FixedRng::new(b""),
-        &fn_dsa::DOMAIN_NONE,
+        &fn_dsa::DomainContext(context),
         &fn_dsa::HASH_ID_RAW,
         message,
         &mut signature,

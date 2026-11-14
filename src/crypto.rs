@@ -5,11 +5,11 @@ use std::fmt::Display;
 use std::marker::PhantomData;
 
 use fn_dsa::{
-    KeyPairGenerator, KeyPairGenerator1024, KeyPairGenerator512, SigningKey1024, SigningKey512,
-    VerifyingKey1024, VerifyingKey512, DOMAIN_NONE, HASH_ID_RAW,
+    DomainContext, KeyPairGenerator, KeyPairGenerator1024, KeyPairGenerator512, SigningKey1024,
+    SigningKey512, VerifyingKey1024, VerifyingKey512, HASH_ID_RAW,
 };
 use hmac::{Hmac, Mac as _};
-use ml_dsa::{KeyInit as _, MlDsa44, MlDsa65, MlDsa87, MlDsaParams, Signer as _, Verifier as _};
+use ml_dsa::{KeyInit as _, MlDsa44, MlDsa65, MlDsa87, MlDsaParams};
 use sha2::Sha384;
 use slh_dsa::{ParameterSet, Sha2_128s, Sha2_192s, Sha2_256s};
 use zeroize::Zeroizing;
@@ -17,8 +17,12 @@ use zeroize::Zeroizing;
 use crate::error::ProtokenError;
 use crate::types::Algorithm;
 
+/// The context string of every token signature. A signature made under any
+/// other context, including the empty default, does not verify as a token.
+pub(crate) const CONTEXT: &[u8] = b"protoken";
+
 /// A MAC or signature scheme over raw key bytes. Callers check key lengths
-/// first. Signatures use an empty context string.
+/// first. `context` is at most 255 bytes; HMAC has no such input and ignores it.
 pub(crate) trait Scheme {
     fn generate_secret_key(&self, len: usize) -> Result<Zeroizing<Vec<u8>>, ProtokenError> {
         random_bytes(len)
@@ -32,10 +36,15 @@ pub(crate) trait Scheme {
         true
     }
 
-    fn sign(&self, secret_key: &[u8], message: &[u8]) -> Result<Vec<u8>, ProtokenError>;
+    fn sign(
+        &self,
+        secret_key: &[u8],
+        context: &[u8],
+        message: &[u8],
+    ) -> Result<Vec<u8>, ProtokenError>;
 
     /// `key` is the public key, or the secret key for symmetric schemes.
-    fn verify(&self, key: &[u8], message: &[u8], signature: &[u8]) -> bool;
+    fn verify(&self, key: &[u8], context: &[u8], message: &[u8], signature: &[u8]) -> bool;
 }
 
 pub(crate) fn scheme(algorithm: Algorithm) -> &'static dyn Scheme {
@@ -84,12 +93,17 @@ impl Scheme for HmacSha384 {
         Ok(Vec::new())
     }
 
-    fn sign(&self, secret_key: &[u8], message: &[u8]) -> Result<Vec<u8>, ProtokenError> {
+    fn sign(
+        &self,
+        secret_key: &[u8],
+        _context: &[u8],
+        message: &[u8],
+    ) -> Result<Vec<u8>, ProtokenError> {
         let tag = Self::mac(secret_key, message)?.finalize();
         Ok(tag.into_bytes().to_vec())
     }
 
-    fn verify(&self, key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    fn verify(&self, key: &[u8], _context: &[u8], message: &[u8], signature: &[u8]) -> bool {
         Self::mac(key, message).is_ok_and(|mac| mac.verify_slice(signature).is_ok())
     }
 }
@@ -109,17 +123,26 @@ impl<P: MlDsaParams> Scheme for MlDsa<P> {
         public_key.iter().skip(32).any(|&byte| byte != 0)
     }
 
-    fn sign(&self, secret_key: &[u8], message: &[u8]) -> Result<Vec<u8>, ProtokenError> {
+    fn sign(
+        &self,
+        secret_key: &[u8],
+        context: &[u8],
+        message: &[u8],
+    ) -> Result<Vec<u8>, ProtokenError> {
         let key = ml_dsa::SigningKey::<P>::new_from_slice(secret_key).map_err(invalid_key)?;
-        let signature = key.try_sign(message).map_err(signing_failed)?;
+        // The documented `ExpandedSigningKey::from_seed` copies the key to the stack.
+        let signature = key
+            .expanded_key()
+            .sign_deterministic(message, context)
+            .map_err(signing_failed)?;
         Ok(signature.encode().to_vec())
     }
 
-    fn verify(&self, key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    fn verify(&self, key: &[u8], context: &[u8], message: &[u8], signature: &[u8]) -> bool {
         // Decode the signature first: decoding the key expands it, which costs more.
         ml_dsa::Signature::<P>::try_from(signature).is_ok_and(|signature| {
             ml_dsa::VerifyingKey::<P>::new_from_slice(key)
-                .is_ok_and(|key| key.verify(message, &signature).is_ok())
+                .is_ok_and(|key| key.verify_with_context(message, context, &signature))
         })
     }
 }
@@ -159,16 +182,25 @@ impl<P: ParameterSet> Scheme for SlhDsa<P> {
         Ok(public_key)
     }
 
-    fn sign(&self, secret_key: &[u8], message: &[u8]) -> Result<Vec<u8>, ProtokenError> {
+    fn sign(
+        &self,
+        secret_key: &[u8],
+        context: &[u8],
+        message: &[u8],
+    ) -> Result<Vec<u8>, ProtokenError> {
         let key = slh_dsa::SigningKey::<P>::try_from(secret_key).map_err(invalid_key)?;
-        let signature = key.try_sign(message).map_err(signing_failed)?;
+        let signature = key
+            .try_sign_with_context(message, context, None)
+            .map_err(signing_failed)?;
         Ok(signature.to_vec())
     }
 
-    fn verify(&self, key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    fn verify(&self, key: &[u8], context: &[u8], message: &[u8], signature: &[u8]) -> bool {
         slh_dsa::Signature::<P>::try_from(signature).is_ok_and(|signature| {
-            slh_dsa::VerifyingKey::<P>::try_from(key)
-                .is_ok_and(|key| key.verify(message, &signature).is_ok())
+            slh_dsa::VerifyingKey::<P>::try_from(key).is_ok_and(|key| {
+                key.try_verify_with_context(message, context, &signature)
+                    .is_ok()
+            })
         })
     }
 }
@@ -221,17 +253,24 @@ where
         V::decode(public_key).is_some()
     }
 
-    fn sign(&self, secret_key: &[u8], message: &[u8]) -> Result<Vec<u8>, ProtokenError> {
+    fn sign(
+        &self,
+        secret_key: &[u8],
+        context: &[u8],
+        message: &[u8],
+    ) -> Result<Vec<u8>, ProtokenError> {
+        let context = DomainContext(context);
         let mut signature = vec![0; fn_dsa::signature_size(LOGN)];
         with_fn_dsa_key(secret_key, |key: &mut S| {
-            with_os_rng(|rng| key.sign(rng, &DOMAIN_NONE, &HASH_ID_RAW, message, &mut signature))
+            with_os_rng(|rng| key.sign(rng, &context, &HASH_ID_RAW, message, &mut signature))
         })??
         .ok_or_else(|| signing_failed("invalid FN-DSA key"))?;
         Ok(signature)
     }
 
-    fn verify(&self, key: &[u8], message: &[u8], signature: &[u8]) -> bool {
-        V::decode(key).is_some_and(|key| key.verify(signature, &DOMAIN_NONE, &HASH_ID_RAW, message))
+    fn verify(&self, key: &[u8], context: &[u8], message: &[u8], signature: &[u8]) -> bool {
+        let context = DomainContext(context);
+        V::decode(key).is_some_and(|key| key.verify(signature, &context, &HASH_ID_RAW, message))
     }
 }
 
@@ -288,6 +327,8 @@ mod tests {
         algorithm: Algorithm,
         secret_key: Option<String>,
         public_key: String,
+        #[serde(default)]
+        context: String,
         message: Option<String>,
         signature: Option<String>,
     }
@@ -303,16 +344,24 @@ mod tests {
             let scheme = scheme(v.algorithm);
             let secret_key = v.secret_key.map(decode);
             let public_key = decode(v.public_key);
+            let context = decode(v.context);
             let signed = v.message.map(decode).zip(v.signature.map(decode));
 
             if let Some(secret_key) = &secret_key {
                 assert_eq!(scheme.public_key(secret_key).unwrap(), public_key);
             }
             if let Some((message, signature)) = &signed {
-                assert!(scheme.verify(&public_key, message, signature), "{}", v.name);
+                assert!(
+                    scheme.verify(&public_key, &context, message, signature),
+                    "{}",
+                    v.name
+                );
             }
             if let (Some(secret_key), Some((message, signature))) = (secret_key, signed) {
-                assert_eq!(scheme.sign(&secret_key, &message).unwrap(), signature);
+                assert_eq!(
+                    scheme.sign(&secret_key, &context, &message).unwrap(),
+                    signature
+                );
             }
         }
     }
@@ -321,7 +370,7 @@ mod tests {
     fn test_hmac_sha384_rfc4231_case_2() {
         let scheme = scheme(Algorithm::HmacSha384);
         let tag = scheme
-            .sign(b"Jefe", b"what do ya want for nothing?")
+            .sign(b"Jefe", CONTEXT, b"what do ya want for nothing?")
             .unwrap();
         assert_eq!(
             hex::encode(tag),
@@ -333,11 +382,11 @@ mod tests {
     #[test]
     fn test_fn_dsa_rejects_keys_of_the_other_degree() {
         let small = crate::keys::tests::fixed_key(Algorithm::FnDsa512);
-        let signature = scheme(small.algorithm()).sign(small.secret_key(), b"m");
+        let signature = scheme(small.algorithm()).sign(small.secret_key(), CONTEXT, b"m");
         let large = scheme(Algorithm::FnDsa1024);
-        assert!(large.sign(small.secret_key(), b"m").is_err());
+        assert!(large.sign(small.secret_key(), CONTEXT, b"m").is_err());
         assert!(!large.is_valid_public_key(small.public_key()));
-        assert!(!large.verify(small.public_key(), b"m", &signature.unwrap()));
+        assert!(!large.verify(small.public_key(), CONTEXT, b"m", &signature.unwrap()));
     }
 
     #[test]
@@ -368,10 +417,15 @@ mod tests {
             for len in [0, 1, algorithm.secret_key_len() + 1] {
                 let bytes = vec![0; len];
                 assert!(scheme.public_key(&bytes).is_err());
-                assert!(scheme.sign(&bytes, b"message").is_err());
-                assert!(!scheme.verify(&bytes, b"message", &vec![0; algorithm.signature_len()]));
+                assert!(scheme.sign(&bytes, CONTEXT, b"message").is_err());
+                assert!(!scheme.verify(
+                    &bytes,
+                    CONTEXT,
+                    b"message",
+                    &vec![0; algorithm.signature_len()]
+                ));
                 let key = vec![0; algorithm.public_key_len().unwrap()];
-                assert!(!scheme.verify(&key, b"message", &bytes));
+                assert!(!scheme.verify(&key, CONTEXT, b"message", &bytes));
             }
         }
     }

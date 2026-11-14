@@ -414,7 +414,7 @@ HMAC token, and acceptance means the signature scheme's own check passed. -/
 theorem VerifyingKey.verify_asymmetric {k : VerifyingKey} (hk : k.Valid C) {tb : Bytes}
     {now : UInt64} {vt : VerifiedToken} (h : k.verify C tb now = .ok vt) :
     vt.algorithm ≠ .hmacSha384 ∧ ∃ sig, tb = vt.signingInput ++ encodeBytes 6 sig ∧
-      C.verify k.algorithm k.publicKey vt.signingInput sig = true := by
+      C.verify k.algorithm k.publicKey CONTEXT vt.signingInput sig = true := by
   have hacc := VerifyingKey.verify_sound h
   have hasym := hk.asymmetric
   obtain ⟨sig, _, htb, hsig⟩ := hacc.signed

@@ -210,7 +210,8 @@ canonical, the signed bytes are exactly the token bytes minus the signature
 field. Binding the algorithm and key identifier into the signature prevents
 algorithm-confusion and key-substitution attacks.
 
-All signatures use the pure (no pre-hash) mode with an empty context string.
+ML-DSA, SLH-DSA, and FN-DSA use the pure (no pre-hash) mode with the context
+string `protoken`, so a signature made under another context does not verify as a token.
 ML-DSA and SLH-DSA use their deterministic variants. FN-DSA is always randomized.
 
 The 8-byte key hash is `SHA-256(key_material)[0..8]`. It is a key selection
@@ -218,7 +219,9 @@ identifier, not a security binding: security rests on full signature
 verification. Verifiers additionally compare the key identifier against their
 own key in constant time before verifying the signature.
 
-Keys used with protoken should not be reused to sign other formats.
+Keys used with protoken should not be reused to sign other formats. The context
+string does not help against a signer that accepts a raw internal message or `mu`
+value, and HMAC has no context string.
 
 Verification checks the signature and the time window (`not_before <= now <=
 expires_at`). The caller must check `audience` and `scope`.

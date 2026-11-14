@@ -3,7 +3,7 @@
 use sha2::digest::consts::U8;
 use sha2::{Digest as _, Sha256};
 
-use crate::crypto::scheme;
+use crate::crypto::{scheme, CONTEXT};
 use crate::error::ProtokenError;
 use crate::serialize::{
     append_signature, check_claims_size, serialize_claims, serialize_signing_input,
@@ -32,7 +32,7 @@ pub(crate) fn sign_token(
     // Valid claims can exceed the payload size that verifiers accept.
     check_claims_size(&payload)?;
     let signing_input = serialize_signing_input(Version::V0, algorithm, key_id, &payload);
-    let signature = scheme(algorithm).sign(secret_key, &signing_input)?;
+    let signature = scheme(algorithm).sign(secret_key, CONTEXT, &signing_input)?;
     Ok(append_signature(signing_input, &signature))
 }
 

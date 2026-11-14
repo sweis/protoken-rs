@@ -80,7 +80,7 @@ fn vector(algorithm: Algorithm, secret_key: Vec<u8>) -> serde_json::Value {
     let token = if FN_DSA.contains(&algorithm) {
         let payload = serialize_claims(&claims);
         let input = serialize_signing_input(Version::V0, algorithm, &key_hash, &payload);
-        let signature = fn_dsa_fixed::sign(key.secret_key(), &input).unwrap();
+        let signature = fn_dsa_fixed::sign(key.secret_key(), b"protoken", &input).unwrap();
         append_signature(input, &signature)
     } else {
         key.sign(&claims).unwrap()

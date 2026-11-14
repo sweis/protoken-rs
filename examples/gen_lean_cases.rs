@@ -19,7 +19,7 @@ use std::io::{BufWriter, Write};
 use base64::Engine as _;
 use fn_dsa::{SigningKey as _, VerifyingKey as _};
 use hmac::{Hmac, Mac as _};
-use ml_dsa::{KeyInit as _, MlDsa44, MlDsa65, MlDsa87, MlDsaParams, Signer as _, Verifier as _};
+use ml_dsa::{KeyInit as _, MlDsa44, MlDsa65, MlDsa87, MlDsaParams};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256, Sha384};
 use slh_dsa::{ParameterSet, Sha2_128s, Sha2_192s, Sha2_256s};
@@ -240,6 +240,9 @@ fn key_algorithm(fields: &[Field]) -> Option<Algorithm> {
 
 // --- Direct calls to the primitives ---
 
+/// Also spelled out in `lean/Conformance/Main.lean`.
+const CONTEXT: &[u8] = b"protoken";
+
 /// Calls `$ml_dsa::<P>`, `$slh_dsa::<P>`, or `$fn_dsa(logn, ..)` for the algorithm's parameter set.
 macro_rules! dispatch {
     ($algorithm:expr, $hmac:expr, $ml_dsa:ident, $slh_dsa:ident, $fn_dsa:ident, $($arg:expr),*) => {
@@ -279,21 +282,21 @@ fn raw_public_key(algorithm: Algorithm, secret: &[u8]) -> Option<Vec<u8>> {
     dispatch!(algorithm, None, ml_dsa, slh_dsa, fn_dsa, secret)
 }
 
-fn raw_sign(algorithm: Algorithm, secret: &[u8], msg: &[u8]) -> Vec<u8> {
+fn raw_sign(algorithm: Algorithm, secret: &[u8], ctx: &[u8], msg: &[u8]) -> Vec<u8> {
     fn hmac(secret: &[u8], msg: &[u8]) -> Vec<u8> {
         let mac = Hmac::<Sha384>::new_from_slice(secret).unwrap();
         mac.chain_update(msg).finalize().into_bytes().to_vec()
     }
-    fn ml_dsa<P: MlDsaParams>(secret: &[u8], msg: &[u8]) -> Vec<u8> {
-        let key = ml_dsa::SigningKey::<P>::new_from_slice(secret).unwrap();
-        key.sign(msg).encode().to_vec()
+    fn ml_dsa<P: MlDsaParams>(secret: &[u8], ctx: &[u8], msg: &[u8]) -> Vec<u8> {
+        let key = ml_dsa::ExpandedSigningKey::<P>::from_seed(secret.try_into().unwrap());
+        key.sign_deterministic(msg, ctx).unwrap().encode().to_vec()
     }
-    fn slh_dsa<P: ParameterSet>(secret: &[u8], msg: &[u8]) -> Vec<u8> {
+    fn slh_dsa<P: ParameterSet>(secret: &[u8], ctx: &[u8], msg: &[u8]) -> Vec<u8> {
         let key = slh_dsa::SigningKey::<P>::try_from(secret).unwrap();
-        key.sign(msg).to_vec()
+        key.try_sign_with_context(msg, ctx, None).unwrap().to_vec()
     }
-    fn fn_dsa(_logn: u32, secret: &[u8], msg: &[u8]) -> Vec<u8> {
-        fn_dsa_fixed::sign(secret, msg).unwrap()
+    fn fn_dsa(_logn: u32, secret: &[u8], ctx: &[u8], msg: &[u8]) -> Vec<u8> {
+        fn_dsa_fixed::sign(secret, ctx, msg).unwrap()
     }
     dispatch!(
         algorithm,
@@ -302,6 +305,7 @@ fn raw_sign(algorithm: Algorithm, secret: &[u8], msg: &[u8]) -> Vec<u8> {
         slh_dsa,
         fn_dsa,
         secret,
+        ctx,
         msg
     )
 }
@@ -310,11 +314,13 @@ fn raw_sign(algorithm: Algorithm, secret: &[u8], msg: &[u8]) -> Vec<u8> {
 fn raw_verify(algorithm: Algorithm, pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
     fn ml_dsa<P: MlDsaParams>(pk: &[u8], msg: &[u8], sig: &[u8]) -> Option<()> {
         let key = ml_dsa::VerifyingKey::<P>::new_from_slice(pk).ok()?;
-        key.verify(msg, &sig.try_into().ok()?).ok()
+        key.verify_with_context(msg, CONTEXT, &sig.try_into().ok()?)
+            .then_some(())
     }
     fn slh_dsa<P: ParameterSet>(pk: &[u8], msg: &[u8], sig: &[u8]) -> Option<()> {
         let key = slh_dsa::VerifyingKey::<P>::try_from(pk).ok()?;
-        key.verify(msg, &sig.try_into().ok()?).ok()
+        key.try_verify_with_context(msg, CONTEXT, &sig.try_into().ok()?)
+            .ok()
     }
     dispatch!(
         algorithm,
@@ -331,8 +337,13 @@ fn raw_verify(algorithm: Algorithm, pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
 
 fn fn_dsa_verify(logn: u32, pk: &[u8], msg: &[u8], sig: &[u8]) -> Option<()> {
     let key = fn_dsa::VerifyingKeyStandard::decode(pk).filter(|_| u32::from(pk[0]) == logn)?;
-    key.verify(sig, &fn_dsa::DOMAIN_NONE, &fn_dsa::HASH_ID_RAW, msg)
-        .then_some(())
+    key.verify(
+        sig,
+        &fn_dsa::DomainContext(CONTEXT),
+        &fn_dsa::HASH_ID_RAW,
+        msg,
+    )
+    .then_some(())
 }
 
 fn raw_public_key_valid(algorithm: Algorithm, pk: &[u8]) -> bool {
@@ -709,7 +720,7 @@ impl<W: Write> Emitter<W> {
     }
 
     fn hmac(&mut self, key: &[u8], data: &[u8]) {
-        let tag = raw_sign(Algorithm::HmacSha384, key, data);
+        let tag = raw_sign(Algorithm::HmacSha384, key, CONTEXT, data);
         self.line(&["hmac", &hx(key), &hx(data), &hx(&tag)]);
     }
 
@@ -1125,7 +1136,7 @@ fn main() {
             e.sign(key, KeyIdType::KeyHash, claims);
             let payload = serialize_claims(claims);
             let input = serialize_signing_input(Version::V0, key.algorithm(), &key_id, &payload);
-            let signature = raw_sign(key.algorithm(), key.secret_key(), &input);
+            let signature = raw_sign(key.algorithm(), key.secret_key(), CONTEXT, &input);
             let token = append_signature(input, &signature);
             e.token(&token);
             e.verify(key.algorithm(), material, &token, 1);
@@ -1171,13 +1182,13 @@ fn main() {
             // Re-signed so that later mutations do not depend on FN-DSA's randomness.
             let (signed_len, _) = first_len(&walk(&token), 6).unwrap();
             let input = token[..signed_len].to_vec();
-            let signature = raw_sign(key.algorithm(), key.secret_key(), &input);
+            let signature = raw_sign(key.algorithm(), key.secret_key(), CONTEXT, &input);
             token_pool.push(append_signature(input, &signature));
         }
     }
 
-    // Correctly signed envelopes around payloads and identifiers that signing
-    // would refuse. Only the checks after the signature can reject these.
+    // Signed envelopes around payloads and identifiers that signing would
+    // refuse. A few have a damaged signature or the wrong context.
     for _ in 0..1500 {
         let key = pick_signer(rng, &keys);
         let material = verifier_material(key);
@@ -1201,7 +1212,12 @@ fn main() {
         };
         e.signing_input(key.algorithm(), &key_id, &payload);
         let input = serialize_signing_input(Version::V0, key.algorithm(), &key_id, &payload);
-        let mut signature = raw_sign(key.algorithm(), key.secret_key(), &input);
+        let ctx = if rng.chance(90) {
+            CONTEXT
+        } else {
+            rng.pick(&[&b""[..], b"protoke", b"protoken\0"])
+        };
+        let mut signature = raw_sign(key.algorithm(), key.secret_key(), ctx, &input);
         match rng.below(20) {
             0 => signature.truncate(signature.len() - 1),
             1 => signature.push(0),
