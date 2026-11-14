@@ -1,6 +1,6 @@
-# protoken-rs: Experimental Protobuf-based tokens in Rust
+# protoken-rs: Post-quantum tokens in Rust using protobufs
 
-Compact, signed binary tokens using canonical proto3 wire encoding.
+**Experimental**: Compact, signed binary tokens using canonical proto3 wire encoding and post-quantum algorithms.
 
 **Warning**: This code is experimental and not ready for production. It is mostly AI generated and has not had human review.
 
