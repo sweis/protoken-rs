@@ -22,6 +22,9 @@ security definitions for HMAC, ML-DSA, SLH-DSA, and FN-DSA.
 
 namespace Protoken
 
+/-- The context string of every token signature: `protoken` in ASCII. -/
+def CONTEXT : Bytes := [0x70, 0x72, 0x6f, 0x74, 0x6f, 0x6b, 0x65, 0x6e]
+
 structure Crypto where
   /-- `Sha256::digest` -/
   sha256 : Bytes → Bytes
@@ -36,16 +39,17 @@ structure Crypto where
   /-- `Scheme::is_valid_public_key` -/
   publicKeyValid : Algorithm → (pk : Bytes) → Bool
   /-- `Scheme::sign` of a signature scheme. `none` models a signing error. -/
-  sign : Algorithm → (secret msg : Bytes) → Option Bytes
-  sign_length : ∀ a secret msg sig, sign a secret msg = some sig → sig.length = a.signatureLen
+  sign : Algorithm → (secret ctx msg : Bytes) → Option Bytes
+  sign_length : ∀ a secret ctx msg sig, sign a secret ctx msg = some sig →
+    sig.length = a.signatureLen
   /-- `Scheme::verify` of a signature scheme. -/
-  verify : Algorithm → (pk msg sig : Bytes) → Bool
+  verify : Algorithm → (pk ctx msg sig : Bytes) → Bool
 
 /-- Honest keys are well formed and honest signatures verify. -/
 structure Crypto.Correct (C : Crypto) : Prop where
   publicKey_valid : ∀ a secret pk, C.publicKey a secret = some pk → C.publicKeyValid a pk = true
-  verify_sign : ∀ a secret pk msg sig, C.publicKey a secret = some pk →
-    C.sign a secret msg = some sig → C.verify a pk msg sig = true
+  verify_sign : ∀ a secret pk ctx msg sig, C.publicKey a secret = some pk →
+    C.sign a secret ctx msg = some sig → C.verify a pk ctx msg sig = true
 
 variable (C : Crypto)
 
@@ -58,22 +62,22 @@ def schemePublicKey (algorithm : Algorithm) (secretKey : Bytes) : Result Bytes :
     | some pk => .ok pk
     | none => .error .invalidKey
 
-/-- Models `scheme(algorithm).sign(secret_key, message)`. -/
-def schemeSign (algorithm : Algorithm) (secretKey message : Bytes) : Result Bytes :=
+/-- Models `scheme(algorithm).sign(secret_key, context, message)`. HMAC ignores the context. -/
+def schemeSign (algorithm : Algorithm) (secretKey context message : Bytes) : Result Bytes :=
   if algorithm.isSymmetric then
     .ok (C.hmacSha384 secretKey message)
   else
-    match C.sign algorithm secretKey message with
+    match C.sign algorithm secretKey context message with
     | some sig => .ok sig
     | none => .error .signingFailed
 
-/-- Models `scheme(algorithm).verify(key, message, signature)`. HMAC's `verify_slice`
-accepts exactly the tag that HMAC produces. -/
-def schemeVerify (algorithm : Algorithm) (key message signature : Bytes) : Bool :=
+/-- Models `scheme(algorithm).verify(key, context, message, signature)`. HMAC's
+`verify_slice` accepts exactly the tag that HMAC produces. -/
+def schemeVerify (algorithm : Algorithm) (key context message signature : Bytes) : Bool :=
   if algorithm.isSymmetric then
     C.hmacSha384 key message == signature
   else
-    C.verify algorithm key message signature
+    C.verify algorithm key context message signature
 
 variable {C}
 
@@ -85,8 +89,8 @@ theorem schemePublicKey_eq_ok_iff {a : Algorithm} {secret pk : Bytes} :
   · simp [eq_comm]
   · split <;> simp_all
 
-theorem schemeSign_length {a : Algorithm} {secret msg sig : Bytes}
-    (h : schemeSign C a secret msg = .ok sig) : sig.length = a.signatureLen := by
+theorem schemeSign_length {a : Algorithm} {secret ctx msg sig : Bytes}
+    (h : schemeSign C a secret ctx msg = .ok sig) : sig.length = a.signatureLen := by
   unfold schemeSign at h
   split at h
   · rename_i hsym
@@ -94,12 +98,13 @@ theorem schemeSign_length {a : Algorithm} {secret msg sig : Bytes}
     rw [Algorithm.isSymmetric_iff.mp hsym]
     exact C.hmacSha384_length _ _
   · split at h <;> cases h
-    exact C.sign_length _ _ _ _ (by assumption)
+    exact C.sign_length _ _ _ _ _ (by assumption)
 
 /-- A signature verifies under the secret (HMAC) or the derived public key. -/
-theorem schemeVerify_schemeSign (hc : C.Correct) {a : Algorithm} {secret pk msg sig : Bytes}
-    (hpk : schemePublicKey C a secret = .ok pk) (h : schemeSign C a secret msg = .ok sig) :
-    schemeVerify C a (if a.isSymmetric then secret else pk) msg sig = true := by
+theorem schemeVerify_schemeSign (hc : C.Correct) {a : Algorithm}
+    {secret pk ctx msg sig : Bytes} (hpk : schemePublicKey C a secret = .ok pk)
+    (h : schemeSign C a secret ctx msg = .ok sig) :
+    schemeVerify C a (if a.isSymmetric then secret else pk) ctx msg sig = true := by
   rw [schemePublicKey_eq_ok_iff] at hpk
   unfold schemeSign at h
   unfold schemeVerify
@@ -110,6 +115,6 @@ theorem schemeVerify_schemeSign (hc : C.Correct) {a : Algorithm} {secret pk msg 
   · rename_i hsym
     simp only [hsym, Bool.false_eq_true, ite_false] at hpk ⊢
     split at h <;> cases h
-    exact hc.verify_sign _ _ _ _ _ hpk (by assumption)
+    exact hc.verify_sign _ _ _ _ _ _ hpk (by assumption)
 
 end Protoken

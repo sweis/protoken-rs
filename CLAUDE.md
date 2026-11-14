@@ -19,17 +19,17 @@ Protokens are designed to be a simple, fast replacement for JWTs, ad hoc tokens,
 ### Algorithms
 | ID | Name | Standard | NIST level | Secret key | Public key | Signature |
 |---|---|---|---|---|---|---|
-| 3 | `ml-dsa-44` | FIPS 204 | 2 | 32 (seed) | 1,312 | 2,420 |
-| 4 | `ml-dsa-65` | FIPS 204 | 3 | 32 (seed) | 1,952 | 3,309 |
-| 5 | `ml-dsa-87` | FIPS 204 | 5 | 32 (seed) | 2,592 | 4,627 |
-| 6 | `hmac-sha384` | FIPS 198-1 | n/a | 48-128 | none | 48 |
-| 7 | `slh-dsa-sha2-128s` | FIPS 205 | 1 | 64 | 32 | 7,856 |
-| 8 | `slh-dsa-sha2-192s` | FIPS 205 | 3 | 96 | 48 | 16,224 |
-| 9 | `slh-dsa-sha2-256s` | FIPS 205 | 5 | 128 | 64 | 29,792 |
-| 10 | `fn-dsa-512` | FIPS 206 (unpublished) | 1 | 1,345 | 897 | 666 |
-| 11 | `fn-dsa-1024` | FIPS 206 (unpublished) | 5 | 2,369 | 1,793 | 1,280 |
+| 1 | `hmac-sha384` | FIPS 198-1 | n/a | 48-128 | none | 48 |
+| 2 | `ml-dsa-44` | FIPS 204 | 2 | 32 (seed) | 1,312 | 2,420 |
+| 3 | `ml-dsa-65` | FIPS 204 | 3 | 32 (seed) | 1,952 | 3,309 |
+| 4 | `ml-dsa-87` | FIPS 204 | 5 | 32 (seed) | 2,592 | 4,627 |
+| 5 | `slh-dsa-sha2-128s` | FIPS 205 | 1 | 64 | 32 | 7,856 |
+| 6 | `slh-dsa-sha2-192s` | FIPS 205 | 3 | 96 | 48 | 16,224 |
+| 7 | `slh-dsa-sha2-256s` | FIPS 205 | 5 | 128 | 64 | 29,792 |
+| 8 | `fn-dsa-512` | FIPS 206 (unpublished) | 1 | 1,345 | 897 | 666 |
+| 9 | `fn-dsa-1024` | FIPS 206 (unpublished) | 5 | 2,369 | 1,793 | 1,280 |
 
-Sizes are in bytes. IDs 1 (HMAC-SHA256) and 2 (Ed25519) are retired and must not be reused.
+Sizes are in bytes.
 
 ### Proto3 Schema
 ```proto
@@ -65,7 +65,7 @@ message VerifyingKey {
 
 7. Canonical encoding rules: fields in ascending order, minimal varints, default values (0/empty) omitted, no unknown or duplicate fields. Repeated fields (scope) appear consecutively, sorted lexicographically, no duplicates. Decoders reject non-canonical input.
 8. The version field is reserved and always 0. It will not appear on the wire until we finalize the format.
-9. The signature is computed over the canonical encoding of envelope fields 1-5. Because the encoding is canonical, the signed bytes are exactly the token bytes minus the trailing signature field. This binds the algorithm and key identifier into the signature, preventing algorithm-confusion and key-substitution attacks.
+9. The signature is computed over the canonical encoding of envelope fields 1-5. Because the encoding is canonical, the signed bytes are exactly the token bytes minus the trailing signature field. This binds the algorithm and key identifier into the signature, preventing algorithm-confusion and key-substitution attacks. Signature schemes sign these bytes under the context string `protoken`.
 10. Verification order: parse envelope (structure and size checks) → check algorithm matches the key → constant-time compare key identifier → verify signature → parse payload as Claims → `Claims::validate()` → check temporal claims. Payload bytes are not interpreted before the signature verifies.
 
 ## Decisions
@@ -74,15 +74,15 @@ message VerifyingKey {
 The envelope carries signing metadata (algorithm, key_id_type, key_id) and the payload as `bytes`. This is the traditional way to sign protobufs: the exact signed bytes travel on the wire, so no re-serialization ambiguity exists, and the envelope can carry payload types other than Claims. Verifiers must know the expected payload type; for tokens it is always Claims.
 
 ### HMAC-SHA384
-Keys are 48 bytes (the output size) to 128 bytes (the block size). HMAC hashes a longer key first, so it adds no strength. The key hash stays SHA-256: it keeps ML-DSA-44 tokens from before the change valid, and it must differ from the HMAC hash. With HMAC-SHA256, the identifier of a key over 64 bytes was the first 8 bytes of the effective HMAC key.
+Keys are 48 bytes (the output size) to 128 bytes (the block size). HMAC hashes a longer key first, so it adds no strength. The key hash stays SHA-256 so that it differs from the HMAC hash. With HMAC-SHA256, the identifier of a key over 64 bytes was the first 8 bytes of the effective HMAC key.
 
 ### Canonical Proto3 Serialization
 Canonical proto3 wire encoding with a small custom encoder/decoder (`src/proto3.rs`). This produces valid proto3 that any library can decode, while guaranteeing deterministic output.
 See [notes/research-protobuf-determinism.md](notes/research-protobuf-determinism.md).
 
 ### Post-Quantum Signatures
-Ed25519 was removed in November 2026. All schemes use pure mode and an empty context. See [notes/research-pq-signatures.md](notes/research-pq-signatures.md).
-- **ML-DSA** is the default (`ml-dsa-44`). Keys are 32-byte seeds. Signing is deterministic. Public keys with `t1 = 0` are rejected because anyone can sign for them.
+Ed25519 was removed in November 2026. All schemes use pure mode and the context string `protoken`. `Scheme::sign` and `verify` take the context as an argument so that the NIST vectors can run through them. See [notes/research-pq-signatures.md](notes/research-pq-signatures.md).
+- **ML-DSA** is the default (`ml-dsa-44`). Keys are 32-byte seeds. Signing is deterministic and uses the crate's hidden `expanded_key()`: the documented way to sign with a context copies the key to the stack and pushes ML-DSA-87 past 512 KB. Public keys with `t1 = 0` are rejected because anyone can sign for them.
 - **SLH-DSA** uses only the SHA2 "s" sets: tokens are sent and verified more often than signed, so size and verify time matter most. Keys use the FIPS 205 encoding (`SK.seed || SK.prf || PK.seed || PK.root`); loading recomputes the root with the crate's hidden `slh_keygen_internal`. Signing is deterministic and takes about a second, so the dev profile uses `opt-level = 2` and tests, fuzzers, and generators use these keys sparingly.
 - **FN-DSA** is randomized and stores the encoded key, not a seed, as NIST plans to require. Loading checks the embedded public key hash and must never sign: the sampler can run without bound on a crafted key. See [notes/research-fn-dsa.md](notes/research-fn-dsa.md).
 
@@ -129,7 +129,7 @@ Anything the library produces must be accepted by its own decoders. `sign_token`
 The 8-byte key hash (SHA-256[0..8]) gives ~2^32 collision resistance at the birthday bound. It is a key *identifier* for key selection, not a security binding. Security relies on full signature verification. Documented in the code and README.
 
 ### Key Reuse
-Keys used with protoken should not sign other formats. The signing input has no domain-separation prefix; the envelope structure itself (proto3 fields 1-5) is the only framing.
+Keys used with protoken should not sign other formats. The `protoken` context string separates ML-DSA, SLH-DSA, and FN-DSA token signatures from pure or pre-hash signatures under any other context, but not from a signer that accepts a raw internal message or `mu`. HMAC has no context, and a message prefix would not help against another protocol that MACs attacker-chosen bytes, so the envelope (proto3 fields 1-5) is its only framing.
 
 ## Implementation Status
 

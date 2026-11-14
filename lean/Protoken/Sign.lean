@@ -24,7 +24,7 @@ def signToken (algorithm : Algorithm) (secretKey : Bytes) (keyId : KeyIdentifier
   if payload.length > MAX_PAYLOAD_BYTES then
     throw .malformedEncoding
   let signingInput := serializeSigningInput .v0 algorithm keyId payload
-  let signature ← schemeSign C algorithm secretKey signingInput
+  let signature ← schemeSign C algorithm secretKey CONTEXT signingInput
   pure (appendSignature signingInput signature)
 
 end Protoken

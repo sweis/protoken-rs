@@ -85,7 +85,7 @@ uses `sorry` or any axiom other than `propext`, `Classical.choice`, and
 
 | Theorem | Statement |
 | --- | --- |
-| `verifyToken_sound`, `SigningKey.verify_sound`, `VerifyingKey.verify_sound` | An accepted token is the encoding of the returned algorithm, key identifier, and claims, followed by a signature that the primitive accepted over exactly those bytes under the caller's key. The identifier names the caller's key. The claims are valid and inside their time window. |
+| `verifyToken_sound`, `SigningKey.verify_sound`, `VerifyingKey.verify_sound` | An accepted token is the encoding of the returned algorithm, key identifier, and claims, followed by a signature that the primitive accepted over exactly those bytes under the caller's key and, for signature schemes, the `protoken` context. The identifier names the caller's key. The claims are valid and inside their time window. |
 | `accepted_result_determined_by_signing_input` | The signed bytes determine the whole result, across algorithms and keys. |
 | `accepted_same_token` | A byte string accepted twice, under any keys, was accepted under one algorithm with one result. So there is no algorithm confusion. |
 | `VerifyingKey.verify_asymmetric` | A verifying key accepts no HMAC token, so a public key is never used as a MAC secret. |
@@ -163,7 +163,8 @@ accepted and rejected. Both numbers should stay well above zero.
 SHA-256 and HMAC-SHA384 run in Lean (`Conformance/Sha256.lean`, `Sha384.lean`) and are
 themselves compared with the Rust crates. The signature schemes are not implemented in
 Lean. For those, each case carries the primitive's answer, which the generator obtains by calling the
-primitive directly on fields found by its own small wire parser.
+primitive directly on fields found by its own small wire parser. The answers hold only for the
+`protoken` context, which the generator and the runner each spell out for themselves.
 
 To check that the test can fail, 28 single-line bugs were planted in the model one
 at a time: off-by-one limits, swapped error variants, missing checks, and reordered
@@ -174,4 +175,5 @@ limit cases the generator has now.
 
 After the move to nine algorithms, 53 more bugs were planted, covering every size in the
 algorithm table, the new limits, and the order of the key checks. All were caught: 44 by
-the test and 9 because the model no longer built.
+the test and 9 because the model no longer built. So were 4 wrong algorithm IDs and 5
+wrong context strings.

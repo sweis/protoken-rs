@@ -12,7 +12,7 @@
 
 use subtle::ConstantTimeEq as _;
 
-use crate::crypto::scheme;
+use crate::crypto::{scheme, CONTEXT};
 use crate::error::ProtokenError;
 use crate::serialize::{deserialize_claims, deserialize_signed_token_at};
 use crate::sign::compute_key_hash;
@@ -36,7 +36,7 @@ pub(crate) fn verify_token(
     now: u64,
 ) -> Result<VerifiedToken, ProtokenError> {
     let (token, signing_input) = parse_envelope(token_bytes, algorithm, key_material)?;
-    if !scheme(algorithm).verify(key_material, signing_input, &token.signature) {
+    if !scheme(algorithm).verify(key_material, CONTEXT, signing_input, &token.signature) {
         return Err(ProtokenError::VerificationFailed(format!(
             "{algorithm} signature verification failed"
         )));
@@ -152,7 +152,7 @@ mod tests {
     fn raw_token(key: &SigningKey, key_id: &KeyIdentifier, payload: &[u8]) -> Vec<u8> {
         let input = serialize_signing_input(Version::V0, key.algorithm(), key_id, payload);
         let signature = scheme(key.algorithm())
-            .sign(key.secret_key(), &input)
+            .sign(key.secret_key(), CONTEXT, &input)
             .unwrap();
         append_signature(input, &signature)
     }
@@ -319,6 +319,19 @@ mod tests {
     }
 
     #[test]
+    fn test_signature_under_another_context_is_rejected() {
+        let payload = serialize_claims(&never_expires());
+        for algorithm in ASYMMETRIC {
+            let key = fixed_key(algorithm);
+            let key_id = key_hash_id(key.public_key());
+            let input = serialize_signing_input(Version::V0, algorithm, &key_id, &payload);
+            let signature = scheme(algorithm).sign(key.secret_key(), b"", &input);
+            let token = append_signature(input, &signature.unwrap());
+            assert!(is_verification_failure(key.verify(&token, 0), "signature"));
+        }
+    }
+
+    #[test]
     fn test_public_key_used_as_hmac_secret_is_rejected() {
         // The classic JWT attack: MAC a token with the verifier's public key.
         let payload = serialize_claims(&never_expires());
@@ -328,7 +341,7 @@ mod tests {
             let input =
                 serialize_signing_input(Version::V0, Algorithm::HmacSha384, &key_id, &payload);
             let tag = scheme(Algorithm::HmacSha384)
-                .sign(verifying_key.public_key(), &input)
+                .sign(verifying_key.public_key(), CONTEXT, &input)
                 .unwrap();
             let token = append_signature(input, &tag);
             assert!(is_verification_failure(

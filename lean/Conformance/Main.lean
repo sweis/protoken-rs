@@ -128,6 +128,10 @@ structure Oracle where
   /-- Signature over the case's signing input. -/
   signature : Bytes := []
 
+/-- The context that the generator passes to the primitives. The oracle has no answer
+for any other. -/
+def oracleContext : Bytes := "protoken".toUTF8.toList
+
 def fixLen (n : Nat) (b : Bytes) : Bytes := (b ++ List.replicate n 0).take n
 
 theorem fixLen_length (n : Nat) (b : Bytes) : (fixLen n b).length = n := by
@@ -141,11 +145,11 @@ def cryptoOf (o : Oracle) : Crypto where
   publicKey a _ := o.derived.filter fun pk => a.publicKeyLen = some pk.length
   publicKey_length _ _ _ h := by simpa using (Option.filter_eq_some_iff.mp h).2
   publicKeyValid _ _ := o.pkValid
-  sign a _ _ := some (fixLen a.signatureLen o.signature)
-  sign_length _ _ _ _ h := by
-    cases h
+  sign a _ ctx _ := if ctx = oracleContext then some (fixLen a.signatureLen o.signature) else none
+  sign_length _ _ _ _ _ h := by
+    split at h <;> cases h
     exact fixLen_length _ _
-  verify _ _ _ _ := o.sigOk
+  verify _ _ ctx _ _ := ctx == oracleContext && o.sigOk
 
 /-! ## Cases -/
 

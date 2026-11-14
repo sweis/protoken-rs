@@ -43,10 +43,11 @@ structure Accepted (C : Crypto) (algorithm : Algorithm) (keyMaterial tokenBytes 
   key_id_wf : ∀ pk, vt.keyIdentifier = .publicKey pk → vt.algorithm.publicKeyLen = some pk.length
   payload_len : (serializeClaims vt.claims).length ≤ MAX_PAYLOAD_BYTES
   /-- The token is the signing input rebuilt from the result, followed by a
-  signature field, and the primitive accepted that signature over that input. -/
+  signature field, and the primitive accepted that signature over that input
+  under the `protoken` context. -/
   signed : ∃ sig, sig.length = algorithm.signatureLen ∧
     tokenBytes = vt.signingInput ++ encodeBytes 6 sig ∧
-    schemeVerify C algorithm keyMaterial vt.signingInput sig = true
+    schemeVerify C algorithm keyMaterial CONTEXT vt.signingInput sig = true
 
 /-! ## Building blocks -/
 
@@ -206,8 +207,8 @@ theorem signToken_eq_ok_iff {alg : Algorithm} {secret : Bytes} {kid : KeyIdentif
     {c : Claims} {tb : Bytes} :
     signToken C alg secret kid c = .ok tb ↔
       c.Valid ∧ (serializeClaims c).length ≤ MAX_PAYLOAD_BYTES ∧
-      ∃ sig, schemeSign C alg secret (serializeSigningInput .v0 alg kid (serializeClaims c))
-          = .ok sig ∧
+      ∃ sig, schemeSign C alg secret CONTEXT
+          (serializeSigningInput .v0 alg kid (serializeClaims c)) = .ok sig ∧
         tb = serializeSignedToken ⟨.v0, alg, kid, serializeClaims c, sig⟩ := by
   simp only [signToken, bind_eq_ok, exists_unit, Claims.validate_eq_ok_iff, throw_eq_error,
     error_bind, pure_eq_ok, ite_error_eq_ok, Nat.not_lt, gt_iff_lt, Except.ok.injEq,
@@ -226,8 +227,8 @@ theorem verifyToken_signToken {alg : Algorithm} {secret km tb : Bytes} {c : Clai
     {kid : KeyIdentifier} {now : UInt64}
     (hs : signToken C alg secret kid c = .ok tb) (hk : kid.Matches C km)
     (hkid : ∀ pk, kid = .publicKey pk → alg.publicKeyLen = some pk.length)
-    (hpair : ∀ msg sig, schemeSign C alg secret msg = .ok sig →
-      schemeVerify C alg km msg sig = true)
+    (hpair : ∀ msg sig, schemeSign C alg secret CONTEXT msg = .ok sig →
+      schemeVerify C alg km CONTEXT msg sig = true)
     (hu : c.Utf8) (h1 : now ≤ c.expiresAt) (h2 : c.notBefore ≤ now) :
     verifyToken C alg km tb now = .ok ⟨alg, kid, { c with scopes := sortScopes c.scopes }⟩ := by
   obtain ⟨hv, hsize, sig, hsig, rfl⟩ := signToken_eq_ok_iff.mp hs
@@ -246,7 +247,7 @@ envelope with a bad signature gets `verificationFailed`, never an error about cl
 theorem verifyToken_bad_signature {km : Bytes} {t : SignedToken} {now : UInt64}
     (hw : t.WireValid) (hid : t.keyIdentifier.Matches C km)
     (hlen : t.signature.length = t.algorithm.signatureLen)
-    (hbad : schemeVerify C t.algorithm km
+    (hbad : schemeVerify C t.algorithm km CONTEXT
       (serializeSigningInput t.version t.algorithm t.keyIdentifier t.payload) t.signature = false) :
     verifyToken C t.algorithm km (serializeSignedToken t) now = .error .verificationFailed := by
   simp only [verifyToken, ok_bind, parseEnvelope_complete (C := C) hw rfl hid hlen]

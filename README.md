@@ -8,17 +8,17 @@ Supports a NIST MAC and the NIST post-quantum signatures:
 
 | ID | Name | Standard | NIST level | Secret key | Public key | Signature |
 |---|---|---|---|---|---|---|
-| 3 | `ml-dsa-44` | FIPS 204 | 2 | 32 (seed) | 1,312 | 2,420 |
-| 4 | `ml-dsa-65` | FIPS 204 | 3 | 32 (seed) | 1,952 | 3,309 |
-| 5 | `ml-dsa-87` | FIPS 204 | 5 | 32 (seed) | 2,592 | 4,627 |
-| 6 | `hmac-sha384` | FIPS 198-1 | n/a | 48-128 | none | 48 |
-| 7 | `slh-dsa-sha2-128s` | FIPS 205 | 1 | 64 | 32 | 7,856 |
-| 8 | `slh-dsa-sha2-192s` | FIPS 205 | 3 | 96 | 48 | 16,224 |
-| 9 | `slh-dsa-sha2-256s` | FIPS 205 | 5 | 128 | 64 | 29,792 |
-| 10 | `fn-dsa-512` | FIPS 206 (unpublished) | 1 | 1,345 | 897 | 666 |
-| 11 | `fn-dsa-1024` | FIPS 206 (unpublished) | 5 | 2,369 | 1,793 | 1,280 |
+| 1 | `hmac-sha384` | FIPS 198-1 | n/a | 48-128 | none | 48 |
+| 2 | `ml-dsa-44` | FIPS 204 | 2 | 32 (seed) | 1,312 | 2,420 |
+| 3 | `ml-dsa-65` | FIPS 204 | 3 | 32 (seed) | 1,952 | 3,309 |
+| 4 | `ml-dsa-87` | FIPS 204 | 5 | 32 (seed) | 2,592 | 4,627 |
+| 5 | `slh-dsa-sha2-128s` | FIPS 205 | 1 | 64 | 32 | 7,856 |
+| 6 | `slh-dsa-sha2-192s` | FIPS 205 | 3 | 96 | 48 | 16,224 |
+| 7 | `slh-dsa-sha2-256s` | FIPS 205 | 5 | 128 | 64 | 29,792 |
+| 8 | `fn-dsa-512` | FIPS 206 (unpublished) | 1 | 1,345 | 897 | 666 |
+| 9 | `fn-dsa-1024` | FIPS 206 (unpublished) | 5 | 2,369 | 1,793 | 1,280 |
 
-Sizes are in bytes. IDs 1 (HMAC-SHA256) and 2 (Ed25519) are retired and must not be reused.
+Sizes are in bytes.
 
 **FN-DSA is experimental.** FIPS 206 has not been published, so FN-DSA keys and
 tokens may stop working in a later release. FN-DSA has no level 3 parameter set.
@@ -210,7 +210,8 @@ canonical, the signed bytes are exactly the token bytes minus the signature
 field. Binding the algorithm and key identifier into the signature prevents
 algorithm-confusion and key-substitution attacks.
 
-All signatures use the pure (no pre-hash) mode with an empty context string.
+ML-DSA, SLH-DSA, and FN-DSA use the pure (no pre-hash) mode with the context
+string `protoken`, so a signature made under another context does not verify as a token.
 ML-DSA and SLH-DSA use their deterministic variants. FN-DSA is always randomized.
 
 The 8-byte key hash is `SHA-256(key_material)[0..8]`. It is a key selection
@@ -218,10 +219,78 @@ identifier, not a security binding: security rests on full signature
 verification. Verifiers additionally compare the key identifier against their
 own key in constant time before verifying the signature.
 
-Keys used with protoken should not be reused to sign other formats.
+Keys used with protoken should not be reused to sign other formats. The context
+string does not help against a signer that accepts a raw internal message or `mu`
+value, and HMAC has no context string.
 
 Verification checks the signature and the time window (`not_before <= now <=
 expires_at`). The caller must check `audience` and `scope`.
+
+### Verify with OpenSSL
+
+OpenSSL 3.5 or later can check ML-DSA, SLH-DSA, and HMAC tokens, but not FN-DSA.
+The commands below were tested with 3.6.
+This checks the signature only, not the algorithm, key identifier, canonical
+encoding, or claims.
+
+Split the token into the signed bytes and the signature. `PK` and `SIG` are the
+sizes from the algorithm table. `HDR` is the tag and length of the signature field:
+2 bytes for HMAC, 4 for `slh-dsa-sha2-256s`, and 3 for the rest.
+
+```sh
+# Decode unpadded URL-safe base64.
+decode() {
+  tr -d '\n' < "$1" | tr '_-' '/+' | awk '{ while (length($0) % 4) $0 = $0 "="; print }' |
+    openssl base64 -d -A
+}
+
+split_token() {
+  decode demo.token > token.bin
+  head -c $(($(wc -c < token.bin) - SIG - HDR)) token.bin > signed.bin
+  tail -c $SIG token.bin > signature.bin
+}
+```
+
+For ML-DSA and SLH-DSA, wrap the raw public key in a SubjectPublicKeyInfo and pass
+the context string:
+
+```sh
+ALG=ml-dsa-44 PK=1312 SIG=2420 HDR=3
+
+protoken generate-key -a $ALG > demo.key
+protoken get-verifying-key demo.key > demo.pub
+protoken sign demo.key 1h > demo.token
+split_token
+
+cat > spki.cnf <<EOF
+asn1 = SEQUENCE:spki
+[spki]
+algorithm = SEQUENCE:algorithm
+key = FORMAT:HEX,BITSTRING:$(decode demo.pub | tail -c $PK | xxd -p | tr -d '\n')
+[algorithm]
+oid = OID:id-$ALG
+EOF
+openssl asn1parse -genconf spki.cnf -noout -out public.der
+
+openssl pkeyutl -verify -pubin -inkey public.der -rawin -in signed.bin \
+  -sigfile signature.bin -pkeyopt context-string:protoken
+# Signature Verified Successfully
+```
+
+For HMAC, recompute the tag. Generated keys are 48 bytes. The key is visible to
+other local users while the command runs, so use a test key.
+
+```sh
+SIG=48 HDR=2
+
+protoken generate-key -a hmac > demo.key
+protoken sign demo.key 1h > demo.token
+split_token
+
+openssl mac -digest SHA384 -binary -in signed.bin \
+  -macopt hexkey:$(decode demo.key | tail -c 48 | xxd -p | tr -d '\n') HMAC |
+  cmp - signature.bin && echo "Tag matches"
+```
 
 ### Token sizes
 

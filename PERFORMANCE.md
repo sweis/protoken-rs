@@ -10,8 +10,8 @@ with AVX2 but without SHA extensions.
 | ml-dsa-44 | 214 µs | 606 µs | 143 µs | 2,445 B |
 | ml-dsa-65 | 349 µs | 1.2 ms | 229 µs | 3,334 B |
 | ml-dsa-87 | 538 µs | 1.35 ms | 373 µs | 4,652 B |
-| fn-dsa-512 | 3.72 ms | 390 µs | 25.5 µs | 691 B |
-| fn-dsa-1024 | 16.2 ms | 804 µs | 49.3 µs | 1,305 B |
+| fn-dsa-512 | 3.35 ms | 382 µs | 26.8 µs | 691 B |
+| fn-dsa-1024 | 15.7 ms | 763 µs | 51.8 µs | 1,305 B |
 | slh-dsa-sha2-128s | 217 ms | 829 ms | 828 µs | 7,881 B |
 | slh-dsa-sha2-192s | 316 ms | 1.43 s | 1.19 ms | 16,249 B |
 | slh-dsa-sha2-256s | 210 ms | 1.27 s | 1.72 ms | 29,818 B |
